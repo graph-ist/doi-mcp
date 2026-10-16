@@ -1186,6 +1186,135 @@ async def get_metadata(identifier: str) -> dict:
     return out
 
 
+CG_SELECT = ("id,doi,title,publication_year,cited_by_count,authorships,primary_topic,"
+             "referenced_works")
+
+
+def _oa_id(url: str | None) -> str | None:
+    return url.rsplit("/", 1)[-1].upper() if url else None
+
+
+def _cg_node(it: dict) -> dict:
+    auth = it.get("authorships") or []
+    return {"id": _oa_id(it.get("id")), "doi": _clean_doi(it.get("doi")), "title": it.get("title"),
+            "first_author": (auth[0].get("author") or {}).get("display_name") if auth else None,
+            "year": it.get("publication_year"), "cited_by": it.get("cited_by_count") or 0,
+            "field": ((it.get("primary_topic") or {}).get("field") or {}).get("display_name"),
+            "refs": [_oa_id(r) for r in it.get("referenced_works") or []]}
+
+
+async def _oa_get(path: str, **params) -> dict:
+    if EMAIL:
+        params["mailto"] = EMAIL
+    r = await _http().get(f"https://api.openalex.org/{path}", params=params)
+    r.raise_for_status()
+    return r.json()
+
+
+async def _cg_seed(s: str) -> dict:
+    s = s.strip()
+    if re.fullmatch(r"(?:https://openalex\.org/)?W\d+", s, re.I):
+        return _cg_node(await _oa_get(f"works/{_oa_id(s)}", select=CG_SELECT))
+    d = _clean_doi(s)
+    if not d:
+        raise ValueError("not a DOI or OpenAlex id")
+    return _cg_node(await _oa_get(f"works/doi:{_doi_path(d)}", select=CG_SELECT))
+
+
+@mcp.tool()
+async def citation_graph(seeds: list[str], include_references: bool = True,
+                         include_citing: bool = True, citing_per_seed: int = 20,
+                         max_nodes: int = 150, min_cocitation: int = 2) -> dict:
+    """Build a citation graph around seed works (DOIs or OpenAlex ids, max 10) for visualization.
+
+    Nodes are the seeds, the works they cite (role 'reference') and the most-cited works
+    citing them (role 'citing'), ranked by how many seeds they connect to, then by citation
+    count, up to max_nodes. Each node has id, doi, title, first_author, year, cited_by
+    (OpenAlex citation count), field (OpenAlex primary field) and role.
+    'citation_edges' are [citing_id, cited_id] pairs inside the graph. 'cocitation' lists
+    [id_a, id_b, n] where n works in this graph cite both; computed on this sample, not the
+    whole literature, so n is a lower bound.
+
+    To visualize, build a D3 artifact with two views: (1) timeline, x = year, y = cited_by
+    on a log scale, arrows for citation_edges, seeds highlighted, colour by field;
+    (2) co-citation network, force layout with cocitation pairs as links weighted by n,
+    isolated nodes hidden. Tell the reader that distances in a force layout have no metric
+    meaning and that citation counts favour older works. OpenAlex reference lists are
+    incomplete for many humanities and older works: 'log.seeds_without_references' flags them.
+    """
+    seeds = seeds[:10]
+    citing_per_seed = max(0, min(citing_per_seed, 100))
+    max_nodes = max(len(seeds), min(max_nodes, 300))
+    errors: list[str] = []
+    nodes: dict[str, dict] = {}
+    for s, r in zip(seeds, await asyncio.gather(*map(_cg_seed, seeds), return_exceptions=True)):
+        if isinstance(r, Exception):
+            errors.append(_err(s, r))
+        else:
+            nodes[r["id"]] = {**r, "role": "seed"}
+    if not nodes:
+        return {"status": "not_found", "source_errors": errors}
+    seed_ids = list(nodes)
+
+    others: dict[str, dict] = {}
+    linked: dict[str, set[str]] = {}
+    if include_citing and citing_per_seed:
+        res = await asyncio.gather(*(
+            _oa_get("works", filter=f"cites:{sid}", sort="cited_by_count:desc",
+                    select=CG_SELECT, **{"per-page": citing_per_seed}) for sid in seed_ids),
+            return_exceptions=True)
+        for sid, r in zip(seed_ids, res):
+            if isinstance(r, Exception):
+                errors.append(_err(f"citing {sid}", r))
+                continue
+            for n in map(_cg_node, r.get("results", [])):
+                if n["id"] not in nodes:
+                    others.setdefault(n["id"], {**n, "role": "citing"})
+                    linked.setdefault(n["id"], set()).add(sid)
+    if include_references:
+        for sid in seed_ids:
+            for rid in nodes[sid]["refs"]:
+                if rid and rid not in nodes:
+                    linked.setdefault(rid, set()).add(sid)
+        todo = [rid for rid in linked if rid not in others]
+        res = await asyncio.gather(*(
+            _oa_get("works", filter="openalex:" + "|".join(todo[i:i + 50]), select=CG_SELECT,
+                    **{"per-page": 50}) for i in range(0, len(todo), 50)),
+            return_exceptions=True)
+        for r in res:
+            if isinstance(r, Exception):
+                errors.append(_err("references", r))
+                continue
+            for n in map(_cg_node, r.get("results", [])):
+                others.setdefault(n["id"], {**n, "role": "reference"})
+
+    ranked = sorted(others.values(), key=lambda n: (len(linked.get(n["id"], ())), n["cited_by"]),
+                    reverse=True)
+    room = max_nodes - len(nodes)
+    nodes.update((n["id"], n) for n in ranked[:room])
+
+    edges, cocit = [], {}
+    for n in nodes.values():
+        inside = sorted({r for r in n["refs"] if r in nodes and r != n["id"]})
+        edges += [[n["id"], r] for r in inside]
+        for i, a in enumerate(inside):
+            for b in inside[i + 1:]:
+                cocit[(a, b)] = cocit.get((a, b), 0) + 1
+    pairs = sorted(([a, b, w] for (a, b), w in cocit.items() if w >= min_cocitation),
+                   key=lambda p: -p[2])[:500]
+    return {
+        "status": "ok",
+        "nodes": [{k: v for k, v in n.items() if k != "refs"} for n in nodes.values()],
+        "citation_edges": edges, "cocitation": pairs,
+        "log": {"source": "OpenAlex", "seeds": seed_ids, "nodes": len(nodes),
+                "citation_edges": len(edges), "cocitation_pairs": len(pairs),
+                "min_cocitation": min_cocitation, "candidates_dropped": max(0, len(ranked) - room),
+                "seeds_without_references": [s for s in seed_ids if not nodes[s]["refs"]],
+                "executed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+        "source_errors": errors,
+    }
+
+
 class _TokenAuth:
     """Bearer header or ?token= query: Claude web connectors cannot send custom headers."""
 
