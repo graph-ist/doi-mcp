@@ -1,0 +1,19 @@
+[project]
+name = "paper-doi-mcp"
+version = "0.2.0"
+description = "MCP server that resolves and verifies DOIs and book editions, and searches the scholarly literature across open indexes"
+requires-python = ">=3.10"
+dependencies = ["mcp[cli]>=1.2.0,<2", "httpx>=0.27"]
+
+[project.scripts]
+paper-doi-mcp = "server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["server.py"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
