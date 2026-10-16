@@ -4,9 +4,14 @@ Sources: Crossref (authoritative for DOI registration), Semantic Scholar, OpenAl
 Env (optional):
   CONTACT_EMAIL            used for Crossref/OpenAlex polite pool
   SEMANTIC_SCHOLAR_API_KEY raises Semantic Scholar rate limits
+  MCP_TRANSPORT            'stdio' (default) or 'http' (streamable HTTP on 127.0.0.1)
+  PORT                     HTTP port, default 3002
+  MCP_AUTH_TOKEN           required in http mode, as Bearer header or ?token= query
+  MCP_ALLOWED_HOSTS        comma-separated public host names allowed behind a proxy
 """
 
 import asyncio
+import hmac
 import html
 import os
 import re
@@ -16,13 +21,19 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 VERSION = "0.2.0"
-mcp = FastMCP("paper-doi")
+_PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+mcp = FastMCP("paper-doi", stateless_http=True, transport_security=TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", *_PUBLIC_HOSTS],
+    allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*",
+                     *(f"https://{h}" for h in _PUBLIC_HOSTS)]))
 
 EMAIL = os.environ.get("CONTACT_EMAIL", "")
 S2_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
@@ -1175,8 +1186,35 @@ async def get_metadata(identifier: str) -> dict:
     return out
 
 
+class _TokenAuth:
+    """Bearer header or ?token= query: Claude web connectors cannot send custom headers."""
+
+    def __init__(self, app, token: str):
+        self.app, self.token = app, token.encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            header = dict(scope["headers"]).get(b"authorization", b"")
+            bearer = header[7:] if header[:7].lower() == b"bearer " else b""
+            query = parse_qs(scope.get("query_string", b"").decode()).get("token", [""])[0].encode()
+            if not (hmac.compare_digest(bearer, self.token) or hmac.compare_digest(query, self.token)):
+                from starlette.responses import JSONResponse
+                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def main() -> None:
-    mcp.run()
+    if os.environ.get("MCP_TRANSPORT", "stdio") != "http":
+        mcp.run()
+        return
+    import uvicorn
+    token = os.environ.get("MCP_AUTH_TOKEN", "")
+    if len(token) < 32:
+        raise SystemExit("MCP_AUTH_TOKEN of at least 32 characters is required in http mode")
+    # Access log off: the token travels in the query string
+    uvicorn.run(_TokenAuth(mcp.streamable_http_app(), token), host="127.0.0.1",
+                port=int(os.environ.get("PORT", "3002")), access_log=False)
 
 
 if __name__ == "__main__":
