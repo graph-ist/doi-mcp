@@ -1433,37 +1433,46 @@ def _opt(text: str, empty: str) -> str:
 
 @mcp.prompt(name="trova_doi", title="Trova e verifica un DOI")
 def prompt_find_doi(
-    reference: Annotated[str, Field(description="Il riferimento come lo ricordi: titolo, "
-                                    "autore, anno, anche incompleto o in disordine")],
+    reference: Annotated[str, Field(description="Il riferimento come lo ricordi; lascia vuoto "
+                                    "per tutti quelli in chat senza DOI")] = "",
 ) -> str:
-    return ("Ecco un riferimento come lo ricordo, forse incompleto o impreciso. Ricava titolo, "
-            "primo autore e anno, trova il DOI con find_doi (is_book=true se è un libro, e in "
-            "quel caso verifica l'edizione con verify_book), controllalo con verify_doi e dammi "
-            "il riferimento APA con format_apa. Se ci sono più candidati plausibili, mostrameli "
-            f"invece di sceglierne uno.\n\n{reference}\n\n{PROMPT_RULES}")
+    target = (f"Ecco un riferimento come lo ricordo, forse incompleto o impreciso:\n\n{reference}"
+              if reference.strip() else
+              "Prendi tutti i riferimenti citati in questa conversazione che non hanno ancora "
+              "un DOI verificato.")
+    return (f"{target}\n\nPer ciascuno ricava titolo, primo autore e anno, trova il DOI con "
+            "find_doi (is_book=true se è un libro, e in quel caso verifica l'edizione con "
+            "verify_book), controllalo con verify_doi e dammi il riferimento APA con format_apa. "
+            "Se ci sono più candidati plausibili, mostrameli invece di sceglierne uno. Con più "
+            "riferimenti, chiudi con la lista APA aggiornata.\n\n" + PROMPT_RULES)
 
 
 @mcp.prompt(name="verifica_doi", title="Verifica un DOI")
 def prompt_verify_doi(
-    doi: Annotated[str, Field(description="Il DOI o il link doi.org")],
+    doi: Annotated[str, Field(description="Il DOI o il link doi.org; lascia vuoto per tutti "
+                              "i DOI in chat")] = "",
     reference: Annotated[str, Field(description="Facoltativo: a quale lavoro pensi che "
                                     "corrisponda")] = "",
 ) -> str:
-    return ("Verifica questo DOI con verify_doi. Se ti dico a quale lavoro dovrebbe "
-            "corrispondere, passa titolo, autore e anno come valori attesi e dimmi se coincide. "
-            "Segnala ritrattazioni e metadati da correggere.\n\n"
-            f"DOI: {doi}\nLavoro atteso: {_opt(reference, 'non indicato')}\n\n{PROMPT_RULES}")
+    target = (f"DOI: {doi}\nLavoro atteso: {_opt(reference, 'non indicato')}" if doi.strip()
+              else "Prendi tutti i DOI presenti in questa conversazione, ciascuno con il "
+                   "lavoro a cui è associato.")
+    return ("Verifica con verify_doi, passando titolo, autore e anno del lavoro atteso come "
+            "valori attesi, e dimmi se coincidono. Segnala ritrattazioni e metadati da "
+            f"correggere.\n\n{target}\n\n{PROMPT_RULES}")
 
 
 @mcp.prompt(name="verifica_libro", title="Verifica un libro")
 def prompt_verify_book(
-    reference: Annotated[str, Field(description="Il libro come lo ricordi: titolo, autore, "
-                                    "anno, editore, anche incompleto")],
+    reference: Annotated[str, Field(description="Il libro come lo ricordi; lascia vuoto per "
+                                    "tutti i libri citati in chat")] = "",
 ) -> str:
-    return ("Ecco un libro come lo ricordo. Verifica l'edizione con verify_book e cerca un DOI "
-            "con find_doi (is_book=true, anno dell'edizione citata). Correggi editore e anno con "
-            "i valori restituiti, dimmi quanti cataloghi concordano e dammi il riferimento APA."
-            f"\n\n{reference}\n\n{PROMPT_RULES}")
+    target = (f"Ecco un libro come lo ricordo:\n\n{reference}" if reference.strip() else
+              "Prendi tutti i libri citati in questa conversazione.")
+    return (f"{target}\n\nVerifica l'edizione con verify_book e cerca un DOI con find_doi "
+            "(is_book=true, anno dell'edizione citata). Correggi editore e anno con i valori "
+            "restituiti, dimmi quanti cataloghi concordano e dammi il riferimento APA.\n\n"
+            + PROMPT_RULES)
 
 
 @mcp.prompt(name="verifica_bibliografia", title="Verifica una bibliografia")

@@ -21,9 +21,9 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 
 | Prompt | Campi | Cosa fa |
 |---|---|---|
-| Trova e verifica un DOI | riferimento come lo ricordi | `find_doi` → `verify_doi` → `format_apa` (e `verify_book` se è un libro) |
-| Verifica un DOI | DOI; facoltativo: a quale lavoro dovrebbe corrispondere | `verify_doi` con i valori attesi |
-| Verifica un libro | libro come lo ricordi | `verify_book` e `find_doi` con `is_book=true` |
+| Trova e verifica un DOI | riferimento come lo ricordi, o vuoto per tutti quelli in chat senza DOI | `find_doi` → `verify_doi` → `format_apa` (e `verify_book` se è un libro) |
+| Verifica un DOI | DOI e, facoltativo, il lavoro atteso; o vuoto per tutti i DOI in chat | `verify_doi` con i valori attesi |
+| Verifica un libro | libro come lo ricordi, o vuoto per tutti i libri in chat | `verify_book` e `find_doi` con `is_book=true` |
 | Verifica una bibliografia | bibliografia incollata, o vuoto per quella nella conversazione | Verifica voce per voce, tabella degli esiti e bibliografia APA corretta |
 | Ricerca letteratura | tema con parole tue; facoltativo: anni | Claude costruisce la query e sceglie i database; `search_literature` con tabella e log |
 | Mappa delle citazioni | DOI o titoli, o vuoto per i lavori di cui si sta parlando | `citation_graph` e artifact D3; poi le possibili letture mancanti |
