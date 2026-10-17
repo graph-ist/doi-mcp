@@ -85,3 +85,18 @@ def test_page_ranges():
 def test_error_message_never_empty():
     import httpx
     assert s._err("crossref", httpx.ReadTimeout("")) == "crossref: ReadTimeout"
+
+
+def test_graph_links():
+    nodes = {
+        "S": {"id": "S", "refs": ["A", "B", "X"]},
+        "C": {"id": "C", "refs": ["A", "B", "S", "X"]},
+        "A": {"id": "A", "refs": []},
+        "B": {"id": "B", "refs": ["Y"]},
+    }
+    edges, cocit, coupling = s._graph_links(nodes, ["S"], min_cocitation=2, min_coupling=2)
+    assert ["C", "S"] in edges and ["S", "A"] in edges
+    assert ["A", "B", 2] in cocit
+    # S and C share A, B and X in their full reference lists
+    assert coupling[0][:3] == ["C", "S", 3] and 0 < coupling[0][3] <= 1
+    assert nodes["C"]["seeds_linked"] == 1 and nodes["S"]["seeds_linked"] == 0

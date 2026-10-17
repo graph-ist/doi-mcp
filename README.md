@@ -12,7 +12,8 @@ Server MCP per verificare citazioni accademiche e cercare letteratura. Risolve e
 | `format_apa` | Restituisce il riferimento APA di un DOI tramite content negotiation. `unsupported` se l'agenzia di registrazione non lo offre. | doi.org |
 | `search_literature` | Ricerca con sintassi booleana su uno o più database, con abstract e keyword, deduplicazione e log riproducibile delle query. | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo |
 | `get_metadata` | Abstract, keyword, topic, citazioni e accesso aperto per un DOI o un identificativo arXiv. | OpenAlex, Semantic Scholar, arXiv |
-| `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione e coppie co-citate. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di co-citazione). | OpenAlex |
+| `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione, coppie co-citate e accoppiamento bibliografico (riferimenti in comune). Per ogni nodo indica a quanti seed è collegato. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di somiglianza). | OpenAlex |
+| `paper_table` | Righe di dettaglio per una lista di DOI o id OpenAlex (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), Semantic Scholar (una richiesta batch) |
 
 ## Prompt (scorciatoie)
 
@@ -25,7 +26,8 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 | Verifica un libro | titolo, primo autore, anno, editore, ISBN | `verify_book` e `find_doi` con `is_book=true` |
 | Verifica una bibliografia | lista di riferimenti | Verifica voce per voce, tabella degli esiti e bibliografia APA corretta |
 | Ricerca letteratura | query, database, anni | `search_literature` con tabella dei risultati e log |
-| Mappa delle citazioni | seed, numero massimo di nodi | `citation_graph` e artifact D3 con timeline e rete di co-citazione, zoom e pan, tooltip |
+| Mappa delle citazioni | seed, numero massimo di nodi | `citation_graph` e artifact D3 con timeline e rete di somiglianza (co-citazione o accoppiamento), zoom e pan, tooltip; poi elenca le possibili letture mancanti |
+| Tabella dei paper | DOI o id OpenAlex | `paper_table` con tabella compatta; abstract completi su richiesta |
 
 ## Come recupera e confronta i dati
 
@@ -39,7 +41,7 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 - Errata, avvisi di ritrattazione, peer review e repliche vengono scartati (`excluded_derivatives`).
 - Le fonti secondarie ricavano i DOI in buona parte da Crossref: la presenza di un DOI in più indici non è una conferma indipendente.
 
-**Grafo di citazione.** `citation_graph` parte dai lavori seed, scarica i loro riferimenti e i lavori citanti più citati, ordina i candidati per numero di seed collegati e poi per citazioni, e tiene i primi `max_nodes`. Le co-citazioni sono calcolate solo sui lavori presenti nel grafo, quindi sono un limite inferiore.
+**Grafo di citazione.** `citation_graph` parte dai lavori seed, scarica i loro riferimenti e i lavori citanti più citati, ordina i candidati per numero di seed collegati e poi per citazioni, e tiene i primi `max_nodes`. Le co-citazioni sono calcolate solo sui lavori presenti nel grafo, quindi sono un limite inferiore. L'accoppiamento usa le liste di riferimenti complete e riporta sia il numero di riferimenti condivisi sia una forza normalizzata (0–1); collega anche i lavori recenti, che non hanno ancora co-citazioni. Un accoppiamento molto alto tra due nodi può indicare due record dello stesso lavoro.
 
 ## Limiti noti
 

@@ -1221,24 +1221,66 @@ async def _cg_seed(s: str) -> dict:
     return _cg_node(await _oa_get(f"works/doi:{_doi_path(d)}", select=CG_SELECT))
 
 
+def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: int,
+                 min_coupling: int) -> tuple[list, list, list]:
+    """Citation edges, co-citation and coupling pairs; also sets each node's 'seeds_linked'."""
+    edges, cocit, citers = [], {}, {}
+    for n in nodes.values():
+        inside = sorted({r for r in n["refs"] if r in nodes and r != n["id"]})
+        edges += [[n["id"], r] for r in inside]
+        for i, a in enumerate(inside):
+            for b in inside[i + 1:]:
+                cocit[(a, b)] = cocit.get((a, b), 0) + 1
+        for r in set(n["refs"]):
+            citers.setdefault(r, []).append(n["id"])
+    shared: dict[tuple[str, str], int] = {}
+    for ids in citers.values():
+        ids.sort()
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                shared[(a, b)] = shared.get((a, b), 0) + 1
+    size = {k: len(set(n["refs"])) for k, n in nodes.items()}
+    coupling = sorted(([a, b, w, round(w / (size[a] * size[b]) ** 0.5, 3)]
+                       for (a, b), w in shared.items() if w >= min_coupling),
+                      key=lambda p: -p[3])[:500]
+    cocitation = sorted(([a, b, w] for (a, b), w in cocit.items() if w >= min_cocitation),
+                        key=lambda p: -p[2])[:500]
+    seeds, linked = set(seed_ids), {k: set() for k in nodes}
+    for a, b in edges:
+        if a in seeds:
+            linked[b].add(a)
+        if b in seeds:
+            linked[a].add(b)
+    for k, n in nodes.items():
+        n["seeds_linked"] = len(linked[k] - {k})
+    return edges, cocitation, coupling
+
+
 @mcp.tool()
 async def citation_graph(seeds: list[str], include_references: bool = True,
                          include_citing: bool = True, citing_per_seed: int = 20,
-                         max_nodes: int = 150, min_cocitation: int = 2) -> dict:
+                         max_nodes: int = 150, min_cocitation: int = 2,
+                         min_coupling: int = 3) -> dict:
     """Build a citation graph around seed works (DOIs or OpenAlex ids, max 10) for visualization.
 
     Nodes are the seeds, the works they cite (role 'reference') and the most-cited works
     citing them (role 'citing'), ranked by how many seeds they connect to, then by citation
     count, up to max_nodes. Each node has id, doi, title, first_author, year, cited_by
-    (OpenAlex citation count), field (OpenAlex primary field) and role.
+    (OpenAlex citation count), field (OpenAlex primary field), role and seeds_linked (how
+    many seeds it cites or is cited by; a non-seed linked to several seeds is a likely
+    missing reading).
     'citation_edges' are [citing_id, cited_id] pairs inside the graph. 'cocitation' lists
     [id_a, id_b, n] where n works in this graph cite both; computed on this sample, not the
-    whole literature, so n is a lower bound.
+    whole literature, so n is a lower bound. 'coupling' lists [id_a, id_b, shared, strength]:
+    the two works share 'shared' references in their full reference lists, and strength =
+    shared / sqrt(refs_a * refs_b) in 0-1. Coupling links recent works that nobody has
+    co-cited yet. Use paper_table with node ids for abstracts and keywords.
 
     To visualize, build a D3 artifact with two views: (1) timeline, x = year, y = cited_by
     on a log scale, arrows for citation_edges, seeds highlighted, colour by field;
-    (2) co-citation network, force layout with cocitation pairs as links weighted by n,
-    isolated nodes hidden. Enable d3.zoom on both (wheel/pinch to zoom, drag to pan,
+    (2) similarity network, force layout with a toggle between cocitation (weight n) and
+    coupling (weight strength), node size by seeds_linked, isolated nodes hidden.
+    Enable d3.zoom on both (wheel/pinch to zoom, drag to pan,
     double-click or a button to reset); on the timeline rescale the axes instead of
     scaling the marks, and show titles only for seeds or once zoomed in.
     Tell the reader that distances in a force layout have no metric
@@ -1296,26 +1338,75 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
     room = max_nodes - len(nodes)
     nodes.update((n["id"], n) for n in ranked[:room])
 
-    edges, cocit = [], {}
-    for n in nodes.values():
-        inside = sorted({r for r in n["refs"] if r in nodes and r != n["id"]})
-        edges += [[n["id"], r] for r in inside]
-        for i, a in enumerate(inside):
-            for b in inside[i + 1:]:
-                cocit[(a, b)] = cocit.get((a, b), 0) + 1
-    pairs = sorted(([a, b, w] for (a, b), w in cocit.items() if w >= min_cocitation),
-                   key=lambda p: -p[2])[:500]
+    edges, pairs, coupling = _graph_links(nodes, seed_ids, min_cocitation, min_coupling)
     return {
         "status": "ok",
         "nodes": [{k: v for k, v in n.items() if k != "refs"} for n in nodes.values()],
-        "citation_edges": edges, "cocitation": pairs,
+        "citation_edges": edges, "cocitation": pairs, "coupling": coupling,
         "log": {"source": "OpenAlex", "seeds": seed_ids, "nodes": len(nodes),
                 "citation_edges": len(edges), "cocitation_pairs": len(pairs),
-                "min_cocitation": min_cocitation, "candidates_dropped": max(0, len(ranked) - room),
+                "coupling_pairs": len(coupling), "min_cocitation": min_cocitation,
+                "min_coupling": min_coupling, "candidates_dropped": max(0, len(ranked) - room),
                 "seeds_without_references": [s for s in seed_ids if not nodes[s]["refs"]],
                 "executed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
         "source_errors": errors,
     }
+
+
+@mcp.tool()
+async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -> dict:
+    """Detail rows for a list of works: abstract, keywords, topics, TL;DR, venue, OA, retraction.
+
+    ids: DOIs or OpenAlex ids (max 300), e.g. node ids from citation_graph or DOIs from
+    search_literature. Fetched from OpenAlex in batches of 50; missing abstracts and TL;DRs
+    come from one Semantic Scholar batch request. Rows keep the input order; unresolved ids
+    are listed in 'not_found'. Abstracts are long: for many works show a compact table
+    (title, year, citations, TL;DR) and give abstracts and keywords on request.
+    """
+    ids = list(dict.fromkeys(i.strip() for i in ids if i and i.strip()))[:300]
+    is_oa = lambda i: re.fullmatch(r"(?:https://openalex\.org/)?W\d+", i, re.I)
+    want_oa = [_oa_id(i) for i in ids if is_oa(i)]
+    want_doi = [d for i in ids if not is_oa(i) and (d := _clean_doi(i))]
+    # '|' and ',' are filter separators in OpenAlex, so such DOIs are fetched one by one
+    batchable = [d for d in want_doi if not re.search(r"[|,]", d)]
+    singles = [d for d in want_doi if re.search(r"[|,]", d)]
+    queries = (["openalex:" + "|".join(want_oa[k:k + 50]) for k in range(0, len(want_oa), 50)]
+               + ["doi:" + "|".join(batchable[k:k + 50]) for k in range(0, len(batchable), 50)])
+    res = await asyncio.gather(
+        *(_oa_get("works", filter=q, select=OA_SELECT, **{"per-page": 50}) for q in queries),
+        *(_oa_get(f"works/doi:{_doi_path(d)}", select=OA_SELECT) for d in singles),
+        return_exceptions=True)
+    by_id, by_doi, errors = {}, {}, []
+    for r in res:
+        if isinstance(r, httpx.HTTPStatusError) and r.response.status_code == 404:
+            continue
+        if isinstance(r, Exception):
+            errors.append(_err("openalex", r))
+            continue
+        for it in r.get("results", [r]):
+            rec = _oa_record(it)
+            rec["id"] = _oa_id(rec.pop("openalex_id"))
+            if len(rec["authors"]) > 10:
+                rec["authors"] = rec["authors"][:10] + ["et al."]
+            rec.setdefault("tldr", None)
+            by_id[rec["id"]] = rec
+            if rec["doi"]:
+                by_doi[rec["doi"]] = rec
+    rows, not_found = [], []
+    for i in ids:
+        rec = by_id.get(_oa_id(i)) if is_oa(i) else by_doi.get(_clean_doi(i) or "")
+        if rec is None:
+            not_found.append(i)
+        elif rec not in rows:
+            rows.append(rec)
+    if fill_from_semantic_scholar and rows:
+        if err := await _fill_abstracts_s2(_http(), rows):
+            errors.append(err)
+    return {"status": "ok" if rows else "not_found", "rows": rows, "not_found": not_found,
+            "log": {"requested": len(ids), "returned": len(rows),
+                    "with_abstract": sum(1 for r in rows if r["abstract"]),
+                    "executed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+            "source_errors": errors}
 
 
 PROMPT_RULES = ("Regole: allega un DOI solo se find_doi restituisce `match` e verify_doi "
@@ -1375,8 +1466,9 @@ def prompt_citation_map(seeds: str, max_nodes: str = "150") -> str:
     return ("Chiama citation_graph con questi seed (DOI o id OpenAlex, uno per riga o separati "
             f"da virgola) e max_nodes={max_nodes or 150}, poi costruisci un artifact D3 con:\n"
             "1. due viste commutabili: timeline (x = anno, y = citazioni in scala log, frecce per "
-            "citation_edges, seed evidenziati, colore per field) e rete delle co-citazioni "
-            "(force layout, spessore dei link = n, nodi isolati nascosti, nodi trascinabili);\n"
+            "citation_edges, seed evidenziati, colore per field) e rete di somiglianza "
+            "(force layout con selettore tra cocitation e coupling, spessore dei link = peso, "
+            "dimensione dei nodi = seeds_linked, nodi isolati nascosti, nodi trascinabili);\n"
             "2. zoom su entrambe con d3.zoom: rotella o pinch per zoomare, trascinamento per "
             "spostarsi, doppio clic e un pulsante per tornare alla vista iniziale; sulla "
             "timeline riscala gli assi invece di ingrandire i punti, e mostra i titoli solo "
@@ -1384,8 +1476,19 @@ def prompt_citation_map(seeds: str, max_nodes: str = "150") -> str:
             "3. tooltip con titolo, primo autore, anno, citazioni e link al DOI; clic su un nodo "
             "per evidenziare i suoi vicini;\n"
             "4. una nota breve: le distanze nella rete non hanno valore metrico e le citazioni "
-            "favoriscono i lavori più vecchi.\n\n"
+            "favoriscono i lavori più vecchi.\n"
+            "Dopo la mappa elenca i lavori non seed con seeds_linked più alto come possibili "
+            "letture mancanti, e offri la tabella dei dettagli con paper_table.\n\n"
             f"Seed:\n{seeds}")
+
+
+@mcp.prompt(name="tabella_paper", title="Tabella dei paper")
+def prompt_paper_table(ids: str) -> str:
+    return ("Chiama paper_table con questi DOI o id OpenAlex (uno per riga o separati da "
+            "virgola). Mostra una tabella compatta: autori, anno, titolo, sede, citazioni, "
+            "TL;DR o prima frase dell'abstract, keyword principali, accesso aperto. Segnala i "
+            "lavori ritrattati e gli id non trovati. Abstract completi solo se li chiedo.\n\n"
+            f"{ids}")
 
 
 class _TokenAuth:
