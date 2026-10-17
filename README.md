@@ -17,17 +17,17 @@ Server MCP per verificare citazioni accademiche e cercare letteratura. Risolve e
 
 ## Prompt (scorciatoie)
 
-Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add from …") sono disponibili scorciatoie che compilano la richiesta e richiamano gli strumenti nell'ordine giusto:
+Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add from …") sono disponibili scorciatoie che compilano la richiesta e richiamano gli strumenti nell'ordine giusto. I campi sono in testo libero: si scrive il riferimento come lo si ricorda, e Claude ricava titolo, autore e anno e risolve i titoli in DOI. I campi facoltativi lasciati vuoti fanno usare a Claude quello che è già nella conversazione (la mappa o la ricerca precedente).
 
-| Prompt | Argomenti | Cosa fa |
+| Prompt | Campi | Cosa fa |
 |---|---|---|
-| Trova e verifica un DOI | titolo, primo autore, anno | `find_doi` → `verify_doi` → `format_apa` |
-| Verifica un DOI | DOI, titolo, primo autore, anno | `verify_doi` con i valori attesi |
-| Verifica un libro | titolo, primo autore, anno, editore, ISBN | `verify_book` e `find_doi` con `is_book=true` |
-| Verifica una bibliografia | lista di riferimenti | Verifica voce per voce, tabella degli esiti e bibliografia APA corretta |
-| Ricerca letteratura | query, database, anni | `search_literature` con tabella dei risultati e log |
-| Mappa delle citazioni | seed, numero massimo di nodi | `citation_graph` e artifact D3 con timeline e rete di somiglianza (co-citazione o accoppiamento), zoom e pan, tooltip; poi elenca le possibili letture mancanti |
-| Tabella dei paper | DOI o id OpenAlex | `paper_table` con tabella compatta; abstract completi su richiesta |
+| Trova e verifica un DOI | riferimento come lo ricordi | `find_doi` → `verify_doi` → `format_apa` (e `verify_book` se è un libro) |
+| Verifica un DOI | DOI; facoltativo: a quale lavoro dovrebbe corrispondere | `verify_doi` con i valori attesi |
+| Verifica un libro | libro come lo ricordi | `verify_book` e `find_doi` con `is_book=true` |
+| Verifica una bibliografia | bibliografia incollata, o vuoto per quella nella conversazione | Verifica voce per voce, tabella degli esiti e bibliografia APA corretta |
+| Ricerca letteratura | tema con parole tue; facoltativo: anni | Claude costruisce la query e sceglie i database; `search_literature` con tabella e log |
+| Mappa delle citazioni | DOI o titoli, o vuoto per i lavori di cui si sta parlando | `citation_graph` e artifact D3; poi le possibili letture mancanti |
+| Tabella dei paper | DOI o titoli, o vuoto per la mappa o ricerca precedente | `paper_table` con tabella compatta; abstract completi su richiesta |
 
 ## Come recupera e confronta i dati
 

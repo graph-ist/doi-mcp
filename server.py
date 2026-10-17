@@ -20,12 +20,13 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 
 VERSION = "0.2.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
@@ -1253,6 +1254,10 @@ def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: in
             linked[a].add(b)
     for k, n in nodes.items():
         n["seeds_linked"] = len(linked[k] - {k})
+        pairs = [tuple(sorted((k, s))) for s in seeds if s != k]
+        n["seed_cocited"] = sum(cocit.get(p, 0) for p in pairs)
+        n["seed_coupling"] = max((round(shared.get(p, 0) / ((size[p[0]] * size[p[1]]) ** 0.5 or 1), 3)
+                                  for p in pairs), default=0.0)
     return edges, cocitation, coupling
 
 
@@ -1266,9 +1271,11 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
     Nodes are the seeds, the works they cite (role 'reference') and the most-cited works
     citing them (role 'citing'), ranked by how many seeds they connect to, then by citation
     count, up to max_nodes. Each node has id, doi, title, first_author, year, cited_by
-    (OpenAlex citation count), field (OpenAlex primary field), role and seeds_linked (how
-    many seeds it cites or is cited by; a non-seed linked to several seeds is a likely
-    missing reading).
+    (OpenAlex citation count), field (OpenAlex primary field), role, seeds_linked (how
+    many seeds it cites or is cited by), seed_cocited (how often works in the graph cite it
+    together with a seed) and seed_coupling (highest coupling strength with a seed). Rank
+    likely missing readings by these three, in this order; with one seed seeds_linked is 1
+    for every node, so the other two decide.
     'citation_edges' are [citing_id, cited_id] pairs inside the graph. 'cocitation' lists
     [id_a, id_b, n] where n works in this graph cite both; computed on this sample, not the
     whole literature, so n is a lower bound. 'coupling' lists [id_a, id_b, shared, strength]:
@@ -1415,56 +1422,84 @@ PROMPT_RULES = ("Regole: allega un DOI solo se find_doi restituisce `match` e ve
                 "ritrattazioni, non i controlli andati a buon fine.")
 
 
-def _fields(**kw: str) -> str:
-    return "\n".join(f"- {k}: {v}" for k, v in kw.items() if v.strip())
+FROM_CONTEXT = ("Se un dato manca, ricavalo dalla conversazione; chiedimelo solo se non puoi "
+                "procedere. Se ho dato titoli invece di DOI, risolvili prima con find_doi e usa "
+                "solo quelli con esito `match`, dicendomi quali non hai trovato.")
+
+
+def _opt(text: str, empty: str) -> str:
+    return text.strip() or empty
 
 
 @mcp.prompt(name="trova_doi", title="Trova e verifica un DOI")
-def prompt_find_doi(title: str, first_author: str = "", year: str = "") -> str:
-    return ("Trova il DOI di questo lavoro con find_doi, verificalo con verify_doi passando "
-            "titolo, autore e anno attesi, poi dammi il riferimento APA con format_apa.\n"
-            f"{_fields(titolo=title, primo_autore=first_author, anno=year)}\n\n{PROMPT_RULES}")
+def prompt_find_doi(
+    reference: Annotated[str, Field(description="Il riferimento come lo ricordi: titolo, "
+                                    "autore, anno, anche incompleto o in disordine")],
+) -> str:
+    return ("Ecco un riferimento come lo ricordo, forse incompleto o impreciso. Ricava titolo, "
+            "primo autore e anno, trova il DOI con find_doi (is_book=true se è un libro, e in "
+            "quel caso verifica l'edizione con verify_book), controllalo con verify_doi e dammi "
+            "il riferimento APA con format_apa. Se ci sono più candidati plausibili, mostrameli "
+            f"invece di sceglierne uno.\n\n{reference}\n\n{PROMPT_RULES}")
 
 
 @mcp.prompt(name="verifica_doi", title="Verifica un DOI")
-def prompt_verify_doi(doi: str, title: str = "", first_author: str = "", year: str = "") -> str:
-    return ("Verifica questo DOI con verify_doi, passando i valori attesi che conosco. Dimmi se "
-            "appartiene al lavoro indicato, se è ritrattato e quali metadati vanno corretti.\n"
-            f"{_fields(doi=doi, titolo=title, primo_autore=first_author, anno=year)}\n\n"
-            f"{PROMPT_RULES}")
+def prompt_verify_doi(
+    doi: Annotated[str, Field(description="Il DOI o il link doi.org")],
+    reference: Annotated[str, Field(description="Facoltativo: a quale lavoro pensi che "
+                                    "corrisponda")] = "",
+) -> str:
+    return ("Verifica questo DOI con verify_doi. Se ti dico a quale lavoro dovrebbe "
+            "corrispondere, passa titolo, autore e anno come valori attesi e dimmi se coincide. "
+            "Segnala ritrattazioni e metadati da correggere.\n\n"
+            f"DOI: {doi}\nLavoro atteso: {_opt(reference, 'non indicato')}\n\n{PROMPT_RULES}")
 
 
 @mcp.prompt(name="verifica_libro", title="Verifica un libro")
-def prompt_verify_book(title: str, first_author: str = "", year: str = "",
-                       publisher: str = "", isbn: str = "") -> str:
-    return ("Verifica questa edizione con verify_book e cerca un DOI con find_doi "
-            "(is_book=true, anno dell'edizione citata). Correggi editore e anno con i valori "
-            "restituiti e dimmi quanti cataloghi concordano.\n"
-            f"{_fields(titolo=title, primo_autore=first_author, anno=year, editore=publisher, isbn=isbn)}"
-            f"\n\n{PROMPT_RULES}")
+def prompt_verify_book(
+    reference: Annotated[str, Field(description="Il libro come lo ricordi: titolo, autore, "
+                                    "anno, editore, anche incompleto")],
+) -> str:
+    return ("Ecco un libro come lo ricordo. Verifica l'edizione con verify_book e cerca un DOI "
+            "con find_doi (is_book=true, anno dell'edizione citata). Correggi editore e anno con "
+            "i valori restituiti, dimmi quanti cataloghi concordano e dammi il riferimento APA."
+            f"\n\n{reference}\n\n{PROMPT_RULES}")
 
 
 @mcp.prompt(name="verifica_bibliografia", title="Verifica una bibliografia")
-def prompt_audit(references: str) -> str:
+def prompt_audit(
+    references: Annotated[str, Field(description="Incolla la bibliografia; lascia vuoto per "
+                                     "quella già presente nella conversazione")] = "",
+) -> str:
     return ("Verifica ogni voce di questa bibliografia: per gli articoli usa find_doi e "
             "verify_doi, per i libri find_doi con is_book=true e verify_book. Restituisci una "
             "tabella con voce, esito (ok / corretta / DOI mancante / non verificata / "
             "ritrattata) e cosa è cambiato, poi la bibliografia corretta in APA.\n\n"
-            f"{references}\n\n{PROMPT_RULES}")
+            f"{_opt(references, 'Usa la bibliografia presente nella conversazione.')}\n\n"
+            f"{PROMPT_RULES}")
 
 
 @mcp.prompt(name="ricerca_letteratura", title="Ricerca letteratura")
-def prompt_search(query: str, databases: str = "openalex", years: str = "") -> str:
-    return ("Cerca la letteratura con search_literature e riassumi i risultati più pertinenti "
-            "in una tabella (autori, anno, titolo, sede, DOI, una riga sul contenuto). Riporta "
-            "query, database, filtri e numero di risultati dal log.\n"
-            f"{_fields(query=query, database=databases, anni=years)}")
+def prompt_search(
+    topic: Annotated[str, Field(description="Cosa cerchi, con parole tue")],
+    years: Annotated[str, Field(description="Facoltativo: intervallo di anni, es. 2015-2025")] = "",
+) -> str:
+    return ("Cerco letteratura su questo tema. Costruisci tu la query booleana e scegli i "
+            "database adatti al campo (per esempio openalex e arxiv per HCI e AI, europepmc "
+            "per psicologia, openalex e hal per scienze umane). Usa search_literature e "
+            "riassumi i risultati più pertinenti in una tabella (autori, anno, titolo, sede, "
+            "DOI, una riga sul contenuto). Riporta query, database, filtri e numero di "
+            "risultati dal log, così posso rifare la ricerca.\n\n"
+            f"Tema: {topic}\nAnni: {_opt(years, 'nessun limite')}")
 
 
 @mcp.prompt(name="mappa_citazioni", title="Mappa delle citazioni")
-def prompt_citation_map(seeds: str, max_nodes: str = "150") -> str:
-    return ("Chiama citation_graph con questi seed (DOI o id OpenAlex, uno per riga o separati "
-            f"da virgola) e max_nodes={max_nodes or 150}, poi costruisci un artifact D3 con:\n"
+def prompt_citation_map(
+    papers: Annotated[str, Field(description="DOI o titoli, uno per riga; lascia vuoto per "
+                                 "i lavori di cui stiamo parlando")] = "",
+) -> str:
+    return ("Chiama citation_graph con questi lavori come seed, poi costruisci un artifact "
+            "D3 con:\n"
             "1. due viste commutabili: timeline (x = anno, y = citazioni in scala log, frecce per "
             "citation_edges, seed evidenziati, colore per field) e rete di somiglianza "
             "(force layout con selettore tra cocitation e coupling, spessore dei link = peso, "
@@ -1477,18 +1512,22 @@ def prompt_citation_map(seeds: str, max_nodes: str = "150") -> str:
             "per evidenziare i suoi vicini;\n"
             "4. una nota breve: le distanze nella rete non hanno valore metrico e le citazioni "
             "favoriscono i lavori più vecchi.\n"
-            "Dopo la mappa elenca i lavori non seed con seeds_linked più alto come possibili "
-            "letture mancanti, e offri la tabella dei dettagli con paper_table.\n\n"
-            f"Seed:\n{seeds}")
+            "Dopo la mappa elenca le possibili letture mancanti, ordinate per seeds_linked, "
+            "seed_cocited e seed_coupling, e chiedimi se voglio la tabella dei dettagli.\n\n"
+            f"{FROM_CONTEXT}\n\nLavori:\n{_opt(papers, 'quelli di cui stiamo parlando')}")
 
 
 @mcp.prompt(name="tabella_paper", title="Tabella dei paper")
-def prompt_paper_table(ids: str) -> str:
-    return ("Chiama paper_table con questi DOI o id OpenAlex (uno per riga o separati da "
-            "virgola). Mostra una tabella compatta: autori, anno, titolo, sede, citazioni, "
+def prompt_paper_table(
+    papers: Annotated[str, Field(description="DOI o titoli, uno per riga; lascia vuoto per "
+                                 "i lavori della mappa o della ricerca precedente")] = "",
+) -> str:
+    return ("Chiama paper_table con questi lavori (usa gli id dei nodi se vengono da una "
+            "mappa). Mostra una tabella compatta: autori, anno, titolo, sede, citazioni, "
             "TL;DR o prima frase dell'abstract, keyword principali, accesso aperto. Segnala i "
-            "lavori ritrattati e gli id non trovati. Abstract completi solo se li chiedo.\n\n"
-            f"{ids}")
+            "lavori ritrattati e quelli non trovati. Abstract completi solo se li chiedo.\n\n"
+            f"{FROM_CONTEXT}\n\nLavori:\n"
+            f"{_opt(papers, 'quelli della mappa o della ricerca precedente')}")
 
 
 class _TokenAuth:

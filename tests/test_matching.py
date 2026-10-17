@@ -100,3 +100,5 @@ def test_graph_links():
     # S and C share A, B and X in their full reference lists
     assert coupling[0][:3] == ["C", "S", 3] and 0 < coupling[0][3] <= 1
     assert nodes["C"]["seeds_linked"] == 1 and nodes["S"]["seeds_linked"] == 0
+    # C cites both A and the seed S
+    assert nodes["A"]["seed_cocited"] == 1 and nodes["C"]["seed_coupling"] > 0
