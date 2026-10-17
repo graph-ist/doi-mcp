@@ -11,9 +11,8 @@ Server MCP per verificare citazioni accademiche e cercare letteratura. Risolve e
 | `verify_book` | Verifica un'edizione (anno, editore, ISBN) confrontando tre cataloghi. `verified` se almeno due concordano. | Open Library, Crossref, Deutsche Nationalbibliothek |
 | `format_apa` | Restituisce il riferimento APA di un DOI tramite content negotiation. `unsupported` se l'agenzia di registrazione non lo offre. | doi.org |
 | `search_literature` | Ricerca con sintassi booleana su uno o più database, con abstract e keyword, deduplicazione e log riproducibile delle query. | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo |
-| `get_metadata` | Abstract, keyword, topic, citazioni e accesso aperto per un DOI o un identificativo arXiv. | OpenAlex, Semantic Scholar, arXiv |
 | `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione, coppie co-citate e accoppiamento bibliografico (riferimenti in comune). Per ogni nodo indica a quanti seed è collegato. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di somiglianza). | OpenAlex |
-| `paper_table` | Righe di dettaglio per una lista di DOI o id OpenAlex (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), Semantic Scholar (una richiesta batch) |
+| `paper_table` | Righe di dettaglio per una lista di DOI, id OpenAlex o id arXiv (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), arXiv come riserva, Semantic Scholar (una richiesta batch) |
 
 ## Prompt (scorciatoie)
 

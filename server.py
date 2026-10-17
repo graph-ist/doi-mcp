@@ -636,12 +636,13 @@ async def _s2(c: httpx.AsyncClient, method: str, url: str, **kw) -> httpx.Respon
 
 async def _fill_abstracts_s2(c: httpx.AsyncClient, records: list[dict]) -> str | None:
     """Fill missing abstracts and TL;DRs from Semantic Scholar in one batch request."""
-    todo = [r for r in records if r["doi"]]
+    todo = [r for r in records if r["doi"] or r.get("arxiv_id")]
     if not todo:
         return None
     resp = await _s2(c, "POST", "https://api.semanticscholar.org/graph/v1/paper/batch",
                      params={"fields": "abstract,tldr"},
-                     json={"ids": [f"DOI:{r['doi']}" for r in todo]})
+                     json={"ids": [f"DOI:{r['doi']}" if r["doi"] else f"ARXIV:{r['arxiv_id']}"
+                                   for r in todo]})
     if resp.status_code != 200:
         return f"semantic_scholar: HTTP {resp.status_code}"
     for rec, hit in zip(todo, resp.json()):
@@ -1131,62 +1132,6 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
     }
 
 
-@mcp.tool()
-async def get_metadata(identifier: str) -> dict:
-    """Return abstract, keywords, topics, citation counts and open-access data for a work.
-
-    identifier: a DOI or an arXiv identifier ('2401.01234', 'arXiv:2401.01234v2'). Combines
-    OpenAlex (abstract, author keywords, topics, retraction flag) with Semantic Scholar
-    (TL;DR, fields of study, influential citations, open-access PDF); arXiv identifiers
-    are resolved on arXiv and return its record. Fields that a source does not hold are
-    null; abstract_source tells which source supplied it.
-    """
-    c = _http()
-    m = ARXIV_ID_RE.match(identifier.strip())
-    if m:
-        r = await c.get("https://export.arxiv.org/api/query", params={"id_list": m.group(1)})
-        if r.status_code != 200:
-            return {"status": "error", "http_status": r.status_code}
-        recs, _ = _arxiv_records(r.content)
-        recs = [x for x in recs if x["title"] and x["title"] != "Error"]
-        return {"status": "ok", **recs[0], "source_errors": []} if recs else {
-            "status": "not_found", "arxiv_id": m.group(1)}
-    d = _clean_doi(identifier)
-    if not d:
-        return {"status": "invalid_format", "identifier": identifier}
-    params = {"select": OA_SELECT}
-    if EMAIL:
-        params["mailto"] = EMAIL
-    oa, s2 = await asyncio.gather(
-        c.get(f"https://api.openalex.org/works/doi:{_doi_path(d)}", params=params),
-        _s2(c, "GET", f"https://api.semanticscholar.org/graph/v1/paper/DOI:{_doi_path(d)}",
-            params={"fields": "abstract,tldr,fieldsOfStudy,citationCount,"
-                              "influentialCitationCount,openAccessPdf"}),
-        return_exceptions=True)
-    errors, out = [], {"status": "not_found", "doi": d}
-    if not isinstance(oa, Exception) and oa.status_code == 200:
-        out = {"status": "ok", **_oa_record(oa.json())}
-    elif isinstance(oa, Exception) or oa.status_code != 404:
-        errors.append(_err("openalex", oa) if isinstance(oa, Exception)
-                      else f"openalex: HTTP {oa.status_code}")
-    if not isinstance(s2, Exception) and s2.status_code == 200:
-        h = s2.json()
-        out.setdefault("doi", d)
-        out["status"] = "ok"
-        if not out.get("abstract") and h.get("abstract"):
-            out["abstract"], out["abstract_source"] = h["abstract"], "semantic_scholar"
-        out["tldr"] = (h.get("tldr") or {}).get("text")
-        out["fields_of_study"] = h.get("fieldsOfStudy")
-        out["s2_citation_count"] = h.get("citationCount")
-        out["s2_influential_citation_count"] = h.get("influentialCitationCount")
-        out["s2_open_access_pdf"] = (h.get("openAccessPdf") or {}).get("url") or None
-    elif isinstance(s2, Exception) or s2.status_code != 404:
-        errors.append(_err("semantic_scholar", s2) if isinstance(s2, Exception)
-                      else f"semantic_scholar: HTTP {s2.status_code}")
-    out["source_errors"] = errors
-    return out
-
-
 CG_SELECT = ("id,doi,title,publication_year,cited_by_count,authorships,primary_topic,"
              "referenced_works")
 
@@ -1364,16 +1309,20 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
 async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -> dict:
     """Detail rows for a list of works: abstract, keywords, topics, TL;DR, venue, OA, retraction.
 
-    ids: DOIs or OpenAlex ids (max 300), e.g. node ids from citation_graph or DOIs from
-    search_literature. Fetched from OpenAlex in batches of 50; missing abstracts and TL;DRs
-    come from one Semantic Scholar batch request. Rows keep the input order; unresolved ids
-    are listed in 'not_found'. Abstracts are long: for many works show a compact table
-    (title, year, citations, TL;DR) and give abstracts and keywords on request.
+    ids: DOIs, OpenAlex ids or arXiv ids ('2401.01234', 'arXiv:2401.01234v2'), max 300,
+    e.g. node ids from citation_graph or DOIs from search_literature. Fetched from OpenAlex
+    in batches of 50 (arXiv ids via their 10.48550 DOI, falling back to the arXiv API);
+    missing abstracts and TL;DRs come from one Semantic Scholar batch request. Rows keep the
+    input order; unresolved ids are listed in 'not_found'. Abstracts are long: for many
+    works show a compact table (title, year, citations, TL;DR) and give abstracts and
+    keywords on request.
     """
     ids = list(dict.fromkeys(i.strip() for i in ids if i and i.strip()))[:300]
     is_oa = lambda i: re.fullmatch(r"(?:https://openalex\.org/)?W\d+", i, re.I)
+    arxiv = lambda i: (m := ARXIV_ID_RE.match(i)) and re.sub(r"v\d+$", "", m.group(1))
+    doi_of = lambda i: f"10.48550/arxiv.{arxiv(i)}".lower() if arxiv(i) else _clean_doi(i)
     want_oa = [_oa_id(i) for i in ids if is_oa(i)]
-    want_doi = [d for i in ids if not is_oa(i) and (d := _clean_doi(i))]
+    want_doi = [d for i in ids if not is_oa(i) and (d := doi_of(i))]
     # '|' and ',' are filter separators in OpenAlex, so such DOIs are fetched one by one
     batchable = [d for d in want_doi if not re.search(r"[|,]", d)]
     singles = [d for d in want_doi if re.search(r"[|,]", d)]
@@ -1399,9 +1348,22 @@ async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -
             by_id[rec["id"]] = rec
             if rec["doi"]:
                 by_doi[rec["doi"]] = rec
+    # arXiv preprints merged into a published version are not found under their arXiv DOI
+    missing = [a for i in ids if (a := arxiv(i)) and doi_of(i) not in by_doi]
+    if missing:
+        try:
+            r = await _http().get("https://export.arxiv.org/api/query", params={
+                "id_list": ",".join(missing), "max_results": len(missing)})
+            r.raise_for_status()
+            for rec in _arxiv_records(r.content)[0]:
+                if rec["title"] and rec["title"] != "Error":
+                    rec.update(id=f"arXiv:{rec['arxiv_id']}", tldr=None)
+                    by_doi[f"10.48550/arxiv.{rec['arxiv_id']}".lower()] = rec
+        except httpx.HTTPError as e:
+            errors.append(_err("arxiv", e))
     rows, not_found = [], []
     for i in ids:
-        rec = by_id.get(_oa_id(i)) if is_oa(i) else by_doi.get(_clean_doi(i) or "")
+        rec = by_id.get(_oa_id(i)) if is_oa(i) else by_doi.get(doi_of(i) or "")
         if rec is None:
             not_found.append(i)
         elif rec not in rows:
