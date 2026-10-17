@@ -53,8 +53,18 @@ Richiede Python 3.10+ e [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync
-uv run pytest -q tests
+uv run pytest -q
 ```
+
+I test in `tests/test_server.py` girano senza rete e coprono le parti dove un errore produce un DOI sbagliato: normalizzazione dei titoli, confronto degli autori, scarto di errata e repliche, pulizia dei DOI, calcolo di co-citazioni e accoppiamento.
+
+### Struttura
+
+| File | Contenuto |
+|---|---|
+| `server.py` | Tutto il server: strumenti, prompt, client HTTP, modalità stdio e HTTP |
+| `tests/test_server.py` | Test offline |
+| `pyproject.toml`, `uv.lock` | Dipendenze e versioni bloccate |
 
 ### Uso locale (stdio), ad esempio in VS Code
 
@@ -74,6 +84,15 @@ uv run pytest -q tests
 ### Uso remoto (HTTP), ad esempio per Claude web
 
 Con `MCP_TRANSPORT=http` il server espone Streamable HTTP su `127.0.0.1` e richiede un token, passato come header `Authorization: Bearer` oppure come parametro `?token=` (Claude web non permette header personalizzati). Va pubblicato dietro un proxy HTTPS, ad esempio Tailscale Funnel o Cloudflare Tunnel. Il log degli accessi è disattivato perché il token viaggia nell'URL.
+
+Su un server senza uv si può installare con pip dalle versioni bloccate:
+
+```sh
+uv export --no-dev --no-emit-project --format requirements-txt > requirements.lock.txt
+python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock.txt
+```
+
+Per aggiornare: copiare `server.py` (e, se cambiano le dipendenze, rifare l'installazione), poi riavviare il servizio. Dopo modifiche a strumenti o prompt, in Claude web il connettore va disattivato e riattivato perché rilegga l'elenco.
 
 ## Variabili d'ambiente
 

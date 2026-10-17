@@ -1,6 +1,7 @@
-"""MCP server: resolve and verify DOIs for cited papers.
+"""MCP server: verify citations (DOIs, book editions), search the literature, map citations.
 
-Sources: Crossref (authoritative for DOI registration), Semantic Scholar, OpenAlex.
+Sources: Crossref, OpenAlex, Semantic Scholar, Open Library, DNB, doi.org and open
+repositories (Europe PMC, HAL, DOAJ, arXiv, OSF, Zenodo). See README.md.
 Env (optional):
   CONTACT_EMAIL            used for Crossref/OpenAlex polite pool
   SEMANTIC_SCHOLAR_API_KEY raises Semantic Scholar rate limits
