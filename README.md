@@ -14,6 +14,19 @@ Server MCP per verificare citazioni accademiche e cercare letteratura. Risolve e
 | `get_metadata` | Abstract, keyword, topic, citazioni e accesso aperto per un DOI o un identificativo arXiv. | OpenAlex, Semantic Scholar, arXiv |
 | `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione e coppie co-citate. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di co-citazione). | OpenAlex |
 
+## Prompt (scorciatoie)
+
+Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add from …") sono disponibili scorciatoie che compilano la richiesta e richiamano gli strumenti nell'ordine giusto:
+
+| Prompt | Argomenti | Cosa fa |
+|---|---|---|
+| Trova e verifica un DOI | titolo, primo autore, anno | `find_doi` → `verify_doi` → `format_apa` |
+| Verifica un DOI | DOI, titolo, primo autore, anno | `verify_doi` con i valori attesi |
+| Verifica un libro | titolo, primo autore, anno, editore, ISBN | `verify_book` e `find_doi` con `is_book=true` |
+| Verifica una bibliografia | lista di riferimenti | Verifica voce per voce, tabella degli esiti e bibliografia APA corretta |
+| Ricerca letteratura | query, database, anni | `search_literature` con tabella dei risultati e log |
+| Mappa delle citazioni | seed, numero massimo di nodi | `citation_graph` e artifact D3 con timeline e rete di co-citazione, zoom e pan, tooltip |
+
 ## Come recupera e confronta i dati
 
 **Richieste.** Tutte le chiamate passano da un unico client HTTP condiviso. Un trasporto dedicato limita le richieste contemporanee per host (5 di default, 1 per Semantic Scholar e arXiv) e impone un intervallo minimo dove le API lo chiedono (1 s per Semantic Scholar, 3 s per arXiv). Sui 429 il server ritenta fino a quattro volte, con attese di al massimo 10 s. Le fonti vengono interrogate in parallelo: se una fallisce, l'errore finisce in `source_errors` e le altre proseguono. I record Crossref restano in cache per un'ora.

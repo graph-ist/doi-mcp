@@ -1238,7 +1238,10 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
     To visualize, build a D3 artifact with two views: (1) timeline, x = year, y = cited_by
     on a log scale, arrows for citation_edges, seeds highlighted, colour by field;
     (2) co-citation network, force layout with cocitation pairs as links weighted by n,
-    isolated nodes hidden. Tell the reader that distances in a force layout have no metric
+    isolated nodes hidden. Enable d3.zoom on both (wheel/pinch to zoom, drag to pan,
+    double-click or a button to reset); on the timeline rescale the axes instead of
+    scaling the marks, and show titles only for seeds or once zoomed in.
+    Tell the reader that distances in a force layout have no metric
     meaning and that citation counts favour older works. OpenAlex reference lists are
     incomplete for many humanities and older works: 'log.seeds_without_references' flags them.
     """
@@ -1313,6 +1316,76 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
                 "executed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
         "source_errors": errors,
     }
+
+
+PROMPT_RULES = ("Regole: allega un DOI solo se find_doi restituisce `match` e verify_doi "
+                "`registered_match`; non fornire mai un DOI a memoria. Se `is_retracted` è vero, "
+                "segnalalo. Riporta solo correzioni, campi non verificati, DOI mancanti e "
+                "ritrattazioni, non i controlli andati a buon fine.")
+
+
+def _fields(**kw: str) -> str:
+    return "\n".join(f"- {k}: {v}" for k, v in kw.items() if v.strip())
+
+
+@mcp.prompt(name="trova_doi", title="Trova e verifica un DOI")
+def prompt_find_doi(title: str, first_author: str = "", year: str = "") -> str:
+    return ("Trova il DOI di questo lavoro con find_doi, verificalo con verify_doi passando "
+            "titolo, autore e anno attesi, poi dammi il riferimento APA con format_apa.\n"
+            f"{_fields(titolo=title, primo_autore=first_author, anno=year)}\n\n{PROMPT_RULES}")
+
+
+@mcp.prompt(name="verifica_doi", title="Verifica un DOI")
+def prompt_verify_doi(doi: str, title: str = "", first_author: str = "", year: str = "") -> str:
+    return ("Verifica questo DOI con verify_doi, passando i valori attesi che conosco. Dimmi se "
+            "appartiene al lavoro indicato, se è ritrattato e quali metadati vanno corretti.\n"
+            f"{_fields(doi=doi, titolo=title, primo_autore=first_author, anno=year)}\n\n"
+            f"{PROMPT_RULES}")
+
+
+@mcp.prompt(name="verifica_libro", title="Verifica un libro")
+def prompt_verify_book(title: str, first_author: str = "", year: str = "",
+                       publisher: str = "", isbn: str = "") -> str:
+    return ("Verifica questa edizione con verify_book e cerca un DOI con find_doi "
+            "(is_book=true, anno dell'edizione citata). Correggi editore e anno con i valori "
+            "restituiti e dimmi quanti cataloghi concordano.\n"
+            f"{_fields(titolo=title, primo_autore=first_author, anno=year, editore=publisher, isbn=isbn)}"
+            f"\n\n{PROMPT_RULES}")
+
+
+@mcp.prompt(name="verifica_bibliografia", title="Verifica una bibliografia")
+def prompt_audit(references: str) -> str:
+    return ("Verifica ogni voce di questa bibliografia: per gli articoli usa find_doi e "
+            "verify_doi, per i libri find_doi con is_book=true e verify_book. Restituisci una "
+            "tabella con voce, esito (ok / corretta / DOI mancante / non verificata / "
+            "ritrattata) e cosa è cambiato, poi la bibliografia corretta in APA.\n\n"
+            f"{references}\n\n{PROMPT_RULES}")
+
+
+@mcp.prompt(name="ricerca_letteratura", title="Ricerca letteratura")
+def prompt_search(query: str, databases: str = "openalex", years: str = "") -> str:
+    return ("Cerca la letteratura con search_literature e riassumi i risultati più pertinenti "
+            "in una tabella (autori, anno, titolo, sede, DOI, una riga sul contenuto). Riporta "
+            "query, database, filtri e numero di risultati dal log.\n"
+            f"{_fields(query=query, database=databases, anni=years)}")
+
+
+@mcp.prompt(name="mappa_citazioni", title="Mappa delle citazioni")
+def prompt_citation_map(seeds: str, max_nodes: str = "150") -> str:
+    return ("Chiama citation_graph con questi seed (DOI o id OpenAlex, uno per riga o separati "
+            f"da virgola) e max_nodes={max_nodes or 150}, poi costruisci un artifact D3 con:\n"
+            "1. due viste commutabili: timeline (x = anno, y = citazioni in scala log, frecce per "
+            "citation_edges, seed evidenziati, colore per field) e rete delle co-citazioni "
+            "(force layout, spessore dei link = n, nodi isolati nascosti, nodi trascinabili);\n"
+            "2. zoom su entrambe con d3.zoom: rotella o pinch per zoomare, trascinamento per "
+            "spostarsi, doppio clic e un pulsante per tornare alla vista iniziale; sulla "
+            "timeline riscala gli assi invece di ingrandire i punti, e mostra i titoli solo "
+            "per i seed o oltre un certo livello di zoom;\n"
+            "3. tooltip con titolo, primo autore, anno, citazioni e link al DOI; clic su un nodo "
+            "per evidenziare i suoi vicini;\n"
+            "4. una nota breve: le distanze nella rete non hanno valore metrico e le citazioni "
+            "favoriscono i lavori più vecchi.\n\n"
+            f"Seed:\n{seeds}")
 
 
 class _TokenAuth:
