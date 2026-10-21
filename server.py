@@ -4,7 +4,8 @@ Sources: Crossref, OpenAlex, Semantic Scholar, Open Library, DNB, doi.org and op
 repositories (Europe PMC, HAL, DOAJ, arXiv, OSF, Zenodo). See README.md.
 Env (optional):
   CONTACT_EMAIL            used for Crossref/OpenAlex polite pool
-  SEMANTIC_SCHOLAR_API_KEY raises Semantic Scholar rate limits
+    OPENALEX_API_KEY         authenticates OpenAlex requests via api_key
+    SEMANTIC_SCHOLAR_API_KEY authenticates requests; 1 request/s across all endpoints
   MCP_TRANSPORT            'stdio' (default) or 'http' (streamable HTTP on 127.0.0.1)
   PORT                     HTTP port, default 3002
   MCP_AUTH_TOKEN           required in http mode, as Bearer header or ?token= query
@@ -14,6 +15,7 @@ Env (optional):
 import asyncio
 import hmac
 import html
+import json
 import os
 import re
 import time
@@ -21,12 +23,13 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from typing import Annotated, Any
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from typing import Annotated, Any, Literal, get_args
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlsplit
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 VERSION = "0.2.0"
@@ -38,6 +41,7 @@ mcp = FastMCP("paper-doi", stateless_http=True, transport_security=TransportSecu
                      *(f"https://{h}" for h in _PUBLIC_HOSTS)]))
 
 EMAIL = os.environ.get("CONTACT_EMAIL", "")
+OA_KEY = os.environ.get("OPENALEX_API_KEY", "")
 S2_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 UA = f"paper-doi-mcp/{VERSION}" + (f" (mailto:{EMAIL})" if EMAIL else "")
 TITLE_THRESHOLD = 0.88
@@ -127,14 +131,25 @@ def _doi_path(d: str) -> str:
     return quote(d, safe="/")
 
 
+def _oa_redact(detail: str) -> str:
+    if OA_KEY:
+        for secret in sorted({OA_KEY, quote(OA_KEY, safe=""), quote_plus(OA_KEY)},
+                             key=len, reverse=True):
+            detail = detail.replace(secret, "[redacted]")
+    return detail
+
+
 def _err(name: str, e: BaseException) -> str:
-    return f"{name}: {type(e).__name__}" + (f": {e}" if str(e) else "")
+    detail = _oa_redact(str(e))
+    return f"{name}: {type(e).__name__}" + (f": {detail}" if detail else "")
 
 
 class _PoliteTransport(httpx.AsyncHTTPTransport):
-    """Caps concurrency per host and spaces requests where the API's terms require it."""
-    CONCURRENCY = {"api.semanticscholar.org": 1, "export.arxiv.org": 1}
-    MIN_INTERVAL = {"api.semanticscholar.org": 1.0, "export.arxiv.org": 3.0}
+    """Caps concurrency per host; intervals cover all endpoints, including retries."""
+    CONCURRENCY = {"api.semanticscholar.org": 1, "export.arxiv.org": 1,
+                   "api.openalex.org": 1, "user.openalex.org": 1}
+    MIN_INTERVAL = {"api.semanticscholar.org": 1.0, "export.arxiv.org": 3.0,
+                    "api.openalex.org": 1.0, "user.openalex.org": 1.0}
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -222,12 +237,373 @@ async def _semantic_scholar(c: httpx.AsyncClient, title: str) -> list[dict]:
     return out
 
 
+async def _oa_request(c: httpx.AsyncClient, path: str, params: dict,
+                      method: str = "GET", body: Any = None,
+                      user_api: bool = False) -> httpx.Response:
+    params = dict(params)
+    if EMAIL and not user_api:
+        params["mailto"] = EMAIL
+    if OA_KEY and not user_api:
+        params["api_key"] = OA_KEY
+    headers = {"Authorization": f"Bearer {OA_KEY}"} if user_api and OA_KEY else {}
+    host = "user.openalex.org" if user_api else "api.openalex.org"
+    retryable = method == "GET" or (method == "POST" and path in {
+        "", "query", "text", "text/topics", "text/keywords"})
+    for attempt in range(4):
+        response = await c.request(method, f"https://{host}/{path}", params=params,
+                                   headers=headers, follow_redirects=False,
+                                   **({"json": body} if body is not None else {}))
+        response.request.url = response.request.url.copy_remove_param("api_key")
+        response.request.headers.pop("Authorization", None)
+        if response.status_code != 429 or not retryable or attempt == 3:
+            return response
+        try:
+            wait = max(0.0, float(response.headers.get("Retry-After", "")))
+        except ValueError:
+            wait = 2.0 ** attempt
+        await response.aclose()
+        await asyncio.sleep(min(wait, 10.0))
+    return response
+
+
+def _oa_public_data(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: "[redacted]" if key.lower() in {"api_key", "access_token", "authorization"}
+                else _oa_public_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_oa_public_data(item) for item in value]
+    return _oa_redact(value) if isinstance(value, str) else value
+
+
+async def _oa_api(path: str, params: dict | None = None, method: str = "GET",
+                  body: Any = None, user_api: bool = False) -> dict:
+    if "api_key" in (params or {}):
+        raise ValueError("Configure OPENALEX_API_KEY in the server environment, not params")
+    try:
+        response = await _oa_request(_http(), path, params or {}, method, body, user_api)
+    except httpx.HTTPError as error:
+        return {"status": "error", "source": "openalex", "detail": _err("openalex", error)}
+    if response.status_code == 204:
+        return {"status": "ok", "http_status": 204, "data": None}
+    content_type = response.headers.get("content-type", "").split(";")[0]
+    if content_type in {"text/csv", "text/plain", "text/markdown"} and response.is_success:
+        return {"status": "ok", "http_status": response.status_code,
+                "content_type": content_type, "data": _oa_redact(response.text),
+                "next_cursor": response.headers.get("x-next-cursor")}
+    try:
+        data = _oa_public_data(response.json())
+    except ValueError:
+        return {"status": "error", "http_status": response.status_code,
+                "detail": "OpenAlex returned a non-JSON response"}
+    return {"status": "ok" if response.is_success else "error",
+            "http_status": response.status_code, "data": data}
+
+
+OpenAlexEntity = Literal[
+    "works", "authors", "sources", "institutions", "publishers", "funders", "awards",
+    "locations", "raw-affiliation-strings", "topics", "subfields", "fields", "domains",
+    "keywords", "sdgs", "study-designs", "concepts", "work-types", "source-types",
+    "institution-types", "countries", "continents", "languages", "licenses", "indexes",
+    "source-lists",
+]
+_OA_ENTITIES = set(get_args(OpenAlexEntity))
+_OA_LIST_ONLY = {"raw-affiliation-strings"}
+
+
+def _oa_segment(value: str) -> str:
+    if not value.strip() or value.strip() in {".", ".."}:
+        raise ValueError("Provide a non-empty identifier")
+    return quote(value.strip(), safe="")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_entity(entity: OpenAlexEntity, entity_id: str | None = None,
+                          params: dict[str, str | int | float | bool] | None = None) -> dict:
+    """Read OpenAlex entity lists or a single entity, with native query parameters.
+
+    Covers works, authors, sources, institutions, publishers, funders, awards,
+    locations, raw-affiliation-strings, topics, subfields, fields, domains, keywords,
+    sdgs, study-designs, concepts (deprecated), and vocabulary endpoints.
+    Omit entity_id for a list; provide an OpenAlex ID or supported external ID for
+    details (DOI/PMID for works, ORCID for authors, ROR for institutions, ISSN for
+    sources). Identifiers are URL-encoded, never interpreted as a destination URL.
+    raw-affiliation-strings has no single-entity identifier; use its list filters.
+
+    params forwards native filter, search, sort, group_by, select, page, per_page,
+    cursor, sample, seed, corpus and other API-supported options without rewriting.
+    Endpoint-specific validity is checked by OpenAlex. For deep pagination start
+    with cursor='*', then pass data.meta.next_cursor. Each call fetches one page.
+    Response data preserves metadata, groups, nested fields and request cost; API
+    credentials are redacted. Uses OPENALEX_API_KEY and CONTACT_EMAIL automatically.
+    Requests can consume your OpenAlex budget; no bulk auto-pagination or downloads.
+    """
+    if entity not in _OA_ENTITIES:
+        raise ValueError("Unknown OpenAlex entity")
+    path = entity
+    if entity_id is not None:
+        if entity in _OA_LIST_ONLY:
+            raise ValueError(f"{entity} only supports list queries")
+        path += "/" + _oa_segment(entity_id)
+    return await _oa_api(path, params)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_autocomplete(
+    query: str,
+    entity: Literal["works", "authors", "sources", "institutions", "topics", "keywords",
+                    "concepts", "publishers", "funders"] | None = None,
+    params: dict[str, str | int | bool] | None = None,
+) -> dict:
+    """GET /autocomplete or /autocomplete/{entity}; query becomes q.
+
+    Returns native typeahead matches, including hints and identifier lookups.
+    params can add filter/search; do not pass q there. concepts is deprecated.
+    Uses the server's OpenAlex credentials and shared conservative 1 request/s limit.
+    """
+    allowed = {"works", "authors", "sources", "institutions", "topics", "keywords",
+               "concepts", "publishers", "funders"}
+    if not query.strip() or "q" in (params or {}) or (entity is not None and entity not in allowed):
+        raise ValueError("Provide query, an optional supported entity, and no params.q")
+    return await _oa_api("autocomplete" + (f"/{entity}" if entity else ""),
+                         {**(params or {}), "q": query})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_text(title: str, abstract: str = "",
+                        target: Literal["all", "topics", "keywords"] = "all",
+                        method: Literal["GET", "POST"] = "POST", version: int = 2) -> dict:
+    """Tag text via /text, /text/topics or /text/keywords using GET or POST.
+
+    title and abstract combined must be 20-2000 characters. The text is sent to
+    OpenAlex, so obtain permission before sending confidential unpublished material.
+    Costs $0.01/request per current API documentation; limit 1 request/s.
+    version=2 uses the current classifier; version=1 is available until 2027-01-13.
+    Returns original topics, keywords, scores and hierarchy without normalizing.
+    """
+    if not 20 <= len(title) + len(abstract) <= 2000 or not title.strip():
+        raise ValueError("Provide a title and 20-2000 characters of combined title/abstract")
+    if target not in {"all", "topics", "keywords"} or method not in {"GET", "POST"}:
+        raise ValueError("Invalid text target or method")
+    if version not in {1, 2}:
+        raise ValueError("version must be 1 or 2")
+    path = "text" + (f"/{target}" if target != "all" else "")
+    content = {"title": title, "abstract": abstract}
+    if method == "GET":
+        return await _oa_api(path, {**content, "version": version})
+    return await _oa_api(path, {"version": version}, "POST", content)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_query(
+    action: Literal["execute", "translate", "validate", "context", "properties", "spec"],
+    query: str | dict | None = None, query_format: Literal["oql", "oqo", "oxurl"] = "oql",
+    method: Literal["GET", "POST"] = "POST", entity: OpenAlexEntity | None = None,
+    artifact: str | None = None, params: dict[str, str | int | bool] | None = None,
+) -> dict:
+    """Execute/translate OQL and OQO and inspect the OpenAlex query language.
+
+    execute: GET or POST / with oql string or oqo object. oxurl is translation-only;
+    use openalex_entity for REST queries. params holds sibling view options (sort,
+    select, page, per_page, cursor, rerank, format). Fetches one page; retains
+    meta.next_cursor, validation diagnostics, costs and meta.x_query.
+    translate: GET /query/{query_format}/{query} or POST /query; accepts oql,
+    oqo or oxurl (classic URL). Translates and validates WITHOUT executing a search.
+    validate: GET /validate?q=<oql>; context: GET /parse-context?q=<oql>&pos=<n>.
+    properties: GET /properties or /properties/{entity} (queryable column registry).
+    spec: GET /query/spec or /query/spec/{artifact}, e.g. artifact='oqo'.
+    validate/context require an OQL string; context position goes in params.pos.
+    Execution consumes the account's query budget; translation is free. JSON and
+    CSV/text responses are supported; binary archive exports are not decoded.
+    """
+    if method not in {"GET", "POST"} or query_format not in {"oql", "oqo", "oxurl"}:
+        raise ValueError("Invalid query method or format")
+    if entity is not None and (entity not in _OA_ENTITIES or action != "properties"):
+        raise ValueError("entity is only supported for properties")
+    if artifact is not None and action != "spec":
+        raise ValueError("artifact is only supported for spec")
+    params = dict(params or {})
+    if {"oql", "oqo", "oxurl", "q"} & params.keys():
+        raise ValueError("Pass query using the query argument, not params")
+    if action in {"properties", "spec"}:
+        if query is not None:
+            raise ValueError("This action does not accept query")
+        path = "properties" if action == "properties" else "query/spec"
+        suffix = entity if action == "properties" else artifact
+        return await _oa_api(path + ("/" + _oa_segment(suffix) if suffix else ""), params)
+    if query is None or (isinstance(query, str) and not query.strip()):
+        raise ValueError("query is required")
+    if action in {"validate", "context"}:
+        if query_format != "oql" or not isinstance(query, str):
+            raise ValueError("validate/context require OQL text")
+        path = "validate" if action == "validate" else "parse-context"
+        if action == "context" and "pos" not in params:
+            raise ValueError("context requires params.pos")
+        return await _oa_api(path, {**params, "q": query})
+    if query_format == "oqo" and not isinstance(query, dict):
+        raise ValueError("oqo requires a JSON object")
+    if query_format != "oqo" and not isinstance(query, str):
+        raise ValueError("oql/oxurl require text")
+    if action not in {"execute", "translate"} or (action == "execute" and query_format == "oxurl"):
+        raise ValueError("Unsupported query action or execution format")
+    path = "" if action == "execute" else "query"
+    if method == "POST":
+        return await _oa_api(path, params, "POST", {query_format: query})
+    encoded_query = json.dumps(query) if isinstance(query, dict) else query
+    if action == "translate":
+        path += f"/{query_format}/{_oa_segment(encoded_query)}"
+        return await _oa_api(path, params)
+    return await _oa_api(path, {**params, query_format: encoded_query})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_status(action: Literal["rate_limit", "changefiles"] = "rate_limit",
+                          date: str | None = None) -> dict:
+    """Read /rate-limit (credentials redacted) or /changefiles[/{date}].
+
+    changefiles lists available dates or returns metadata/download links for YYYY-MM-DD;
+    requires a paid OpenAlex plan. Does not download any files. date is only valid
+    for changefiles. Uses the configured key and the shared 1 request/s limiter.
+    """
+    if action == "rate_limit" and date is None:
+        return await _oa_api("rate-limit")
+    if action != "changefiles":
+        raise ValueError("date is only supported for changefiles")
+    if date is not None:
+        datetime.strptime(date, "%Y-%m-%d")
+    return await _oa_api("changefiles" + ("/" + _oa_segment(date) if date else ""))
+
+
+_OA_ACCOUNT_READ_ROUTES = {
+    "collections": "collections", "collection": "collections/{collection_id}",
+    "members": "collections/{collection_id}/members",
+    "imports": "collections/{collection_id}/imports",
+    "import": "collections/{collection_id}/imports/{import_id}",
+    "saved_searches": "saved-searches", "saved_search": "saved-searches/{saved_search_id}",
+}
+_OA_ACCOUNT_WRITE_ROUTES = {
+    "create_collection": ("POST", "collections"),
+    "update_collection": ("PATCH", "collections/{collection_id}"),
+    "delete_collection": ("DELETE", "collections/{collection_id}"),
+    "add_members": ("POST", "collections/{collection_id}/members"),
+    "remove_members": ("DELETE", "collections/{collection_id}/members"),
+    "remove_member": ("DELETE", "collections/{collection_id}/members/{member_id}"),
+    "import_collection": ("POST", "collections/{collection_id}/imports"),
+    "create_saved_search": ("POST", "saved-searches"),
+    "update_saved_search": ("PATCH", "saved-searches/{saved_search_id}"),
+    "delete_saved_search": ("DELETE", "saved-searches/{saved_search_id}"),
+    "curate": ("POST", "curations"),
+}
+
+
+def _oa_account_path(template: str, identifiers: dict[str, str | None]) -> str:
+    required = set(re.findall(r"\{(\w+)\}", template))
+    if any(value is not None and name not in required for name, value in identifiers.items()):
+        raise ValueError("An identifier was provided that this action does not use")
+    encoded = {}
+    for name in required:
+        value = identifiers.get(name)
+        if value is None:
+            raise ValueError(f"{name} is required")
+        encoded[name] = _oa_segment(value)
+    return template.format_map(encoded)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_account_read(
+    action: Literal["collections", "collection", "members", "imports", "import",
+                    "saved_searches", "saved_search"],
+    collection_id: str | None = None, import_id: str | None = None,
+    saved_search_id: str | None = None,
+    params: dict[str, str | int | bool] | None = None,
+) -> dict:
+    """Read collections, members, import jobs and saved searches from OpenAlex.
+
+    collections: GET /collections (public plus yours); collection: /collections/{id}.
+    members: /collections/{id}/members; accepts page/per_page (max 1000), cursor,
+    or format=csv for all members (potentially large, explicitly requested only).
+    imports: /collections/{id}/imports; import adds /{import_id} for job progress.
+    saved_searches: /saved-searches; saved_search adds /{saved_search_id}.
+    params forwards native filter/search/sort/group_by/select/page/per_page/cursor
+    on collections, and has_alert/page/per_page on saved_searches. Endpoint-specific
+    validation is delegated to OpenAlex. Returns one page, preserving cursors and codes.
+    Private resources require a PERSONAL OPENALEX_API_KEY; organization keys cannot
+    own collections or saved searches. These reads do not modify your account.
+    """
+    if action not in _OA_ACCOUNT_READ_ROUTES:
+        raise ValueError("Unknown account read action")
+    path = _oa_account_path(_OA_ACCOUNT_READ_ROUTES[action], {
+        "collection_id": collection_id, "import_id": import_id,
+        "saved_search_id": saved_search_id})
+    return await _oa_api(path, params)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                                     idempotentHint=False))
+async def openalex_account_write(
+    action: Literal["create_collection", "update_collection", "delete_collection",
+                    "add_members", "remove_members", "remove_member", "import_collection",
+                    "create_saved_search", "update_saved_search", "delete_saved_search", "curate"],
+    body: dict | list[dict] | None = None, collection_id: str | None = None,
+    member_id: str | None = None, saved_search_id: str | None = None,
+    params: dict[str, str | int | bool] | None = None, confirm: bool = False,
+) -> dict:
+    """Modify OpenAlex account data. Defaults to preview ONLY; never silently confirm.
+
+    Show the exact operation/body and obtain explicit user approval BEFORE calling
+    with confirm=true. Requires the server's PERSONAL OPENALEX_API_KEY and appropriate
+    ownership/curator permissions. Successful writes are not automatically retried.
+
+    create_collection: POST /collections; body display_name, entity_type, optional
+    description, access, member_ids (max 10000); or copy_of to copy a collection.
+    update_collection: PATCH /collections/{collection_id}; display_name/description/access.
+    delete_collection: DELETE that path; permanently removes collection and members.
+    add_members: POST /collections/{collection_id}/members with body.member_ids.
+    remove_members: DELETE same path, params.member_ids comma-string (max 100), NO body.
+    remove_member: DELETE /collections/{collection_id}/members/{member_id}, NO body.
+    import_collection: POST /collections/{collection_id}/imports with exactly one of
+    body.query (OpenAlex search URL), body.oql, body.copy_of; optional exclude_ids.
+    Import executes server-side, can CONSUME QUERY CREDITS and add up to 1000000 members.
+    Inspect progress with openalex_account_read; no polling or import is automatic.
+
+    create_saved_search: POST /saved-searches with body.name, body.url, optional
+    description and alert={frequency:daily|weekly|monthly}; sends future account emails.
+    update_saved_search: PATCH /saved-searches/{saved_search_id}; same fields optional,
+    alert=null disables emails. delete_saved_search: DELETE path; also deletes its alert.
+
+    curate: POST https://user.openalex.org/curations using Bearer authentication;
+    body is a correction object or list of objects, each with entity, entity_id,
+    property, action, value. Correct authorships, display_name, full_name or orcid.
+    Only submit corrections the user has reviewed; changes can affect public records.
+    The API validates permissions and correction syntax. No admin/legacy routes.
+    """
+    if action not in _OA_ACCOUNT_WRITE_ROUTES:
+        raise ValueError("Unknown account write action")
+    method, template = _OA_ACCOUNT_WRITE_ROUTES[action]
+    path = _oa_account_path(template, {"collection_id": collection_id, "member_id": member_id,
+                                      "saved_search_id": saved_search_id})
+    if "api_key" in (params or {}):
+        raise ValueError("Configure the API key in the server environment")
+    if method == "DELETE" and body is not None:
+        raise ValueError("DELETE actions do not accept a body")
+    if method != "DELETE" and not body:
+        raise ValueError("This action requires a non-empty body")
+    if isinstance(body, list) and action != "curate":
+        raise ValueError("Only curate accepts an array of objects")
+    if action == "remove_members" and not (params or {}).get("member_ids"):
+        raise ValueError("remove_members requires params.member_ids")
+    if not confirm:
+        return {"status": "confirmation_required", "action": action, "method": method,
+                "host": "user.openalex.org" if action == "curate" else "api.openalex.org",
+                "path": path, "body": _oa_public_data(body), "params": _oa_public_data(params or {})}
+    if not OA_KEY:
+        raise ValueError("OPENALEX_API_KEY is required for account writes")
+    return await _oa_api(path, params, method, body, user_api=action == "curate")
+
+
 async def _openalex(c: httpx.AsyncClient, title: str) -> list[dict]:
     params = {"search": _norm(title), "per-page": 5,
               "select": "doi,title,publication_year,authorships,primary_location,type"}
-    if EMAIL:
-        params["mailto"] = EMAIL
-    r = await c.get("https://api.openalex.org/works", params=params)
+    r = await _oa_request(c, "works", params)
     r.raise_for_status()
     out = []
     for it in r.json().get("results", []):
@@ -368,12 +744,45 @@ def _biblio_norm(s) -> str:
     return s
 
 
+async def _doi_agency(d: str) -> str | None:
+    """Registration agency from doi.org/doiRA (Crossref, DataCite, mEDRA, JaLC...); None if unregistered."""
+    r = await _http().get(f"https://doi.org/doiRA/{_doi_path(d)}")
+    r.raise_for_status()
+    data = r.json()
+    return data[0].get("RA") if data else None
+
+
+def _datacite_as_crossref(a: dict) -> dict:
+    """DataCite attributes in the Crossref message shape, so verify_doi has one comparison path."""
+    titles = a.get("titles") or []
+    main = next((t["title"] for t in titles if not t.get("titleType")),
+                titles[0]["title"] if titles else "")
+    sub = next((t["title"] for t in titles if t.get("titleType") == "Subtitle"), None)
+    cont = a.get("container") or {}
+    pages = "-".join(p for p in (cont.get("firstPage"), cont.get("lastPage")) if p) or None
+    pub = a.get("publisher")
+    return {"title": [main], "subtitle": [sub] if sub else [],
+            "author": [{"family": c.get("familyName") or c.get("name", "")}
+                       for c in a.get("creators") or []],
+            "issued": {"date-parts": [[a.get("publicationYear")]]},
+            "container-title": [cont["title"]] if cont.get("title") else [],
+            "type": (a.get("types") or {}).get("resourceTypeGeneral"),
+            "volume": cont.get("volume"), "issue": cont.get("issue"), "page": pages,
+            "publisher": pub.get("name") if isinstance(pub, dict) else pub, "updated-by": []}
+
+
 @mcp.tool()
 async def verify_doi(doi: str, expected_title: str | None = None,
                      expected_first_author: str | None = None, expected_year: int | None = None,
                      expected_volume: str | None = None, expected_issue: str | None = None,
                      expected_pages: str | None = None) -> dict:
-    """Check that a DOI is registered in Crossref and return its metadata.
+    """Check that a DOI is registered and return its metadata from its registration agency.
+
+    Crossref DOIs are read from Crossref. When Crossref does not know the DOI, doi.org/doiRA
+    names the agency: DataCite DOIs (Zenodo, arXiv, OSF, datasets) are read from DataCite and
+    go through the same checks. Other agencies (mEDRA, JaLC...) return status
+    'registered_unsupported_agency': registered, but title, authors and year are unverified.
+    'registration_agency' is reported for every registered DOI.
 
     If expected_title is given, also returns a title-similarity score, which detects
     DOIs that exist but belong to a different paper; status 'registered_match' or
@@ -384,22 +793,32 @@ async def verify_doi(doi: str, expected_title: str | None = None,
     issued, print or online year). Cite the source values whenever they differ.
     'is_retracted' and 'updates' report retractions, corrections and expressions of concern
     registered in Crossref (including Retraction Watch data): a retracted work may still
-    be cited, but the reference must say so.
+    be cited, but the reference must say so. DataCite has no retraction source: for those
+    DOIs 'is_retracted' is null (unknown), never false, unless the title says RETRACTED.
     """
     d = _clean_doi(doi)
     if not d:
         return {"status": "invalid_format", "doi": doi}
+    agency = "Crossref"
     try:
         code, m = await _crossref_work(d)
         if code == 404:
-            # Non-Crossref DOIs (e.g. DataCite, arXiv) resolve via doi.org
-            h = await _http().head(f"https://doi.org/{_doi_path(d)}", follow_redirects=False)
-            return {"status": "registered_non_crossref" if h.status_code in (301, 302, 303)
-                    else "not_found", "doi": d}
-    except httpx.HTTPError as e:
-        return {"status": "error", "doi": d, "detail": _err("crossref", e)}
+            agency = await _doi_agency(d)
+            if agency is None:
+                return {"status": "not_found", "doi": d}
+            if agency != "DataCite":
+                return {"status": "registered_unsupported_agency", "doi": d,
+                        "registration_agency": agency,
+                        "detail": f"registered with {agency}: no supported metadata API, "
+                                  "so title, authors and year are unverified"}
+            r = await _http().get(f"https://api.datacite.org/dois/{_doi_path(d)}")
+            code, m = r.status_code, None
+            if code == 200:
+                m = _datacite_as_crossref(r.json()["data"]["attributes"])
+    except (httpx.HTTPError, ValueError, KeyError) as e:
+        return {"status": "error", "doi": d, "detail": _err(agency or "doi.org", e)}
     if code != 200 or m is None:
-        return {"status": "error", "doi": d, "http_status": code}
+        return {"status": "error", "doi": d, "registration_agency": agency, "http_status": code}
     raw_title = (m.get("title") or [""])[0]
     subtitle = (m.get("subtitle") or [None])[0]
     years = {k: (m.get(k, {}).get("date-parts") or [[None]])[0][0]
@@ -409,6 +828,7 @@ async def verify_doi(doi: str, expected_title: str | None = None,
                for u in m.get("updated-by", [])]
     out = {
         "status": "registered", "doi": d, "url": f"https://doi.org/{d}",
+        "registration_agency": agency,
         "title": _strip_html(raw_title), "subtitle": _strip_html(subtitle),
         "authors": [a.get("family", a.get("name", "")) for a in m.get("author", [])],
         "year": years["issued"], "year_print": years["published-print"],
@@ -422,6 +842,8 @@ async def verify_doi(doi: str, expected_title: str | None = None,
                         or bool(RETRACTED_PREFIX_RE.match(raw_title)),
         "updates": updates,
     }
+    if agency != "Crossref" and not out["is_retracted"]:
+        out["is_retracted"] = None
     expected = {"volume": expected_volume, "issue": expected_issue, "pages": expected_pages}
     checks = {}
     for field, exp in expected.items():
@@ -563,24 +985,94 @@ async def verify_book(title: str, first_author: str | None = None, year: int | N
     return {"status": status, "best": best, "editions": others, "source_errors": errors}
 
 
+TITLE_SMALL_WORDS = {
+    "about", "above", "after", "against", "among", "around", "before", "between", "beyond",
+    "from", "into", "over", "than", "that", "their", "these", "this", "those", "through",
+    "toward", "towards", "under", "until", "upon", "versus", "when", "where", "which", "while",
+    "with", "within", "without"}
+
+
+def _title_case_suspected(title: str | None) -> bool | None:
+    """True if the title looks title-cased, False if sentence-cased, None if too short to judge.
+
+    Counts capitalised words among those a sentence-case title would normally lower:
+    skips the first word and the first after a colon, acronyms, words with inner capitals,
+    short words and prepositions. Proper nouns inflate the count, so it is only a flag.
+    """
+    words = (title or "").split()
+    eligible = capitalised = 0
+    at_start = True
+    for w in words:
+        core = w.strip("\"'\u201c\u201d\u2018\u2019()[]{}.,;:!?")
+        skip, at_start = at_start, w.endswith((":", "?", "!", "."))
+        if (skip or len(core) < 4 or not core[0].isalpha() or core.isupper()
+                or any(ch.isupper() for ch in core[1:]) or core.lower() in TITLE_SMALL_WORDS):
+            continue
+        eligible += 1
+        capitalised += core[0].isupper()
+    if eligible < 3:
+        return None
+    return capitalised / eligible >= 0.8
+
+
+async def _csl_json(d: str) -> dict | None:
+    try:
+        r = await _http().get(f"https://doi.org/{_doi_path(d)}", follow_redirects=True,
+                              headers={"Accept": "application/vnd.citationstyles.csl+json"})
+        data = r.json() if r.status_code == 200 and "json" in r.headers.get("content-type", "") else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 @mcp.tool()
 async def format_apa(doi: str) -> dict:
-    """Return the APA-formatted reference for a DOI (Crossref/doi.org content negotiation)."""
+    """APA reference for a DOI from doi.org content negotiation, plus the fields behind it.
+
+    The text reproduces the metadata as the registration agency holds it: capitalisation,
+    given names and pages are as deposited, and it is NOT checked against the cited work
+    (run verify_doi first; on a mismatch compose the reference from the verified values).
+    'title_case_suspected' is true when the title looks title-cased, but APA wants sentence
+    case for article and chapter titles. It is a flag, not a conversion: lower the title
+    by hand, keeping proper nouns and acronyms. null means too short to judge or no record.
+    'fields' holds the structured record (authors, year, container, volume, issue, page).
+    """
     d = _clean_doi(doi)
     if not d:
         return {"status": "invalid_format", "doi": doi}
-    try:
-        r = await _http().get(f"https://doi.org/{_doi_path(d)}", follow_redirects=True,
-                              headers={"Accept": "text/x-bibliography; style=apa"})
-    except httpx.HTTPError as e:
-        return {"status": "error", "doi": d, "detail": _err("doi.org", e)}
+    r, csl = await asyncio.gather(
+        _http().get(f"https://doi.org/{_doi_path(d)}", follow_redirects=True,
+                    headers={"Accept": "text/x-bibliography; style=apa"}),
+        _csl_json(d), return_exceptions=True)
+    if isinstance(r, httpx.HTTPError):
+        return {"status": "error", "doi": d, "detail": _err("doi.org", r)}
+    if isinstance(r, BaseException):
+        raise r
+    if isinstance(csl, BaseException):
+        raise csl
     if r.status_code != 200:
         return {"status": "error", "http_status": r.status_code, "doi": d}
     if not r.headers.get("content-type", "").startswith("text/x-bibliography"):
         # Registration agency without content negotiation: doi.org fell through to the landing page
         return {"status": "unsupported", "doi": d,
                 "detail": "no APA rendering available for this DOI; format it manually"}
-    return {"status": "ok", "doi": d, "apa": r.text.strip()}
+    out = {"status": "ok", "doi": d, "apa": r.text.strip(), "title_case_suspected": None}
+    if csl:
+        title = csl.get("title")
+        title = title if isinstance(title, str) else None
+        issued = ((csl.get("issued") or {}).get("date-parts") or [[None]])[0][0]
+        out["title_case_suspected"] = _title_case_suspected(title)
+        out["fields"] = {
+            "title": title,
+            "authors": [{"family": a.get("family") or a.get("literal") or a.get("name"),
+                         "given": a.get("given")} for a in csl.get("author") or []],
+            "year": issued, "container": csl.get("container-title"),
+            "volume": csl.get("volume"), "issue": csl.get("issue"), "page": csl.get("page"),
+            "publisher": csl.get("publisher"), "type": csl.get("type")}
+        if out["title_case_suspected"]:
+            out["note"] = ("The title looks title-cased; APA requires sentence case for article "
+                           "and chapter titles. Lower it by hand, keeping proper nouns and acronyms.")
+    return out
 
 
 OA_SELECT = ("id,doi,title,publication_year,type,authorships,primary_location,"
@@ -633,6 +1125,285 @@ async def _s2(c: httpx.AsyncClient, method: str, url: str, **kw) -> httpx.Respon
             wait = 2.0 ** attempt
         await asyncio.sleep(min(wait, 10.0))
     return r
+
+
+def _s2_segment(value: str | None, name: str) -> str:
+    if not value or not value.strip() or value.strip() in {".", ".."}:
+        raise ValueError(f"{name} is required and must be a non-empty identifier")
+    return quote(value.strip(), safe="")
+
+
+def _s2_ids(ids: list[str] | None, maximum: int) -> list[str]:
+    if not ids or len(ids) > maximum or any(not value.strip() for value in ids):
+        raise ValueError(f"Provide between 1 and {maximum} non-empty ids")
+    return [value.strip() for value in ids]
+
+
+async def _s2_api(path: str, params: dict[str, str | int] | None = None,
+                  body: dict | None = None) -> dict:
+    try:
+        response = await _s2(_http(), "POST" if body is not None else "GET",
+                             f"https://api.semanticscholar.org/{path}",
+                             params=params or {}, **({"json": body} if body is not None else {}))
+    except httpx.HTTPError as error:
+        return {"status": "error", "source": "semantic_scholar",
+                "detail": _err("semantic_scholar", error)}
+    try:
+        data = response.json()
+    except ValueError:
+        return {"status": "error", "http_status": response.status_code,
+                "detail": "Semantic Scholar returned a non-JSON response"}
+    return {"status": "ok" if response.is_success else "error",
+            "http_status": response.status_code, "data": data}
+
+
+async def _s2_paper(
+    action: Literal["details", "authors", "citations", "references", "batch",
+                    "search", "bulk", "match", "autocomplete"],
+    paper_id: str | None = None, ids: list[str] | None = None,
+    params: dict[str, str | int] | None = None,
+) -> dict:
+    """Access all nine Academic Graph paper endpoints without normalizing their results.
+
+    details/authors/citations/references require paper_id (S2 hash, CorpusId:123,
+    DOI:10.x/y, ARXIV:2401.01234, PMID:123 or other API-supported identifier).
+    batch requires ids (1-500); missing papers remain null in the returned list.
+    search, bulk, match and autocomplete use params.query, not paper_id.
+    A title match is an API candidate, NOT a verified bibliographic match: use find_doi
+    and verify_doi for verification.
+
+    params uses native API query names: fields (comma-separated, including nested
+    fields or embedding.specter_v2), query, year, publicationDateOrYear,
+    publicationTypes, venue, fieldsOfStudy, minCitationCount, openAccessPdf (empty
+    string). Availability depends on the endpoint; API validation errors are preserved.
+    search: offset/limit (max 100, up to 1000 results), plain text only.
+    bulk: Boolean + | - and quoted phrases, sort (e.g. citationCount:desc), token
+    for the next page; up to 1000 results/page, no limit/offset parameter.
+    authors/citations/references: offset/limit (max 1000). citations/references
+    support fields=contexts,intents,isInfluential,title,authors.
+    autocomplete: query only. Each call fetches ONE page; data.next/data.token
+    are preserved. All API families share the 1 request/s limiter and retries.
+    """
+    if action == "batch":
+        if paper_id is not None:
+            raise ValueError("batch uses ids, not paper_id")
+        return await _s2_api("graph/v1/paper/batch", params, {"ids": _s2_ids(ids, 500)})
+    if ids is not None:
+        raise ValueError("ids is only supported for batch")
+    if action in {"details", "authors", "citations", "references"}:
+        path = f"graph/v1/paper/{_s2_segment(paper_id, 'paper_id')}"
+        if action != "details":
+            path += f"/{action}"
+    else:
+        if paper_id is not None:
+            raise ValueError("Search actions use params.query, not paper_id")
+        routes = {"search": "search", "bulk": "search/bulk", "match": "search/match",
+                  "autocomplete": "autocomplete"}
+        if action not in routes:
+            raise ValueError("Unknown paper action")
+        if action != "bulk" and not (params or {}).get("query"):
+            raise ValueError("params.query is required")
+        path = f"graph/v1/paper/{routes[action]}"
+    return await _s2_api(path, params)
+
+
+async def _s2_author(
+    action: Literal["details", "papers", "search", "batch"],
+    author_id: str | None = None, ids: list[str] | None = None,
+    params: dict[str, str | int] | None = None,
+) -> dict:
+    """Access all four Academic Graph author endpoints, preserving native JSON.
+
+    details/papers require author_id, a Semantic Scholar author ID (not a name).
+    search requires params.query (author name); batch requires ids (1-1000).
+    params.fields selects fields such as name,affiliations,normalizedAffiliations,
+    externalIds,paperCount,citationCount,hIndex,papers.title (endpoint dependent).
+    search/papers accept offset and limit (max 1000); papers also accepts
+    publicationDateOrYear. Each call fetches one page; data.next is preserved.
+    All calls share the Semantic Scholar 1 request/s limit, authentication and retries.
+    """
+    if action == "batch":
+        if author_id is not None:
+            raise ValueError("batch uses ids, not author_id")
+        return await _s2_api("graph/v1/author/batch", params, {"ids": _s2_ids(ids, 1000)})
+    if ids is not None:
+        raise ValueError("ids is only supported for batch")
+    if action == "search":
+        if author_id is not None or not (params or {}).get("query"):
+            raise ValueError("search requires params.query, not author_id")
+        path = "graph/v1/author/search"
+    elif action in {"details", "papers"}:
+        path = f"graph/v1/author/{_s2_segment(author_id, 'author_id')}"
+        if action == "papers":
+            path += "/papers"
+    else:
+        raise ValueError("Unknown author action")
+    return await _s2_api(path, params)
+
+
+async def _s2_snippets(query: str,
+                       params: dict[str, str | int] | None = None) -> dict:
+    """Search text excerpts via GET /graph/v1/snippet/search; preserve native JSON.
+
+    query is plain text. params supports fields (e.g. snippet.text,snippet.section),
+    paperIds (comma-separated, approximately 100), authors (comma-separated, max 10,
+    AND semantics with fuzzy matching), year, publicationDateOrYear, venue,
+    fieldsOfStudy, minCitationCount, insertedBefore and limit (max 1000).
+    No offset/token pagination. Results retain scores, section, offsets, annotations,
+    paper metadata and license disclaimers. An excerpt is not the full paper.
+    Shares the Semantic Scholar 1 request/s limit, authentication and retries.
+    """
+    if not query.strip() or "query" in (params or {}):
+        raise ValueError("Provide a non-empty query using the query argument only")
+    return await _s2_api("graph/v1/snippet/search", {**(params or {}), "query": query})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def semantic_scholar_recommendations(
+    action: Literal["single", "multi"], paper_id: str | None = None,
+    positive_paper_ids: list[str] | None = None,
+    negative_paper_ids: list[str] | None = None,
+    params: dict[str, str | int] | None = None,
+) -> dict:
+    """Access both Recommendations API endpoints, preserving recommendedPapers.
+
+    single: GET /recommendations/v1/papers/forpaper/{paper_id}; requires paper_id.
+    params supports from ('recent' or 'all-cs'), limit (max 500), fields.
+    multi: POST /recommendations/v1/papers/; requires positive_paper_ids and accepts
+    optional negative_paper_ids to steer recommendations away from unwanted papers.
+    params supports limit (max 500), fields; 'from' is only supported by single.
+    IDs use the API-supported paper identifier formats, e.g. DOI:10.x/y.
+    One call, no automatic pagination. Recommendations are not verified citations.
+    Shares the Semantic Scholar 1 request/s limit, authentication and retries.
+    """
+    if action == "single":
+        if positive_paper_ids is not None or negative_paper_ids is not None:
+            raise ValueError("single uses paper_id, not positive/negative paper lists")
+        return await _s2_api(
+            f"recommendations/v1/papers/forpaper/{_s2_segment(paper_id, 'paper_id')}", params)
+    if action != "multi":
+        raise ValueError("Unknown recommendations action")
+    if paper_id is not None or not positive_paper_ids:
+        raise ValueError("multi requires positive_paper_ids, not paper_id")
+    if any(not value.strip() for value in [*positive_paper_ids, *(negative_paper_ids or [])]):
+        raise ValueError("Paper identifiers must not be empty")
+    if "from" in (params or {}):
+        raise ValueError("params.from is only supported by single")
+    body = {"positivePaperIds": [value.strip() for value in positive_paper_ids],
+            "negativePaperIds": [value.strip() for value in (negative_paper_ids or [])]}
+    return await _s2_api("recommendations/v1/papers/", params, body)
+
+
+async def _s2_datasets(
+    action: Literal["releases", "release", "dataset", "diffs"],
+    release_id: str = "latest", dataset_name: str | None = None,
+    start_release_id: str | None = None,
+) -> dict:
+    """Access all four Datasets API endpoints; return metadata and download links only.
+
+    releases: GET /datasets/v1/release/ lists available release IDs.
+    release: GET /datasets/v1/release/{release_id} lists datasets and license metadata.
+    dataset: GET /datasets/v1/release/{release_id}/dataset/{dataset_name} returns
+    metadata and temporary pre-signed download URLs for the dataset's partitions.
+    diffs: GET /datasets/v1/diffs/{start_release_id}/to/{release_id}/{dataset_name}
+    returns incremental update/delete file URLs between releases.
+    release_id defaults to 'latest'; start_release_id is required for diffs.
+    Discover dataset names with release, rather than guessing them. Download access
+    depends on the API key's permissions. Files can be very large: no file is downloaded
+    or applied locally. Preserve README/license information and treat signed URLs as
+    temporary access credentials. All calls share the 1 request/s limiter and retries.
+    """
+    if action != "diffs" and start_release_id is not None:
+        raise ValueError("start_release_id is only supported for diffs")
+    if action in {"releases", "release"} and dataset_name is not None:
+        raise ValueError("dataset_name is only supported for dataset or diffs")
+    if action == "releases":
+        path = "datasets/v1/release/"
+    elif action == "release":
+        path = f"datasets/v1/release/{_s2_segment(release_id, 'release_id')}"
+    elif action == "dataset":
+        path = (f"datasets/v1/release/{_s2_segment(release_id, 'release_id')}"
+                f"/dataset/{_s2_segment(dataset_name, 'dataset_name')}")
+    elif action == "diffs":
+        path = (f"datasets/v1/diffs/{_s2_segment(start_release_id, 'start_release_id')}"
+                f"/to/{_s2_segment(release_id, 'release_id')}"
+                f"/{_s2_segment(dataset_name, 'dataset_name')}")
+    else:
+        raise ValueError("Unknown datasets action")
+    return await _s2_api(path)
+
+
+_S2_ACTIONS = {
+    "paper_details": ("paper", "details"), "paper_authors": ("paper", "authors"),
+    "paper_citations": ("paper", "citations"), "paper_references": ("paper", "references"),
+    "paper_batch": ("paper", "batch"), "paper_search": ("paper", "search"),
+    "paper_bulk": ("paper", "bulk"), "paper_match": ("paper", "match"),
+    "paper_autocomplete": ("paper", "autocomplete"),
+    "author_details": ("author", "details"), "author_papers": ("author", "papers"),
+    "author_search": ("author", "search"), "author_batch": ("author", "batch"),
+    "snippets": ("snippets", ""),
+    "dataset_releases": ("dataset", "releases"), "dataset_release": ("dataset", "release"),
+    "dataset_files": ("dataset", "dataset"), "dataset_diffs": ("dataset", "diffs"),
+}
+_S2_ARGS = {"paper": {"paper_id", "ids"}, "author": {"author_id", "ids"},
+            "snippets": {"query"}, "dataset": {"release_id", "dataset_name", "start_release_id"}}
+S2Action = Literal[
+    "paper_details", "paper_authors", "paper_citations", "paper_references", "paper_batch",
+    "paper_search", "paper_bulk", "paper_match", "paper_autocomplete", "author_details",
+    "author_papers", "author_search", "author_batch", "snippets", "dataset_releases",
+    "dataset_release", "dataset_files", "dataset_diffs"]
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def semantic_scholar(
+    action: S2Action, paper_id: str | None = None, author_id: str | None = None,
+    ids: list[str] | None = None, query: str | None = None, release_id: str | None = None,
+    dataset_name: str | None = None, start_release_id: str | None = None,
+    params: dict[str, str | int] | None = None,
+) -> dict:
+    """Semantic Scholar Academic Graph and Datasets; native JSON, one page per call.
+
+    Returns status, http_status and data exactly as the API sent them. Recommendations
+    has its own tool. Actions and the arguments each one needs:
+    - paper_details, paper_authors, paper_citations, paper_references: paper_id (S2 hash,
+      CorpusId:123, DOI:10.x/y, ARXIV:2401.01234, PMID:123...).
+    - paper_batch: ids (1-500); papers not found stay null in the list.
+    - paper_search (plain text, limit up to 100), paper_bulk (Boolean + | - and "phrases",
+      sort such as citationCount:desc, token pagination, up to 1000 per page),
+      paper_match (closest title: a candidate, NOT a verified match; use find_doi and
+      verify_doi), paper_autocomplete: all take params.query.
+    - author_details, author_papers: author_id (a Semantic Scholar author ID, not a name).
+      author_search: params.query. author_batch: ids (1-1000).
+    - snippets: query (plain text); params: paperIds, authors (max 10, AND), year,
+      fields, limit up to 1000. An excerpt is not the full paper.
+    - dataset_releases; dataset_release (release_id, default latest); dataset_files
+      (+ dataset_name); dataset_diffs (start_release_id, release_id, dataset_name).
+      Only metadata and temporary signed links come back: no file is downloaded.
+      Find dataset names with dataset_release.
+    params uses the API's own names: fields (nested allowed, e.g. citations.title), year,
+    publicationDateOrYear, venue, fieldsOfStudy, minCitationCount, openAccessPdf (empty
+    string), offset and limit (up to 1000 on lists). For the next page pass data.next as
+    offset, or data.token as token for paper_bulk. Arguments an action does not use are
+    rejected. Shares the 1 request/s limit, the API key and the 429 retries.
+    """
+    if action not in _S2_ACTIONS:
+        raise ValueError("Unknown Semantic Scholar action")
+    family, op = _S2_ACTIONS[action]
+    given = {name for name, value in {
+        "paper_id": paper_id, "author_id": author_id, "ids": ids, "query": query,
+        "release_id": release_id, "dataset_name": dataset_name,
+        "start_release_id": start_release_id}.items() if value is not None}
+    if given - _S2_ARGS[family]:
+        raise ValueError(f"{action} does not accept: {', '.join(sorted(given - _S2_ARGS[family]))}")
+    if family == "paper":
+        return await _s2_paper(op, paper_id=paper_id, ids=ids, params=params)
+    if family == "author":
+        return await _s2_author(op, author_id=author_id, ids=ids, params=params)
+    if family == "snippets":
+        return await _s2_snippets(query or "", params)
+    if params:
+        raise ValueError("dataset actions take no params")
+    return await _s2_datasets(op, release_id or "latest", dataset_name, start_release_id)
 
 
 async def _fill_abstracts_s2(c: httpx.AsyncClient, records: list[dict]) -> str | None:
@@ -987,10 +1758,8 @@ async def _search_openalex(query, year_from, year_to, doc_types, limit, page, sc
     else:
         params["search"] = query
     params["filter"] = ",".join(filters)
-    if EMAIL:
-        params["mailto"] = EMAIL
     c = _http()
-    r = await c.get("https://api.openalex.org/works", params=params)
+    r = await _oa_request(c, "works", params)
     if r.status_code == 400:
         return {"status": "invalid_query", "detail": r.text[:300]}
     r.raise_for_status()
@@ -1019,7 +1788,7 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
     database: one name, a comma-separated list, or 'all'. Available:
     openalex (default; journals, books, chapters, many preprints; best abstracts and
     keywords), europepmc (life sciences, psychology, health, preprints), semanticscholar
-    (broad, TL;DRs; free-text only; rate-limited without API key), hal (French open
+    (broad, TL;DRs; free-text only; 1 request/s across endpoints, also with API key), hal (French open
     archive; humanities, social sciences, HCI), doaj (open-access journals, all fields),
     arxiv (physics, maths, computer science incl. HCI and AI; no author keywords),
     osf (PsyArXiv, SocArXiv and other OSF preprint servers; title-only search),
@@ -1151,9 +1920,7 @@ def _cg_node(it: dict) -> dict:
 
 
 async def _oa_get(path: str, **params) -> dict:
-    if EMAIL:
-        params["mailto"] = EMAIL
-    r = await _http().get(f"https://api.openalex.org/{path}", params=params)
+    r = await _oa_request(_http(), path, params)
     r.raise_for_status()
     return r.json()
 
@@ -1207,11 +1974,49 @@ def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: in
     return edges, cocitation, coupling
 
 
+def _coverage_verdict(openalex: int, other: int) -> str:
+    """Compare two counts of the same thing; 0.8 is a heuristic, definitions differ per source."""
+    if not openalex and not other:
+        return "both_empty"
+    if not openalex:
+        return "openalex_missing"
+    if not other:
+        return "semantic_scholar_missing"
+    if min(openalex, other) / max(openalex, other) >= 0.8:
+        return "concordant"
+    return "openalex_lower" if openalex < other else "semantic_scholar_lower"
+
+
+async def _s2_coverage(nodes: dict, seed_ids: list[str]) -> tuple[list[dict], str | None]:
+    """Seed reference and citation counts in OpenAlex vs Semantic Scholar (one batch request)."""
+    with_doi = [sid for sid in seed_ids if nodes[sid].get("doi")]
+    if not with_doi:
+        return [], None
+    resp = await _s2(_http(), "POST", "https://api.semanticscholar.org/graph/v1/paper/batch",
+                     params={"fields": "referenceCount,citationCount"},
+                     json={"ids": [f"DOI:{nodes[sid]['doi']}" for sid in with_doi]})
+    if resp.status_code != 200:
+        return [], f"semantic_scholar: HTTP {resp.status_code}"
+    rows = []
+    for sid, hit in zip(with_doi, resp.json()):
+        row = {"id": sid, "doi": nodes[sid]["doi"], "openalex_references": len(nodes[sid]["refs"]),
+               "openalex_cited_by": nodes[sid]["cited_by"]}
+        if not hit:
+            rows.append({**row, "references_verdict": "not_in_semantic_scholar",
+                         "citations_verdict": "not_in_semantic_scholar"})
+            continue
+        refs, cites = hit.get("referenceCount") or 0, hit.get("citationCount") or 0
+        rows.append({**row, "semantic_scholar_references": refs, "semantic_scholar_cited_by": cites,
+                     "references_verdict": _coverage_verdict(row["openalex_references"], refs),
+                     "citations_verdict": _coverage_verdict(row["openalex_cited_by"], cites)})
+    return rows, None
+
+
 @mcp.tool()
 async def citation_graph(seeds: list[str], include_references: bool = True,
                          include_citing: bool = True, citing_per_seed: int = 20,
                          max_nodes: int = 150, min_cocitation: int = 2,
-                         min_coupling: int = 3) -> dict:
+                         min_coupling: int = 3, check_coverage: bool = True) -> dict:
     """Build a citation graph around seed works (DOIs or OpenAlex ids, max 10) for visualization.
 
     Nodes are the seeds, the works they cite (role 'reference') and the most-cited works
@@ -1239,6 +2044,12 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
     Tell the reader that distances in a force layout have no metric
     meaning and that citation counts favour older works. OpenAlex reference lists are
     incomplete for many humanities and older works: 'log.seeds_without_references' flags them.
+    'coverage_check' (check_coverage=True, one Semantic Scholar batch request, seeds with a
+    DOI only, never blocks the graph) compares each seed's reference and citation counts in
+    OpenAlex and Semantic Scholar: 'both_empty' means two sources agree there is nothing to
+    find; 'openalex_lower' or 'openalex_missing' means the graph under-counts that seed and
+    its absences are coverage gaps, not facts. Counts are definitions that differ per
+    source and both derive partly from Crossref, so 'concordant' is not independent proof.
     """
     seeds = seeds[:10]
     citing_per_seed = max(0, min(citing_per_seed, 100))
@@ -1292,15 +2103,25 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
     nodes.update((n["id"], n) for n in ranked[:room])
 
     edges, pairs, coupling = _graph_links(nodes, seed_ids, min_cocitation, min_coupling)
+    coverage: list[dict] = []
+    if check_coverage:
+        try:
+            coverage, err = await asyncio.wait_for(_s2_coverage(nodes, seed_ids), timeout=20)
+            if err:
+                errors.append(err)
+        except (httpx.HTTPError, asyncio.TimeoutError, ValueError) as e:
+            errors.append(_err("semantic_scholar coverage", e))
     return {
         "status": "ok",
         "nodes": [{k: v for k, v in n.items() if k != "refs"} for n in nodes.values()],
         "citation_edges": edges, "cocitation": pairs, "coupling": coupling,
+        "coverage_check": coverage,
         "log": {"source": "OpenAlex", "seeds": seed_ids, "nodes": len(nodes),
                 "citation_edges": len(edges), "cocitation_pairs": len(pairs),
                 "coupling_pairs": len(coupling), "min_cocitation": min_cocitation,
                 "min_coupling": min_coupling, "candidates_dropped": max(0, len(ranked) - room),
                 "seeds_without_references": [s for s in seed_ids if not nodes[s]["refs"]],
+                "seeds_without_doi": [s for s in seed_ids if not nodes[s].get("doi")],
                 "executed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
         "source_errors": errors,
     }
