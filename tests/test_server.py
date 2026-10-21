@@ -438,6 +438,7 @@ def test_openalex_account_writes_preview_and_confirmation(monkeypatch, action):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             monkeypatch.setattr(s, "_http", lambda: client)
             monkeypatch.setattr(s, "OA_KEY", "test-key")
+            monkeypatch.setattr(s, "OA_WRITES_ENABLED", True)
             preview = await s.openalex_account_write(action, body=body, params=params, **identifiers)
             assert preview["status"] == "confirmation_required"
             assert not attempts
@@ -550,7 +551,20 @@ def test_openalex_response_formats_and_errors(monkeypatch, failure):
 
 def test_openalex_write_requires_configured_key(monkeypatch):
     monkeypatch.setattr(s, "OA_KEY", "")
+    monkeypatch.setattr(s, "OA_WRITES_ENABLED", True)
     with pytest.raises(ValueError, match="OPENALEX_API_KEY"):
+        asyncio.run(s.openalex_account_write("create_collection", body={"display_name": "test"},
+                                              confirm=True))
+
+
+def test_openalex_write_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(s, "OA_WRITES_ENABLED", False)
+
+    def unexpected_http():
+        pytest.fail("Disabled OpenAlex writes must not send HTTP requests")
+
+    monkeypatch.setattr(s, "_http", unexpected_http)
+    with pytest.raises(ValueError, match="OPENALEX_ENABLE_WRITES=true"):
         asyncio.run(s.openalex_account_write("create_collection", body={"display_name": "test"},
                                               confirm=True))
 

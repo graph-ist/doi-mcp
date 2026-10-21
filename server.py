@@ -5,6 +5,7 @@ repositories (Europe PMC, HAL, DOAJ, arXiv, OSF, Zenodo). See README.md.
 Env (optional):
   CONTACT_EMAIL            used for Crossref/OpenAlex polite pool
     OPENALEX_API_KEY         authenticates OpenAlex requests via api_key
+    OPENALEX_ENABLE_WRITES   enables confirmed OpenAlex account writes; default false
     SEMANTIC_SCHOLAR_API_KEY authenticates requests; 1 request/s across all endpoints
   MCP_TRANSPORT            'stdio' (default) or 'http' (streamable HTTP on 127.0.0.1)
   PORT                     HTTP port, default 3002
@@ -42,6 +43,7 @@ mcp = FastMCP("paper-doi", stateless_http=True, transport_security=TransportSecu
 
 EMAIL = os.environ.get("CONTACT_EMAIL", "")
 OA_KEY = os.environ.get("OPENALEX_API_KEY", "")
+OA_WRITES_ENABLED = os.environ.get("OPENALEX_ENABLE_WRITES", "").strip().lower() == "true"
 S2_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 UA = f"paper-doi-mcp/{VERSION}" + (f" (mailto:{EMAIL})" if EMAIL else "")
 TITLE_THRESHOLD = 0.88
@@ -591,6 +593,8 @@ async def openalex_account_write(
         raise ValueError("Only curate accepts an array of objects")
     if action == "remove_members" and not (params or {}).get("member_ids"):
         raise ValueError("remove_members requires params.member_ids")
+    if confirm and not OA_WRITES_ENABLED:
+        raise ValueError("OpenAlex account writes are disabled; set OPENALEX_ENABLE_WRITES=true")
     if not confirm:
         return {"status": "confirmation_required", "action": action, "method": method,
                 "host": "user.openalex.org" if action == "curate" else "api.openalex.org",

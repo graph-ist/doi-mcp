@@ -24,7 +24,7 @@ flowchart TD
   Grafo --> HTTP
   SS --> HTTP
   OA --> HTTP
-  HTTP --> Gestione["Limiti per host, intervalli e retry previsti"]
+  HTTP --> Gestione["Limiti per host; retry selettivi per Semantic Scholar e alcune operazioni OpenAlex"]
 
   Gestione --> Fonti{"Fonti selezionate in base allo strumento"}
   Fonti -->|find_doi| Candidati["Crossref · Semantic Scholar · OpenAlex · Open Library"]
@@ -114,7 +114,7 @@ Esempio di argomenti per `openalex_entity`, lavori dal 2020 raggruppati per anno
 
 **Account e conferma.** Le azioni di lettura sono `collections`, `collection`, `members`, `imports`, `import`, `saved_searches`, `saved_search`. Le azioni di scrittura sono `create_collection`, `update_collection`, `delete_collection`, `add_members`, `remove_members`, `remove_member`, `import_collection`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `curate`. Gli identificatori si passano negli argomenti dedicati; il JSON nativo va in `body`. Per la rimozione multipla dei membri si usa invece `params.member_ids`, una stringa separata da virgole, senza body.
 
-Con `confirm=false` (predefinito), una scrittura restituisce solo l'anteprima `confirmation_required` e non invia alcuna richiesta. Dopo aver mostrato l'operazione e ottenuto l'approvazione dell'utente, ripetere la stessa chiamata con `confirm=true`. Esempio di anteprima per creare una collezione:
+Con `confirm=false` (predefinito), una scrittura restituisce solo l'anteprima `confirmation_required` e non invia alcuna richiesta. Per inviare una scrittura servono sia `confirm=true` sia `OPENALEX_ENABLE_WRITES=true` nell'ambiente del server; l'abilitazione è disattivata per default. Dopo aver mostrato l'operazione e ottenuto l'approvazione dell'utente, ripetere la stessa chiamata con `confirm=true`. Esempio di anteprima per creare una collezione:
 
 ```json
 {
@@ -300,6 +300,7 @@ Per aggiornare: copiare `server.py` (e, se cambiano le dipendenze, rifare l'inst
 |---|---|
 | `CONTACT_EMAIL` | Email per il polite pool di Crossref e OpenAlex (consigliata) |
 | `OPENALEX_API_KEY` | Chiave OpenAlex: parametro `api_key` su `api.openalex.org`, header Bearer su `user.openalex.org` per le correzioni |
+| `OPENALEX_ENABLE_WRITES` | Abilita le scritture confermate dell'account OpenAlex solo se impostata a `true`; default disattivato |
 | `SEMANTIC_SCHOLAR_API_KEY` | Chiave inviata nell'header `x-api-key`; resta il limite cumulativo di 1 richiesta/s su tutti gli endpoint |
 | `MCP_TRANSPORT` | `stdio` (default) o `http` |
 | `PORT` | Porta HTTP, default 3002 |
