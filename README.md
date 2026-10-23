@@ -14,12 +14,14 @@ flowchart TD
 
   Server --> Strumento{"Strumento MCP"}
   Strumento -->|find_doi, verify_doi, verify_book, format_apa| Riferimenti["Risoluzione e verifica dei riferimenti"]
+  Strumento -->|google_books, orcid| Registri["Libri e identità degli autori"]
   Strumento -->|search_literature, paper_table| Ricerca["Ricerca e dettagli dei paper"]
   Strumento -->|citation_graph| Grafo["Grafo delle citazioni"]
   Strumento -->|semantic_scholar, semantic_scholar_recommendations| SS["Operazioni Semantic Scholar"]
   Strumento -->|openalex_*| OA["Ricerca, classificazione e account OpenAlex"]
 
   Riferimenti --> HTTP["Client HTTP condiviso"]
+  Registri --> HTTP
   Ricerca --> HTTP
   Grafo --> HTTP
   SS --> HTTP
@@ -27,9 +29,10 @@ flowchart TD
   HTTP --> Gestione["Limiti per host; retry selettivi per Semantic Scholar e alcune operazioni OpenAlex"]
 
   Gestione --> Fonti{"Fonti selezionate in base allo strumento"}
-  Fonti -->|find_doi| Candidati["Crossref · Semantic Scholar · OpenAlex · Open Library"]
+  Fonti -->|find_doi| Candidati["Crossref · Semantic Scholar · OpenAlex · Open Library · Google Books (libri)"]
   Fonti -->|verify_doi / format_apa| DOI["Crossref · DataCite · doi.org"]
-  Fonti -->|verify_book| Libri["Open Library · Crossref · Deutsche Nationalbibliothek"]
+  Fonti -->|verify_book| Libri["Open Library · Crossref · Google Books · Deutsche Nationalbibliothek"]
+  Fonti -->|google_books / orcid| Registro["Google Books API · ORCID Public API"]
   Fonti -->|search_literature / paper_table| Letteratura["OpenAlex · Europe PMC · Semantic Scholar · HAL · DOAJ · arXiv · OSF · Zenodo"]
   Fonti -->|citation_graph| Citazioni["OpenAlex; Semantic Scholar solo per il controllo di copertura"]
   Fonti -->|semantic_scholar*| SSAPI["Academic Graph · Recommendations · Datasets"]
@@ -38,6 +41,7 @@ flowchart TD
   Candidati --> Risposta["Risultato MCP"]
   DOI --> Risposta
   Libri --> Risposta
+  Registro --> Risposta
   Letteratura --> Risposta
   Citazioni --> Risposta
   SSAPI --> Risposta
@@ -52,9 +56,11 @@ flowchart TD
 
 | Tool | Cosa fa | Fonti |
 |---|---|---|
-| `find_doi` | Trova il DOI di un articolo o libro a partire da titolo, primo autore e anno. Restituisce `match` solo se titolo, autore e anno concordano; altrimenti `no_confident_match`. Per i libri (`is_book=true`) l'anno deve coincidere con l'edizione citata. | Crossref, Semantic Scholar, OpenAlex, Open Library |
-| `verify_doi` | Controlla che un DOI esista e appartenga al lavoro atteso (titolo, autore, anno, volume, numero, pagine). Instrada per agenzia di registrazione: Crossref, oppure DataCite (Zenodo, arXiv, OSF, dataset); per gli altri registri restituisce `registered_unsupported_agency` invece di «non trovato». Segnala ritrattazioni, correzioni ed expressions of concern (solo Crossref). | Crossref (con dati Retraction Watch), DataCite, doi.org |
-| `verify_book` | Verifica un'edizione (anno, editore, ISBN) confrontando tre cataloghi. `verified` se almeno due concordano. | Open Library, Crossref, Deutsche Nationalbibliothek |
+| `find_doi` | Trova il DOI di un articolo o libro a partire da titolo, primo autore e anno. Restituisce `match` solo se titolo, autore e anno concordano; altrimenti `no_confident_match`. Per i libri (`is_book=true`) l'anno deve coincidere con l'edizione citata; i dati di edizione e ISBN di Open Library e Google Books sono restituiti come identificativi alternativi (`book_info`, `book_info_google_books`). | Crossref, Semantic Scholar, OpenAlex, Open Library, Google Books (libri) |
+| `verify_doi` | Controlla che un DOI esista e appartenga al lavoro atteso (titolo, autore, anno, volume, numero, pagine). Instrada per agenzia di registrazione: Crossref, oppure DataCite (Zenodo, arXiv, OSF, dataset); per gli altri registri restituisce `registered_unsupported_agency` invece di «non trovato». Segnala ritrattazioni, correzioni ed expressions of concern (solo Crossref). Con `expected_orcid` confronta l'ORCID iD con quelli depositati per gli autori (`author_orcids`): `match`; `mismatch` solo se tutti gli autori hanno un iD e nessuno è quello atteso; altrimenti `not_in_source`, perché il deposito è facoltativo. Per le agenzie non supportate l'iD compare in `unchecked`. | Crossref (con dati Retraction Watch), DataCite, doi.org |
+| `verify_book` | Verifica un'edizione (anno, editore, ISBN) confrontando quattro cataloghi. `verified` se almeno due concordano. Il campo `agreement` conta i gruppi di cataloghi indipendenti (Open Library e Google Books condividono i feed degli editori e valgono come uno) e riporta il livello (`high` con almeno due gruppi e nessun conflitto, `medium` con un conflitto, `low` con un solo gruppo, `none`). In `conflicts` segnala anno o editore su cui due fonti confermanti non hanno nulla in comune (edizioni diverse, oppure marchio e gruppo editoriale), senza escludere il risultato. | Open Library, Crossref, Google Books, Deutsche Nationalbibliothek |
+| `google_books` | Ricerca (`search`, con le parole chiave native `intitle:`, `inauthor:`, `isbn:`...) e lettura di un volume (`volume`): titolo, autori, editore, data, ISBN. Parametri nativi inoltrati in `params`; restituisce il JSON originale. | Google Books API |
+| `orcid` | Ricerca nel registro (`search`, sintassi Solr, con ORCID iD, nomi e istituzioni) e lettura dei dati pubblici di un record (`person`, `works`). L'iD viene validato col checksum prima della richiesta. Funziona senza credenziali; con `ORCID_CLIENT_ID` e `ORCID_CLIENT_SECRET` usa un token `/read-public`. Una corrispondenza di nome è un candidato, non un'identità. | ORCID Public API |
 | `format_apa` | Restituisce il riferimento APA di un DOI tramite content negotiation, con i campi strutturati del record. Segnala con `title_case_suspected` i titoli che sembrano in title case (APA vuole il sentence case) senza convertirli. `unsupported` se l'agenzia di registrazione non lo offre. | doi.org |
 | `search_literature` | Ricerca con sintassi booleana su uno o più database, con abstract e keyword, deduplicazione e log riproducibile delle query. | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo |
 | `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione, coppie co-citate e accoppiamento bibliografico (riferimenti in comune). Per ogni nodo indica a quanti seed è collegato. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di somiglianza). Con `check_coverage` (predefinito) confronta per ogni seed con DOI i conteggi di riferimenti e citazioni tra OpenAlex e Semantic Scholar (`coverage_check`), per distinguere un'assenza reale da una lacuna di copertura. | OpenAlex, Semantic Scholar (solo controllo) |
@@ -210,6 +216,7 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 - Titoli sotto le quattro parole richiedono la conferma dell'autore.
 - Errata, avvisi di ritrattazione, peer review e repliche vengono scartati (`excluded_derivatives`).
 - Le fonti secondarie ricavano i DOI in buona parte da Crossref: la presenza di un DOI in più indici non è una conferma indipendente.
+- `agreement` conta le fonti indipendenti (`independent_sources`): Crossref, OpenAlex e Semantic Scholar valgono come una sola, perché OpenAlex e Semantic Scholar derivano in gran parte da Crossref. `competing_dois` elenca gli altri DOI compatibili col titolo (spesso preprint o altra versione), da confermare. Anche in `search_literature` ogni record ha `independent_sources`, con la stessa regola.
 
 **Grafo di citazione.** `citation_graph` parte dai lavori seed, scarica i loro riferimenti e i lavori citanti più citati, ordina i candidati per numero di seed collegati e poi per citazioni, e tiene i primi `max_nodes`. Le co-citazioni sono calcolate solo sui lavori presenti nel grafo, quindi sono un limite inferiore. L'accoppiamento usa le liste di riferimenti complete e riporta sia il numero di riferimenti condivisi sia una forza normalizzata (0–1); collega anche i lavori recenti, che non hanno ancora co-citazioni. Un accoppiamento molto alto tra due nodi può indicare due record dello stesso lavoro.
 
@@ -220,6 +227,8 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 - In `search_literature` i filtri `doc_types`, `open_access_only` ed `exclude_retracted` valgono solo per OpenAlex; gli altri database li riportano in `ignored_filters`. La deduplicazione vale per la singola pagina.
 - Senza chiave API Semantic Scholar risponde spesso 429.
 - Le edizioni ("2nd ed.") e il numero di pagine dei libri non sono verificabili con queste fonti.
+- Google Books e Open Library possono derivare i dati dagli stessi feed degli editori: l'accordo tra i cataloghi è una corroborazione, non una prova. Senza chiave la quota di Google Books è condivisa e può dare 429.
+- ORCID: solo i dati resi pubblici dal ricercatore; i nomi non identificano da soli una persona.
 - `verify_doi` non ha una fonte di ritrattazioni per i DOI DataCite: `is_retracted` è `null` (sconosciuto), mai `false`. I DOI di altre agenzie (mEDRA, JaLC...) risultano registrati ma non verificabili nei metadati.
 - Il controllo di copertura di `citation_graph` confronta solo i conteggi dei seed, non le liste: OpenAlex e Semantic Scholar derivano in parte da Crossref, quindi la concordanza non è una prova indipendente.
 - DBLP risponde con una sfida proof-of-work (Anubis) e non è integrato.
@@ -234,7 +243,7 @@ uv sync
 uv run python -m pytest -q
 ```
 
-La suite gira senza rete. I test in `tests/test_server.py` coprono normalizzazione dei titoli, confronto degli autori, scarto di errata e repliche, pulizia dei DOI, calcolo di co-citazioni e accoppiamento. Verificano anche routing e payload delle API, autenticazione, redazione delle credenziali, cursori e formati di risposta, errori HTTP, retry, limite cumulativo Semantic Scholar, registrazione e annotazioni MCP, anteprime senza richieste e scritture OpenAlex confermate su risposte simulate. Questi test non verificano online la validità delle chiavi, i permessi dell'account o la disponibilità reale degli endpoint.
+La suite gira senza rete. I test in `tests/test_server.py` coprono normalizzazione dei titoli, confronto degli autori, scarto di errata e repliche, pulizia dei DOI, calcolo di co-citazioni e accoppiamento. Verificano anche routing e payload delle API, autenticazione, redazione delle credenziali, cursori e formati di risposta, errori HTTP, retry, limite cumulativo Semantic Scholar, registrazione e annotazioni MCP, anteprime senza richieste e scritture OpenAlex confermate su risposte simulate. Coprono inoltre Google Books, ORCID (validazione degli iD, token `/read-public` con cache e rinnovo dopo un 401) e il calcolo di `agreement` e dei conflitti tra cataloghi. Questi test non verificano online la validità delle chiavi, i permessi dell'account o la disponibilità reale degli endpoint.
 
 ### Struttura
 
@@ -256,7 +265,10 @@ La suite gira senza rete. I test in `tests/test_server.py` coprono normalizzazio
       "env": {
         "CONTACT_EMAIL": "tu@example.org",
         "OPENALEX_API_KEY": "${input:openalex-api-key}",
-        "SEMANTIC_SCHOLAR_API_KEY": "${input:semantic-scholar-api-key}"
+        "SEMANTIC_SCHOLAR_API_KEY": "${input:semantic-scholar-api-key}",
+        "GOOGLE_BOOKS_API_KEY": "${input:google-books-api-key}",
+        "ORCID_CLIENT_ID": "${input:orcid-client-id}",
+        "ORCID_CLIENT_SECRET": "${input:orcid-client-secret}"
       }
     }
   },
@@ -271,6 +283,23 @@ La suite gira senza rete. I test in `tests/test_server.py` coprono normalizzazio
       "type": "promptString",
       "id": "semantic-scholar-api-key",
       "description": "Semantic Scholar API key",
+      "password": true
+    },
+    {
+      "type": "promptString",
+      "id": "google-books-api-key",
+      "description": "Google Books API key",
+      "password": true
+    },
+    {
+      "type": "promptString",
+      "id": "orcid-client-id",
+      "description": "ORCID client ID"
+    },
+    {
+      "type": "promptString",
+      "id": "orcid-client-secret",
+      "description": "ORCID client secret",
       "password": true
     }
   ]
@@ -302,6 +331,8 @@ Per aggiornare: copiare `server.py` (e, se cambiano le dipendenze, rifare l'inst
 | `OPENALEX_API_KEY` | Chiave OpenAlex: parametro `api_key` su `api.openalex.org`, header Bearer su `user.openalex.org` per le correzioni |
 | `OPENALEX_ENABLE_WRITES` | Abilita le scritture confermate dell'account OpenAlex solo se impostata a `true`; default disattivato |
 | `SEMANTIC_SCHOLAR_API_KEY` | Chiave inviata nell'header `x-api-key`; resta il limite cumulativo di 1 richiesta/s su tutti gli endpoint |
+| `GOOGLE_BOOKS_API_KEY` | Facoltativa: chiave inviata nell'header `x-goog-api-key` (mai nell'URL) per aumentare la quota di Google Books |
+| `ORCID_CLIENT_ID`, `ORCID_CLIENT_SECRET` | Facoltative, da impostare insieme: il server ottiene un token `/read-public` da `orcid.org/oauth/token`, lo tiene in memoria e lo invia come Bearer all'API pubblica. Il secret non viene inviato ad altri host né incluso negli errori |
 | `MCP_TRANSPORT` | `stdio` (default) o `http` |
 | `PORT` | Porta HTTP, default 3002 |
 | `MCP_AUTH_TOKEN` | Obbligatorio in modalità HTTP, almeno 32 caratteri (`openssl rand -hex 32`) |

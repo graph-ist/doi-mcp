@@ -810,3 +810,362 @@ def test_graph_links():
     assert nodes["C"]["seeds_linked"] == 1 and nodes["S"]["seeds_linked"] == 0
     # C cites both A and the seed S
     assert nodes["A"]["seed_cocited"] == 1 and nodes["C"]["seed_coupling"] > 0
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("0000-0002-1825-0097", "0000-0002-1825-0097"),
+    ("https://orcid.org/0000-0002-1694-233x", "0000-0002-1694-233X"),
+    ("http://www.orcid.org/0000-0002-1825-0097", "0000-0002-1825-0097"),
+    ("0000-0002-1825-0098", None), ("0000000218250097", None), ("", None), (None, None),
+])
+def test_clean_orcid(value, expected):
+    assert s._clean_orcid(value) == expected
+
+
+def _run_with(monkeypatch, handler, call):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            monkeypatch.setattr(s, "_http", lambda: client)
+            return await call()
+
+    return asyncio.run(run())
+
+
+def test_orcid_search_and_records(monkeypatch):
+    seen = []
+
+    async def handle(request):
+        seen.append((request.url.path, dict(request.url.params)))
+        assert request.url.host == "pub.orcid.org"
+        assert request.headers["accept"] == "application/json"
+        return httpx.Response(200, json={"expanded-result": []})
+
+    search = _run_with(monkeypatch, handle, lambda: s.orcid("search", query="family-name:Rossi"))
+    person = _run_with(monkeypatch, handle, lambda: s.orcid(
+        "person", orcid_id="https://orcid.org/0000-0002-1825-0097"))
+    works = _run_with(monkeypatch, handle, lambda: s.orcid("works", orcid_id="0000-0002-1825-0097"))
+    assert [r["status"] for r in (search, person, works)] == ["ok"] * 3
+    assert seen == [("/v3.0/expanded-search/", {"rows": "10", "q": "family-name:Rossi"}),
+                    ("/v3.0/0000-0002-1825-0097/person", {}),
+                    ("/v3.0/0000-0002-1825-0097/works", {})]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"action": "search"}, {"action": "search", "query": "x", "orcid_id": "0000-0002-1825-0097"},
+    {"action": "search", "query": "x", "params": {"q": "y"}},
+    {"action": "person"}, {"action": "person", "orcid_id": "0000-0002-1825-0098"},
+    {"action": "works", "orcid_id": "0000-0002-1825-0097", "query": "x"},
+])
+def test_orcid_rejects_invalid_inputs_before_network(monkeypatch, kwargs):
+    def handle(request):
+        raise AssertionError("no request expected")
+
+    with pytest.raises(ValueError):
+        _run_with(monkeypatch, handle, lambda: s.orcid(**kwargs))
+
+
+def test_orcid_preserves_api_errors(monkeypatch):
+    async def handle(request):
+        return httpx.Response(404, json={"error-code": 9016})
+
+    result = _run_with(monkeypatch, handle, lambda: s.orcid("person", orcid_id="0000-0002-1825-0097"))
+    assert result == {"status": "error", "http_status": 404, "data": {"error-code": 9016}}
+
+
+def test_google_books_routes_and_key_header(monkeypatch):
+    seen = []
+
+    async def handle(request):
+        seen.append((request.url.path, dict(request.url.params)))
+        assert request.headers["x-goog-api-key"] == "gb-key"
+        assert "key" not in request.url.params
+        return httpx.Response(200, json={"items": []})
+
+    monkeypatch.setattr(s, "GB_KEY", "gb-key")
+    search = _run_with(monkeypatch, handle, lambda: s.google_books(
+        "search", query="intitle:design", params={"maxResults": 5}))
+    volume = _run_with(monkeypatch, handle, lambda: s.google_books("volume", volume_id="zyTCAlFPjgYC"))
+    assert search["status"] == volume["status"] == "ok"
+    assert seen == [("/books/v1/volumes", {"maxResults": "5", "q": "intitle:design"}),
+                    ("/books/v1/volumes/zyTCAlFPjgYC", {})]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"action": "search"}, {"action": "search", "query": "x", "volume_id": "v"},
+    {"action": "search", "query": "x", "params": {"key": "secret"}},
+    {"action": "volume"}, {"action": "volume", "volume_id": "v", "query": "x"},
+])
+def test_google_books_rejects_invalid_inputs_before_network(monkeypatch, kwargs):
+    def handle(request):
+        raise AssertionError("no request expected")
+
+    with pytest.raises(ValueError):
+        _run_with(monkeypatch, handle, lambda: s.google_books(**kwargs))
+
+
+def test_book_google_books_adapter(monkeypatch):
+    async def handle(request):
+        assert request.url.params["q"] == 'intitle:"the google story" inauthor:vise'
+        return httpx.Response(200, json={"items": [{"volumeInfo": {
+            "title": "The Google Story", "authors": ["David A. Vise"],
+            "publisher": "Random House", "publishedDate": "2005-11-15",
+            "industryIdentifiers": [{"type": "ISBN_10", "identifier": "055380457X"},
+                                    {"type": "OTHER", "identifier": "ABC"}]}}, {}]})
+
+    recs = _run_with(monkeypatch, handle, lambda: s._book_google_books(
+        s._http(), "The Google Story", "Vise, D."))
+    assert recs[0] == {"source": "google_books", "title": "The Google Story",
+                       "authors": ["David A. Vise"], "publishers": ["Random House"],
+                       "years": [2005], "isbns": ["055380457X"], "doi": None}
+    assert recs[1]["title"] == "" and recs[1]["years"] == []
+
+
+def test_verify_book_counts_google_books_as_a_source(monkeypatch):
+    async def handle(request):
+        if request.url.host == "www.googleapis.com":
+            return httpx.Response(200, json={"items": [{"volumeInfo": {
+                "title": "The Google Story", "authors": ["David Vise"],
+                "publisher": "Delacorte", "publishedDate": "2005"}}]})
+        if request.url.host == "openlibrary.org":
+            return httpx.Response(200, json={"docs": [{"title": "The Google Story",
+                "author_name": ["David Vise"], "editions": {"docs": [{
+                    "title": "The Google Story", "publisher": ["Delacorte"],
+                    "publish_year": [2005]}]}}]})
+        return httpx.Response(500)
+
+    result = _run_with(monkeypatch, handle, lambda: s.verify_book(
+        "The Google Story", "Vise", 2005))
+    assert result["status"] == "verified"
+    assert result["best"]["confirmed_by"] == ["google_books", "open_library"]
+    assert len(result["source_errors"]) == 2
+
+
+@pytest.mark.parametrize("expected,check", [
+    ("https://orcid.org/0000-0002-1825-0097", "match"),
+    ("0000-0001-5109-3700", "not_in_source"),
+])
+def test_verify_doi_checks_orcid(monkeypatch, expected, check):
+    async def handle(request):
+        return httpx.Response(200, json={"message": {
+            "title": ["Interaction design"], "updated-by": [],
+            "author": [{"family": "Carberry", "ORCID": "http://orcid.org/0000-0002-1825-0097"},
+                       {"family": "Rossi"}],
+            "issued": {"date-parts": [[2020]]}}})
+
+    result = _run_verify(monkeypatch, handle, "10.1000/test", expected_orcid=expected)
+    assert result["author_orcids"] == ["0000-0002-1825-0097"]
+    assert result["bibliographic_checks"] == {"orcid": check}
+
+
+def test_verify_doi_reads_datacite_orcid(monkeypatch):
+    attributes = {"titles": [{"title": "Dataset"}], "publicationYear": 2021,
+                  "creators": [{"familyName": "Carberry", "nameIdentifiers": [
+                      {"nameIdentifier": "https://orcid.org/0000-0002-1825-0097",
+                       "nameIdentifierScheme": "ORCID"}]}]}
+
+    async def handle(request):
+        if request.url.host == "api.crossref.org":
+            return httpx.Response(404)
+        if request.url.host == "doi.org":
+            return httpx.Response(200, json=[{"RA": "DataCite"}])
+        return httpx.Response(200, json={"data": {"attributes": attributes}})
+
+    result = _run_verify(monkeypatch, handle, "10.5281/zenodo.1", expected_orcid="0000-0002-1825-0097")
+    assert result["bibliographic_checks"] == {"orcid": "match"}
+
+
+def test_verify_doi_rejects_malformed_orcid_before_network(monkeypatch):
+    def handle(request):
+        raise AssertionError("no request expected")
+
+    result = _run_verify(monkeypatch, handle, "10.1000/test", expected_orcid="0000-0002-1825-0098")
+    assert result == {"status": "invalid_orcid", "orcid": "0000-0002-1825-0098"}
+
+
+@pytest.fixture(autouse=True)
+def _no_orcid_credentials(monkeypatch):
+    monkeypatch.setattr(s, "ORCID_CLIENT_ID", "")
+    monkeypatch.setattr(s, "ORCID_CLIENT_SECRET", "")
+    monkeypatch.setattr(s, "_orcid_token", None)
+    monkeypatch.setattr(s, "_orcid_lock", asyncio.Lock())
+
+
+def test_orcid_uses_cached_read_public_token(monkeypatch):
+    monkeypatch.setattr(s, "ORCID_CLIENT_ID", "APP-TEST")
+    monkeypatch.setattr(s, "ORCID_CLIENT_SECRET", "shh")
+    calls = []
+
+    async def handle(request):
+        calls.append((request.url.host, request.method, request.headers.get("authorization")))
+        if request.url.host == "orcid.org":
+            assert request.url.path == "/oauth/token"
+            assert dict(httpx.QueryParams(request.content.decode())) == {
+                "client_id": "APP-TEST", "client_secret": "shh",
+                "grant_type": "client_credentials", "scope": "/read-public"}
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 631138518})
+        return httpx.Response(200, json={})
+
+    async def twice():
+        await s.orcid("person", orcid_id="0000-0002-1825-0097")
+        return await s.orcid("works", orcid_id="0000-0002-1825-0097")
+
+    assert _run_with(monkeypatch, handle, twice)["status"] == "ok"
+    assert calls == [("orcid.org", "POST", None),
+                     ("pub.orcid.org", "GET", "Bearer tok"),
+                     ("pub.orcid.org", "GET", "Bearer tok")]
+
+
+def test_orcid_token_failure_is_reported_without_secrets(monkeypatch):
+    monkeypatch.setattr(s, "ORCID_CLIENT_ID", "APP-TEST")
+    monkeypatch.setattr(s, "ORCID_CLIENT_SECRET", "shh")
+
+    async def handle(request):
+        return httpx.Response(401, json={"error": "invalid_client"})
+
+    result = _run_with(monkeypatch, handle, lambda: s.orcid("person", orcid_id="0000-0002-1825-0097"))
+    assert result["status"] == "error" and "shh" not in str(result)
+
+
+def test_independent_sources_collapse_crossref_derived_indexes():
+    assert s._independent(["crossref", "openalex", "semantic_scholar"]) == 1
+    assert s._independent(["openalex", "semanticscholar", "hal"]) == 2
+    assert s._independent([]) == 0
+
+
+def _book(source, years, publishers):
+    return s._book_rec(source, "T", ["A"], publishers, years, [])
+
+
+def test_book_conflicts_flag_disjoint_years_and_publishers():
+    matched = [_book("open_library", [2005, 2010], ["Delacorte Press"]),
+               _book("dnb", [2010], ["Delacorte"]),
+               _book("google_books", [2007], ["Penguin"])]
+    conflicts = {c["field"]: c["values"] for c in s._book_conflicts(matched)}
+    assert set(conflicts["year"]) == {"open_library", "dnb", "google_books"}
+    assert set(conflicts["publisher"]) == {"google_books", "dnb", "open_library"}
+
+
+def test_book_conflicts_ignore_sources_without_values_and_overlaps():
+    matched = [_book("open_library", [2005, 2010], ["Delacorte Press"]),
+               _book("dnb", [2010], []), _book("google_books", [2010], ["Delacorte"])]
+    assert s._book_conflicts(matched) == []
+
+
+def _book_handler(gb_year):
+    async def handle(request):
+        if request.url.host == "www.googleapis.com":
+            return httpx.Response(200, json={"items": [{"volumeInfo": {
+                "title": "The Google Story", "authors": ["David Vise"],
+                "publisher": "Delacorte", "publishedDate": str(gb_year)}}]})
+        if request.url.host == "openlibrary.org":
+            return httpx.Response(200, json={"docs": [{"title": "The Google Story",
+                "author_name": ["David Vise"], "editions": {"docs": [{
+                    "title": "The Google Story", "publisher": ["Delacorte"],
+                    "publish_year": [2005]}]}}]})
+        return httpx.Response(500)
+
+    return handle
+
+
+def test_verify_book_agreement_without_conflict(monkeypatch):
+    result = _run_with(monkeypatch, _book_handler(2005),
+                       lambda: s.verify_book("The Google Story", "Vise"))
+    assert result["agreement"] == {"level": "low", "independent_sources": 1, "conflicts": []}
+    assert "note" not in result
+
+
+def test_verify_book_flags_conflict_without_excluding(monkeypatch):
+    result = _run_with(monkeypatch, _book_handler(2007),
+                       lambda: s.verify_book("The Google Story", "Vise"))
+    assert result["status"] == "verified"
+    assert result["best"]["confirmed_by"] == ["google_books", "open_library"]
+    assert [c["field"] for c in result["agreement"]["conflicts"]] == ["year"]
+    assert "year" in result["note"]
+
+
+def test_book_feeds_count_as_one_group():
+    assert s._independent(["google_books", "open_library"]) == 1
+    assert s._independent(["google_books", "open_library", "dnb"]) == 2
+
+
+def test_verify_book_high_agreement_needs_independent_groups(monkeypatch):
+    base = _book_handler(2005)
+
+    async def handle(request):
+        if request.url.host == "services.dnb.de":
+            return httpx.Response(200, content=(
+                b'<r xmlns:dc="http://purl.org/dc/elements/1.1/" '
+                b'xmlns:o="http://www.openarchives.org/OAI/2.0/oai_dc/"><o:dc>'
+                b'<dc:title>The Google Story</dc:title><dc:creator>Vise, David</dc:creator>'
+                b'<dc:publisher>New York : Delacorte</dc:publisher><dc:date>2005</dc:date>'
+                b'</o:dc></r>'))
+        return await base(request)
+
+    result = _run_with(monkeypatch, handle, lambda: s.verify_book("The Google Story", "Vise"))
+    assert result["agreement"]["level"] == "high"
+    assert result["agreement"]["independent_sources"] == 2
+
+
+def test_orcid_malformed_token_is_an_error_result(monkeypatch):
+    monkeypatch.setattr(s, "ORCID_CLIENT_ID", "APP-TEST")
+    monkeypatch.setattr(s, "ORCID_CLIENT_SECRET", "shh")
+
+    async def handle(request):
+        return httpx.Response(200, text="<html>maintenance</html>")
+
+    result = _run_with(monkeypatch, handle, lambda: s.orcid("person", orcid_id="0000-0002-1825-0097"))
+    assert result["status"] == "error" and "malformed" in result["detail"]
+
+
+def test_orcid_refreshes_token_once_after_401(monkeypatch):
+    monkeypatch.setattr(s, "ORCID_CLIENT_ID", "APP-TEST")
+    monkeypatch.setattr(s, "ORCID_CLIENT_SECRET", "shh")
+    monkeypatch.setattr(s, "_orcid_token", (1e18, "revoked"))
+    calls = []
+
+    async def handle(request):
+        calls.append((request.url.host, request.headers.get("authorization")))
+        if request.url.host == "orcid.org":
+            return httpx.Response(200, json={"access_token": "fresh", "expires_in": 3600})
+        auth = request.headers["authorization"]
+        return httpx.Response(401 if auth == "Bearer revoked" else 200, json={})
+
+    result = _run_with(monkeypatch, handle, lambda: s.orcid("works", orcid_id="0000-0002-1825-0097"))
+    assert result["status"] == "ok"
+    assert calls == [("pub.orcid.org", "Bearer revoked"), ("orcid.org", None),
+                     ("pub.orcid.org", "Bearer fresh")]
+
+
+def test_verify_doi_orcid_mismatch_when_all_authors_have_ids(monkeypatch):
+    async def handle(request):
+        return httpx.Response(200, json={"message": {
+            "title": ["T"], "updated-by": [], "issued": {"date-parts": [[2020]]},
+            "author": [{"family": "Carberry", "ORCID": "http://orcid.org/0000-0002-1825-0097"}]}})
+
+    result = _run_verify(monkeypatch, handle, "10.1000/test", expected_orcid="0000-0001-5109-3700")
+    assert result["bibliographic_checks"] == {"orcid": "mismatch"}
+
+
+def test_verify_doi_unsupported_agency_reports_orcid_unchecked(monkeypatch):
+    result = _run_verify(monkeypatch, _datacite_handler(ra="mEDRA"), "10.5281/zenodo.1",
+                         expected_orcid="0000-0002-1825-0097")
+    assert result["status"] == "registered_unsupported_agency"
+    assert result["unchecked"] == ["orcid"]
+
+
+def test_find_doi_filters_google_books_book_info(monkeypatch):
+    async def handle(request):
+        host = request.url.host
+        if host == "www.googleapis.com":
+            return httpx.Response(200, json={"items": [
+                {"volumeInfo": {"title": "The Google Story", "authors": ["David Vise"]}},
+                {"volumeInfo": {"title": "Cooking with Garlic", "authors": ["Someone"]}}]})
+        if host == "api.crossref.org":
+            return httpx.Response(200, json={"message": {"items": []}})
+        if host == "openlibrary.org":
+            return httpx.Response(200, json={"docs": []})
+        return httpx.Response(404, json={})
+
+    result = _run_with(monkeypatch, handle, lambda: s.find_doi(
+        "The Google Story", "Vise", 2005, is_book=True))
+    assert [r["title"] for r in result["book_info_google_books"]] == ["The Google Story"]

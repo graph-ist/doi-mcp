@@ -1,9 +1,12 @@
 """MCP server: verify citations (DOIs, book editions), search the literature, map citations.
 
-Sources: Crossref, OpenAlex, Semantic Scholar, Open Library, DNB, doi.org and open
-repositories (Europe PMC, HAL, DOAJ, arXiv, OSF, Zenodo). See README.md.
+Sources: Crossref, OpenAlex, Semantic Scholar, Open Library, Google Books, DNB, ORCID,
+doi.org and open repositories (Europe PMC, HAL, DOAJ, arXiv, OSF, Zenodo). See README.md.
 Env (optional):
   CONTACT_EMAIL            used for Crossref/OpenAlex polite pool
+  GOOGLE_BOOKS_API_KEY     sent as x-goog-api-key; raises the Google Books quota
+  ORCID_CLIENT_ID          with ORCID_CLIENT_SECRET, gets a /read-public token for the ORCID API
+  ORCID_CLIENT_SECRET      never sent to anything but orcid.org/oauth/token
     OPENALEX_API_KEY         authenticates OpenAlex requests via api_key
     OPENALEX_ENABLE_WRITES   enables confirmed OpenAlex account writes; default false
     SEMANTIC_SCHOLAR_API_KEY authenticates requests; 1 request/s across all endpoints
@@ -33,7 +36,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 mcp = FastMCP("paper-doi", stateless_http=True, transport_security=TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
@@ -45,6 +48,9 @@ EMAIL = os.environ.get("CONTACT_EMAIL", "")
 OA_KEY = os.environ.get("OPENALEX_API_KEY", "")
 OA_WRITES_ENABLED = os.environ.get("OPENALEX_ENABLE_WRITES", "").strip().lower() == "true"
 S2_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+GB_KEY = os.environ.get("GOOGLE_BOOKS_API_KEY", "")
+ORCID_CLIENT_ID = os.environ.get("ORCID_CLIENT_ID", "")
+ORCID_CLIENT_SECRET = os.environ.get("ORCID_CLIENT_SECRET", "")
 UA = f"paper-doi-mcp/{VERSION}" + (f" (mailto:{EMAIL})" if EMAIL else "")
 TITLE_THRESHOLD = 0.88
 # Titles shorter than this identify little on their own, so a match also needs the author
@@ -62,6 +68,14 @@ NAME_PARTICLES = {"van", "von", "der", "den", "de", "del", "della", "di", "da", 
                   "la", "dos", "das", "ten", "ter", "zu", "al", "el", "bin", "ibn"}
 
 DOI_RE = re.compile(r"10\.\d{4,9}/\S+", re.I)
+# Indexes that largely derive their records from Crossref count as one source of evidence
+SOURCE_GROUPS = {"openalex": "crossref", "semantic_scholar": "crossref", "semanticscholar": "crossref",
+                 # Both are fed largely by the same publisher and retail feeds
+                 "open_library": "book_feeds", "google_books": "book_feeds"}
+
+
+def _independent(sources: list[str]) -> int:
+    return len({SOURCE_GROUPS.get(x, x) for x in sources})
 
 
 def _norm(s: str | None) -> str:
@@ -131,6 +145,18 @@ def _clean_doi(doi: str | None) -> str | None:
 
 def _doi_path(d: str) -> str:
     return quote(d, safe="/")
+
+
+def _clean_orcid(value: str | None) -> str | None:
+    """Canonical ORCID iD from a bare iD or orcid.org URL; None if malformed or checksum fails."""
+    s = re.sub(r"^https?://(?:www\.)?orcid\.org/", "", (value or "").strip(), flags=re.I).upper()
+    if not re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", s):
+        return None
+    total = 0
+    for ch in s.replace("-", "")[:-1]:
+        total = (total + int(ch)) * 2
+    check = (12 - total % 11) % 11
+    return s if s[-1] == ("X" if check == 10 else str(check)) else None
 
 
 def _oa_redact(detail: str) -> str:
@@ -673,21 +699,24 @@ async def find_doi(title: str, first_author: str | None = None, year: int | None
 
     Set is_book=True for monographs. Book DOIs are edition-specific and many books have
     none, so the year must match exactly (else status 'edition_mismatch', no DOI), and
-    Open Library edition/ISBN data is returned in 'book_info' as a fallback identifier.
+    Open Library and Google Books edition/ISBN data is returned in 'book_info' and
+    'book_info_google_books' as fallback identifiers.
     """
     names = ["crossref", "semantic_scholar", "openalex"]
     c = _http()
     jobs = [_crossref(c, title, first_author), _semantic_scholar(c, title), _openalex(c, title)]
     if is_book:
-        names.append("open_library")
-        jobs.append(_open_library(c, title, first_author))
+        names += ["open_library", "google_books"]
+        jobs += [_open_library(c, title, first_author), _book_google_books(c, title, first_author)]
     results = await asyncio.gather(*jobs, return_exceptions=True)
-    errors, cands, book_info, excluded = [], [], [], 0
+    errors, cands, book_info, gb_info, excluded = [], [], [], [], 0
     for name, res in zip(names, results):
         if isinstance(res, Exception):
             errors.append(_err(name, res))
         elif name == "open_library":
             book_info = res
+        elif name == "google_books":
+            gb_info = res
         else:
             for x in filter(None, res):
                 if _is_derivative(x, title):
@@ -725,12 +754,24 @@ async def find_doi(title: str, first_author: str | None = None, year: int | None
     out = {"status": status, "best": best if status == "match" else None,
            "candidates": ranked, "excluded_derivatives": excluded, "source_errors": errors}
     notes = []
+    if best:
+        competing = [m["doi"] for m in ranked[1:] if _eligible(m)]
+        out["agreement"] = {"independent_sources": _independent(best["sources"]),
+                            "competing_dois": competing}
+        if competing:
+            notes.append("Other DOIs also fit the title (often a preprint or another version): "
+                         "confirm which one is cited.")
     top = ranked[0] if ranked else None
     if (top and not best and top["score"] >= TITLE_THRESHOLD and top["author_ok"] is None
             and top["title_tokens"] < SHORT_TITLE_TOKENS):
         notes.append("Short title: pass first_author so the match can be confirmed.")
     if is_book:
         out["book_info"] = book_info
+        out["book_info_google_books"] = [
+            {k: r[k] for k in ("title", "authors", "publishers", "years", "isbns")}
+            for r in gb_info
+            if _title_sim(title, r["title"])[0] >= TITLE_THRESHOLD
+            and _author_ok(first_author, r["authors"]) is not False][:3]
         if status != "match":
             notes.append("No DOI for the cited edition. Cite without DOI (ISBN optional); "
                          "candidates, if any, belong to other editions or chapters.")
@@ -766,7 +807,9 @@ def _datacite_as_crossref(a: dict) -> dict:
     pages = "-".join(p for p in (cont.get("firstPage"), cont.get("lastPage")) if p) or None
     pub = a.get("publisher")
     return {"title": [main], "subtitle": [sub] if sub else [],
-            "author": [{"family": c.get("familyName") or c.get("name", "")}
+            "author": [{"family": c.get("familyName") or c.get("name", ""),
+                        "ORCID": next((n.get("nameIdentifier") for n in c.get("nameIdentifiers") or []
+                                       if n.get("nameIdentifierScheme") == "ORCID"), None)}
                        for c in a.get("creators") or []],
             "issued": {"date-parts": [[a.get("publicationYear")]]},
             "container-title": [cont["title"]] if cont.get("title") else [],
@@ -779,7 +822,8 @@ def _datacite_as_crossref(a: dict) -> dict:
 async def verify_doi(doi: str, expected_title: str | None = None,
                      expected_first_author: str | None = None, expected_year: int | None = None,
                      expected_volume: str | None = None, expected_issue: str | None = None,
-                     expected_pages: str | None = None) -> dict:
+                     expected_pages: str | None = None,
+                     expected_orcid: str | None = None) -> dict:
     """Check that a DOI is registered and return its metadata from its registration agency.
 
     Crossref DOIs are read from Crossref. When Crossref does not know the DOI, doi.org/doiRA
@@ -795,6 +839,10 @@ async def verify_doi(doi: str, expected_title: str | None = None,
     are returned from the source; expected values are compared with it
     ('bibliographic_checks': match | mismatch | not_in_source per field; year matches the
     issued, print or online year). Cite the source values whenever they differ.
+    expected_orcid (iD or orcid.org URL) is checked against the ORCID iDs deposited for the
+    authors ('author_orcids'): 'match'; 'mismatch' only when every author has an iD and none
+    is the expected one; otherwise 'not_in_source', since deposit is optional. A malformed
+    iD returns status 'invalid_orcid'. For unsupported agencies it is reported as unchecked.
     'is_retracted' and 'updates' report retractions, corrections and expressions of concern
     registered in Crossref (including Retraction Watch data): a retracted work may still
     be cited, but the reference must say so. DataCite has no retraction source: for those
@@ -803,6 +851,9 @@ async def verify_doi(doi: str, expected_title: str | None = None,
     d = _clean_doi(doi)
     if not d:
         return {"status": "invalid_format", "doi": doi}
+    want_orcid = _clean_orcid(expected_orcid) if expected_orcid else None
+    if expected_orcid and not want_orcid:
+        return {"status": "invalid_orcid", "orcid": expected_orcid}
     agency = "Crossref"
     try:
         code, m = await _crossref_work(d)
@@ -814,7 +865,8 @@ async def verify_doi(doi: str, expected_title: str | None = None,
                 return {"status": "registered_unsupported_agency", "doi": d,
                         "registration_agency": agency,
                         "detail": f"registered with {agency}: no supported metadata API, "
-                                  "so title, authors and year are unverified"}
+                                  "so title, authors and year are unverified",
+                        **({"unchecked": ["orcid"]} if want_orcid else {})}
             r = await _http().get(f"https://api.datacite.org/dois/{_doi_path(d)}")
             code, m = r.status_code, None
             if code == 200:
@@ -842,6 +894,7 @@ async def verify_doi(doi: str, expected_title: str | None = None,
         "pages": m.get("page") or m.get("article-number"),
         "publisher": m.get("publisher"), "edition": m.get("edition-number"),
         "isbn": m.get("ISBN"),
+        "author_orcids": sorted({o for a in m.get("author", []) if (o := _clean_orcid(a.get("ORCID")))}),
         "is_retracted": any(u["type"] in RETRACTION_TYPES for u in updates)
                         or bool(RETRACTED_PREFIX_RE.match(raw_title)),
         "updates": updates,
@@ -856,6 +909,11 @@ async def verify_doi(doi: str, expected_title: str | None = None,
         src = out[field]
         checks[field] = ("not_in_source" if not src
                          else "match" if _biblio_norm(src) == _biblio_norm(exp) else "mismatch")
+    if want_orcid:
+        authors = m.get("author", [])
+        all_have = bool(authors) and all(_clean_orcid(a.get("ORCID")) for a in authors)
+        checks["orcid"] = ("match" if want_orcid in out["author_orcids"]
+                           else "mismatch" if all_have else "not_in_source")
     if expected_year:
         known = {y for y in years.values() if y}
         checks["year"] = ("not_in_source" if not known
@@ -930,13 +988,56 @@ async def _book_dnb(c: httpx.AsyncClient, title: str, author: str | None) -> lis
     return out
 
 
+async def _gb_request(c: httpx.AsyncClient, path: str, params: dict) -> httpx.Response:
+    headers = {"x-goog-api-key": GB_KEY} if GB_KEY else {}
+    return await c.get(f"https://www.googleapis.com/books/v1/{path}", params=params, headers=headers)
+
+
+async def _book_google_books(c: httpx.AsyncClient, title: str, author: str | None) -> list[dict]:
+    q = f'intitle:"{_norm(title)}"' + (f" inauthor:{_surname_query(author)}" if author else "")
+    r = await _gb_request(c, "volumes", {"q": q, "maxResults": 10, "printType": "books"})
+    r.raise_for_status()
+    out = []
+    for it in r.json().get("items", []):
+        v = it.get("volumeInfo", {})
+        year = re.match(r"\d{4}", v.get("publishedDate") or "")
+        isbns = [i["identifier"] for i in v.get("industryIdentifiers", [])
+                 if str(i.get("type", "")).startswith("ISBN") and i.get("identifier")]
+        out.append(_book_rec("google_books", v.get("title"), v.get("authors"),
+                             [v["publisher"]] if v.get("publisher") else [],
+                             [year.group(0)] if year else [], isbns))
+    return out
+
+
+def _book_conflicts(matched: list[dict]) -> list[dict]:
+    """Fields where two sources, each with a value, report nothing in common."""
+    per_source: dict[str, list[dict]] = {}
+    for rec in matched:
+        per_source.setdefault(rec["source"], []).append(rec)
+    fields = {
+        "year": ({s: sorted({y for r in recs for y in r["years"]}) for s, recs in per_source.items()},
+                 lambda a, b: a == b),
+        "publisher": ({s: sorted({p for r in recs for p in map(_norm, r["publishers"]) if p})
+                       for s, recs in per_source.items()}, lambda a, b: a in b or b in a)}
+    out = []
+    for field, (values, same) in fields.items():
+        have = {s: v for s, v in values.items() if v}
+        srcs = sorted(have)
+        bad = {s for i, a in enumerate(srcs) for b in srcs[i + 1:]
+               if not any(same(x, y) for x in have[a] for y in have[b]) for s in (a, b)}
+        if bad:
+            out.append({"field": field, "values": {s: have[s] for s in sorted(bad)}})
+    return out
+
+
 @mcp.tool()
 async def verify_book(title: str, first_author: str | None = None, year: int | None = None,
                       publisher: str | None = None, isbn: str | None = None) -> dict:
-    """Verify a book edition (year, publisher, ISBN) against three catalogues.
+    """Verify a book edition (year, publisher, ISBN) against four catalogues.
 
     Sources: Open Library (crowd-sourced, partly imported from library and retail feeds),
-    Crossref (publisher-deposited, DOI books only) and the Deutsche Nationalbibliothek
+    Crossref (publisher-deposited, DOI books only), Google Books (aggregated publisher and
+    library feeds) and the Deutsche Nationalbibliothek
     (DNB, German-language market). The catalogues can share upstream publisher metadata,
     so agreement is corroboration, not proof. A record counts as matching when title,
     author and every supplied field (year, publisher, ISBN) agree; missing data in the
@@ -944,11 +1045,16 @@ async def verify_book(title: str, first_author: str | None = None, year: int | N
     two sources), 'single_source' (one source only: weaker, say so), 'partial' (the work
     exists but no record matches year/publisher: use 'editions' to correct the citation),
     'not_found'. Edition statements ('2nd ed.') and page counts are not checked.
+    'agreement' counts independent catalogue groups (Open Library and Google Books share
+    feeds and count as one) and flags, without excluding anything, year or publisher values
+    that two confirming sources report with no overlap: level 'high' (2+ groups, no
+    conflict), 'medium' (2+ groups with a conflict), 'low' (one group) or 'none'.
     """
-    names = ["open_library", "crossref", "dnb"]
+    names = ["open_library", "crossref", "google_books", "dnb"]
     c = _http()
     results = await asyncio.gather(
         _book_open_library(c, title, first_author), _book_crossref(c, title, first_author),
+        _book_google_books(c, title, first_author),
         _book_dnb(c, title, first_author), return_exceptions=True)
     wanted_isbn = re.sub(r"[^0-9Xx]", "", isbn).upper() if isbn else None
     wanted_pub = _norm(publisher) if publisher else ""
@@ -986,7 +1092,133 @@ async def verify_book(title: str, first_author: str | None = None, year: int | N
                 "confirmed_by": confirmed_by}
     others = [{k: r[k] for k in ("source", "title", "publishers", "years", "isbns")}
               for r in title_hits if r not in matched][:6]
-    return {"status": status, "best": best, "editions": others, "source_errors": errors}
+    conflicts = _book_conflicts(matched)
+    groups = _independent(confirmed_by)
+    level = ("none" if not groups else "low" if groups == 1
+             else "medium" if conflicts else "high")
+    out = {"status": status, "best": best, "editions": others, "source_errors": errors,
+           "agreement": {"level": level, "independent_sources": groups,
+                         "conflicts": conflicts}}
+    if conflicts:
+        out["note"] = ("Sources disagree on " + ", ".join(c["field"] for c in conflicts) +
+                       ": possibly different editions, or an imprint and its parent "
+                       "publisher; check before citing.")
+    return out
+
+
+async def _json_api(source: str, request) -> dict:
+    """Run one GET and wrap it as {status, http_status, data}, keeping the API's own errors."""
+    try:
+        response = await request
+    except httpx.HTTPError as error:
+        return {"status": "error", "source": source, "detail": _err(source, error)}
+    try:
+        data = response.json()
+    except ValueError:
+        return {"status": "error", "http_status": response.status_code,
+                "detail": f"{source} returned a non-JSON response"}
+    return {"status": "ok" if response.is_success else "error",
+            "http_status": response.status_code, "data": data}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def google_books(action: Literal["search", "volume"], query: str | None = None,
+                       volume_id: str | None = None,
+                       params: dict[str, str | int] | None = None) -> dict:
+    """Search Google Books or read one volume (title, authors, publisher, date, ISBNs).
+
+    search: GET /volumes with query as q. q accepts the native keywords intitle:, inauthor:,
+    inpublisher:, subject:, isbn:, lccn:, oclc: and quoted phrases.
+    volume: GET /volumes/{volume_id}.
+    params forwards native options (maxResults up to 40, startIndex, orderBy, printType,
+    langRestrict, filter, projection) unchanged; do not pass q or key there. Results are
+    restricted by the server's location. Uses GOOGLE_BOOKS_API_KEY when set. The record
+    shows how Google Books lists an edition: to check a citation use verify_book, which
+    compares it with other catalogues. Returns status, http_status and the original JSON.
+    """
+    if action not in {"search", "volume"} or {"q", "key"} & set(params or {}):
+        raise ValueError("Invalid action; q and key cannot be passed in params")
+    if action == "search":
+        if volume_id is not None or not query or not query.strip():
+            raise ValueError("search requires query and does not use volume_id")
+        return await _json_api("google_books", _gb_request(
+            _http(), "volumes", {**(params or {}), "q": query}))
+    if query is not None:
+        raise ValueError("volume requires volume_id and does not use query")
+    return await _json_api("google_books", _gb_request(
+        _http(), "volumes/" + _path_segment(volume_id, "volume_id"), params or {}))
+
+
+_orcid_token: tuple[float, str] | None = None
+_orcid_lock = asyncio.Lock()
+
+
+async def _orcid_bearer(refresh: bool = False) -> str:
+    global _orcid_token
+    async with _orcid_lock:
+        if refresh or not _orcid_token or _orcid_token[0] <= time.monotonic():
+            _orcid_token = None
+            r = await _http().post("https://orcid.org/oauth/token",
+                                   headers={"Accept": "application/json"}, data={
+                "client_id": ORCID_CLIENT_ID, "client_secret": ORCID_CLIENT_SECRET,
+                "grant_type": "client_credentials", "scope": "/read-public"})
+            r.raise_for_status()
+            try:
+                body = r.json()
+                token = body["access_token"]
+                ttl = max(float(body.get("expires_in") or 3600) - 60, 0.0)
+            except (ValueError, KeyError, TypeError):
+                raise httpx.HTTPError("ORCID token response is malformed") from None
+            _orcid_token = (time.monotonic() + ttl, token)
+        return _orcid_token[1]
+
+
+async def _orcid_get(path: str, params: dict) -> httpx.Response:
+    """GET on the public API, with a cached /read-public token when client credentials are set."""
+    url = f"https://pub.orcid.org/v3.0/{path}"
+    if not (ORCID_CLIENT_ID and ORCID_CLIENT_SECRET):
+        return await _http().get(url, params=params, headers={"Accept": "application/json"})
+    for refresh in (False, True):
+        headers = {"Accept": "application/json",
+                   "Authorization": f"Bearer {await _orcid_bearer(refresh)}"}
+        r = await _http().get(url, params=params, headers=headers)
+        if r.status_code != 401:
+            break
+    return r
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def orcid(action: Literal["search", "person", "works"], orcid_id: str | None = None,
+                query: str | None = None,
+                params: dict[str, str | int] | None = None) -> dict:
+    """Search the ORCID registry or read the public data of one record.
+
+    search: GET /expanded-search with query as q (Solr syntax: family-name:Rossi AND
+    given-names:Anna, affiliation-org-name:"Politecnico di Milano", doi-self:"10.x/y").
+    Returns ORCID iD, names and institutions of each match. params forwards start and rows
+    (rows defaults to 10; the public API caps results at 10,000). Name matches are
+    candidates, not identity: confirm with institution or works before assigning an iD.
+    person: GET /{orcid_id}/person (names, other names, keywords, external identifiers).
+    works: GET /{orcid_id}/works (work summaries grouped by identifier, DOIs included).
+    orcid_id accepts the bare iD or an orcid.org URL; the checksum is verified before any
+    request. Only data the researcher made public is returned. Works without credentials;
+    with ORCID_CLIENT_ID and ORCID_CLIENT_SECRET it authenticates with a /read-public token.
+    Returns status, http_status and the original JSON.
+    """
+    if "q" in (params or {}):
+        raise ValueError("Pass the search text as query, not params.q")
+    if action == "search":
+        if orcid_id is not None or not query or not query.strip():
+            raise ValueError("search requires query and does not use orcid_id")
+        path, p = "expanded-search/", {"rows": 10, **(params or {}), "q": query}
+    elif action in {"person", "works"}:
+        clean = _clean_orcid(orcid_id)
+        if query is not None or not clean:
+            raise ValueError(f"{action} requires a valid orcid_id and does not use query")
+        path, p = f"{clean}/{action}", params or {}
+    else:
+        raise ValueError("Invalid action")
+    return await _json_api("orcid", _orcid_get(path, p))
 
 
 TITLE_SMALL_WORDS = {
@@ -1131,7 +1363,7 @@ async def _s2(c: httpx.AsyncClient, method: str, url: str, **kw) -> httpx.Respon
     return r
 
 
-def _s2_segment(value: str | None, name: str) -> str:
+def _path_segment(value: str | None, name: str) -> str:
     if not value or not value.strip() or value.strip() in {".", ".."}:
         raise ValueError(f"{name} is required and must be a non-empty identifier")
     return quote(value.strip(), safe="")
@@ -1195,7 +1427,7 @@ async def _s2_paper(
     if ids is not None:
         raise ValueError("ids is only supported for batch")
     if action in {"details", "authors", "citations", "references"}:
-        path = f"graph/v1/paper/{_s2_segment(paper_id, 'paper_id')}"
+        path = f"graph/v1/paper/{_path_segment(paper_id, 'paper_id')}"
         if action != "details":
             path += f"/{action}"
     else:
@@ -1237,7 +1469,7 @@ async def _s2_author(
             raise ValueError("search requires params.query, not author_id")
         path = "graph/v1/author/search"
     elif action in {"details", "papers"}:
-        path = f"graph/v1/author/{_s2_segment(author_id, 'author_id')}"
+        path = f"graph/v1/author/{_path_segment(author_id, 'author_id')}"
         if action == "papers":
             path += "/papers"
     else:
@@ -1284,7 +1516,7 @@ async def semantic_scholar_recommendations(
         if positive_paper_ids is not None or negative_paper_ids is not None:
             raise ValueError("single uses paper_id, not positive/negative paper lists")
         return await _s2_api(
-            f"recommendations/v1/papers/forpaper/{_s2_segment(paper_id, 'paper_id')}", params)
+            f"recommendations/v1/papers/forpaper/{_path_segment(paper_id, 'paper_id')}", params)
     if action != "multi":
         raise ValueError("Unknown recommendations action")
     if paper_id is not None or not positive_paper_ids:
@@ -1324,14 +1556,14 @@ async def _s2_datasets(
     if action == "releases":
         path = "datasets/v1/release/"
     elif action == "release":
-        path = f"datasets/v1/release/{_s2_segment(release_id, 'release_id')}"
+        path = f"datasets/v1/release/{_path_segment(release_id, 'release_id')}"
     elif action == "dataset":
-        path = (f"datasets/v1/release/{_s2_segment(release_id, 'release_id')}"
-                f"/dataset/{_s2_segment(dataset_name, 'dataset_name')}")
+        path = (f"datasets/v1/release/{_path_segment(release_id, 'release_id')}"
+                f"/dataset/{_path_segment(dataset_name, 'dataset_name')}")
     elif action == "diffs":
-        path = (f"datasets/v1/diffs/{_s2_segment(start_release_id, 'start_release_id')}"
-                f"/to/{_s2_segment(release_id, 'release_id')}"
-                f"/{_s2_segment(dataset_name, 'dataset_name')}")
+        path = (f"datasets/v1/diffs/{_path_segment(start_release_id, 'start_release_id')}"
+                f"/to/{_path_segment(release_id, 'release_id')}"
+                f"/{_path_segment(dataset_name, 'dataset_name')}")
     else:
         raise ValueError("Unknown datasets action")
     return await _s2_api(path)
@@ -1805,7 +2037,9 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
     'log.dedup_summary' counts merges and same-title records kept separate). A preprint and
     its published version with different DOIs thus collapse into one record, while generic
     titles by different authors stay apart. 'found_in' lists the databases and
-    'log.databases' holds one log per database. A failing database is reported in
+    'log.databases' holds one log per database. 'independent_sources' counts the evidence
+    behind a record, with OpenAlex and Semantic Scholar counting as one because both derive
+    largely from Crossref. A failing database is reported in
     source_errors and does not abort the rest.
 
     query supports Boolean syntax (AND, OR, NOT in capitals, "exact phrases", parentheses)
@@ -1846,6 +2080,7 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
             return {"status": "error", "detail": _err(names[0], r)}
         for rec in r.get("results", []):
             rec["found_in"] = names
+            rec["independent_sources"] = _independent(names)
         return r
 
     merged, by_key, by_title, logs, errors, before = [], {}, {}, [], [], 0
@@ -1894,6 +2129,8 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
                     by_title.setdefault(tk, []).append(rec)
             for k, _ in strong:
                 by_key.setdefault(k, hit)
+    for rec in merged:
+        rec["independent_sources"] = _independent(rec["found_in"])
     return {
         "status": "ok",
         "log": {"query": query, "scope": scope, "page": page, "per_page": limit,
