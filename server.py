@@ -2867,7 +2867,7 @@ async def map_suggest(map: str, limit: int = 20, include_states: list[str] | Non
     top = ranked[:max(1, min(limit, 200))]
     _knowledge().annotate(top)
     keep = ("id", "doi", "title", "first_author", "year", "cited_by", "state", "found_by", "seeds_linked",
-            "seed_cocited", "seed_coupling", "cocited_total", "is_retracted", "in_library", "zotero_key", "notes")
+            "seed_cocited", "seed_coupling", "cocited_total", "is_retracted", "in_library", "zotero_key", "notes", "zotero_tags")
     seeds = [n for n in nodes.values() if n["role"] == "seed"]
     warnings = []
     if seeds and not any(n["refs"] for n in seeds):

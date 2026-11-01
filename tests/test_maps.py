@@ -79,7 +79,7 @@ def snapshot(monkeypatch, tmp_path):
     import json, knowledge
     d = tmp_path / "knowledge"; d.mkdir()
     (d / "library.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "items": [
-        {"key": "ZKEY0001", "doi": "10.1234/one", "title": "One", "tags": ["cited/x"], "collections": ["Design › Theory"]},
+        {"key": "ZKEY0001", "doi": "10.1234/one", "title": "One", "tags": ["cited/x", "core/seminal", "sub/1"], "collections": ["Design › Theory"]},
         {"key": "ZKEY0002", "doi": None, "title": "Book without DOI", "tags": ["cited/x"], "collections": []}]}))
     (d / "notes.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "notes": [
         {"title": "One note", "path": "Zettelkasten/Summaries/One note.md", "zotero_keys": ["ZKEY0001"]}]}))
@@ -93,6 +93,7 @@ def test_zotero_tag_seeds_and_bridges(db, snapshot):
     assert out["seeds"] == {"W1": "added"} and "1 items have no DOI" in out["warnings"][0]
     w1 = next(w for w in run(s.map_get("Z"))["works"] if w["id"] == "W1")
     assert w1["in_library"] and w1["zotero_key"] == "ZKEY0001" and w1["notes"][0]["title"] == "One note"
+    assert w1["zotero_tags"] == ["cited/x", "core/seminal"]
     assert run(s.map_add_seeds("Z", zotero_collection="theory"))["seeds"] == {"W1": "updated"}
 
 

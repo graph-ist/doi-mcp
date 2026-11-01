@@ -100,3 +100,5 @@ def annotate(nodes: list[dict]) -> None:
         n["in_library"] = bool(it)
         n["zotero_key"] = it["key"] if it else None
         n["notes"] = by_key.get(it["key"], []) if it else []
+        # only the tags that mean something on a map: core/seminal and cited/*
+        n["zotero_tags"] = [t for t in it.get("tags", []) if t == "core/seminal" or t.startswith("cited/")] if it else []
