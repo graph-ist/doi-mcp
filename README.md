@@ -358,7 +358,7 @@ Il DOI MCP non chiama Zotero e non legge il vault. Legge due istantanee in `/var
 
 Quando OpenAlex non ha la bibliografia di un seed (libri, scienze umane), `map_add_seeds` la prende da Semantic Scholar se c'è; `map_suggest` usa anche `cocited_total` (co-citazione con qualsiasi lavoro della mappa) per separare i candidati quando un solo seed li collega tutti, e avvisa se nessun seed ha bibliografia.
 
-La pagina *Literature maps* (https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT) legge le mappe dal vivo tramite il connettore DOI.
+La pagina *Literature maps* (https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT) legge le mappe dal vivo tramite il connettore DOI. Il sorgente è `pages/literature-maps.html`: si ripubblica allo stesso link con la capability `mcp` (connettore DOI, tool `map_list`, `map_get`, `map_suggest`, `map_mark`, `map_remove`, `map_rename`, `map_delete`, `map_watch`) e `sample` (per proporre i nomi dei gruppi). Ha timeline e rete (co-citazione o coupling, con soglia), filtro "Show" per i lavori più collegati ai seed, colore core / non core (pieno = in Zotero), selezione con "Cites / Cited by", gruppi della rete con nomi proposti da Claude, lista ordinabile con To read / Read / Dismiss.
 
 Drop-in systemd usato sul Pi (`/etc/systemd/system/doi-mcp.service.d/state.conf`):
 

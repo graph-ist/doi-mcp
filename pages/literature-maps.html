@@ -1,0 +1,517 @@
+<title>Literature maps</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+/* Layout: map sheet. Controls, then the chart beside a detail panel (stacked on narrow screens), then the reading list */
+:root{--bg:#f6f7f4;--panel:#ffffff;--fg:#1d2420;--muted:#5d6a63;--line:#d9ded9;--grid:#eceeea;
+--core:#a8431f;--other:#7f8d86;--edge:#9aa7a0;--hi:#1d2420;--warn:#a5402a;--link:#2f6f73;
+--toread:#b07d12;--read:#5f7a2a;--gone:#b9c0bc;--new:#2f6f73;
+--f0:#2f6f9f;--f1:#3d8a5a;--f2:#8a5aa6;--f3:#b4441c;--f4:#8c7a14;--f5:#c25c98;--f6:#5e6a66;
+--display:"Fraunces",Georgia,serif;--body:"IBM Plex Sans",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141816;--panel:#1c211e;--fg:#e4e9e5;--muted:#9aa8a0;--line:#2e3632;--grid:#232926;
+--core:#ec8a5f;--other:#7d8a84;--edge:#56625b;--hi:#ffffff;--warn:#e88a70;--link:#6fb5b8;--toread:#e0b04a;--read:#a9c46a;--gone:#4a524e;--new:#6fb5b8;
+--f0:#6fa9d6;--f1:#76c08f;--f2:#bb93d6;--f3:#f0875a;--f4:#c4b04a;--f5:#e083b9;--f6:#9aa6a1;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#141816;--panel:#1c211e;--fg:#e4e9e5;--muted:#9aa8a0;--line:#2e3632;--grid:#232926;
+--core:#ec8a5f;--other:#7d8a84;--edge:#56625b;--hi:#ffffff;--warn:#e88a70;--link:#6fb5b8;--toread:#e0b04a;--read:#a9c46a;--gone:#4a524e;--new:#6fb5b8;
+--f0:#6fa9d6;--f1:#76c08f;--f2:#bb93d6;--f3:#f0875a;--f4:#c4b04a;--f5:#e083b9;--f6:#9aa6a1;color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.5}
+.wrap{max-width:1200px;margin:0 auto;padding-block:24px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:16px}
+h1{font-family:var(--display);font-weight:650;font-size:2rem;margin:0;text-wrap:balance}
+h2{font-family:var(--display);font-weight:500;font-size:1.2rem;margin:0 0 8px}
+.sub{color:var(--muted);margin:4px 0 0;max-width:65ch}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.lab{color:var(--muted);font:12px var(--mono)}
+select,button,input{font:500 13px var(--body);color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+select{min-width:0;max-width:100%}
+input[type=range]{padding:0;border:0;background:none;accent-color:var(--core);width:120px;vertical-align:middle}
+button{cursor:pointer}
+button[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+button:disabled{opacity:.5;cursor:default}
+:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:6px 0 0 6px}.seg button:last-child{border-radius:0 6px 6px 0}.seg button+button{border-left:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
+.stage{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
+.detail .cols{display:grid;grid-template-columns:minmax(0,1fr);gap:10px 24px}
+@media (min-width:760px){.detail .cols{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+.chartbox{position:relative;padding:0;overflow:hidden}
+.chart{width:100%;height:clamp(420px,62vh,640px);display:block;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.zoombtns{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:4px}
+.zoombtns button{width:32px;height:32px;padding:0;font-size:16px;line-height:1}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--muted);font-size:12.5px;padding:10px 12px;border-top:1px solid var(--line)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.note{color:var(--muted);font-size:12.5px;margin:0;padding:0 12px 12px}
+.msg{border-left:3px solid var(--warn);padding:8px 12px;background:var(--panel);border-radius:4px}
+.stats{display:flex;flex-wrap:wrap;gap:6px 18px;color:var(--muted);font:13px var(--mono)}
+.stats b{color:var(--fg);font-weight:400}
+.tip{position:fixed;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px;max-width:320px;box-shadow:0 4px 16px rgba(0,0,0,.14);z-index:5}
+.detail{display:flex;flex-direction:column;gap:10px}
+.detail .t{font-weight:600;line-height:1.3}
+.detail .m{color:var(--muted);font-size:13px}
+.detail dl{margin:0;display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;font-size:13px}
+.detail dt{color:var(--muted)}.detail dd{margin:0;overflow-wrap:anywhere}
+.nav{display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+.nav button{all:unset;cursor:pointer;color:var(--link);text-decoration:underline;text-underline-offset:2px;font-size:13px}
+.how p{margin:0 0 8px;font-size:14px;line-height:1.55;max-width:70ch;text-wrap:pretty}.how p.vs{color:var(--muted);border-top:1px solid var(--line);padding-top:8px;margin-top:4px}.how b{font-weight:600}
+.clist{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.cl{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;min-width:0}
+.cl h3{margin:0 0 4px;font:600 13px var(--body);display:flex;gap:6px;align-items:center}
+.cl .nav button{font-size:12.5px}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{white-space:nowrap;text-align:left;font:500 11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--line);padding:6px}
+td{border-bottom:1px solid var(--line);padding:6px;vertical-align:top}
+tr.pick{cursor:pointer}tr.pick:hover td{background:var(--bg)}tr.on td{background:var(--bg)}
+td.n{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.st{display:flex;gap:4px;flex-wrap:nowrap}td:last-child{white-space:nowrap}
+th.sort{cursor:pointer;user-select:none}th.sort:hover{color:var(--fg)}th.sort[aria-sort]::after{content:" ▾"}th.sort[aria-sort="ascending"]::after{content:" ▴"}
+.st button{padding:3px 8px;font-size:12px}
+.chip{display:inline-block;font:11px var(--mono);letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:4px;border:1px solid currentColor;text-decoration:none}
+.chip.lib,.chip.note{color:var(--link)}.chip.ret{color:var(--warn)}.chip.core{color:var(--core)}
+.chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
+.fresh{color:var(--muted);font:12px var(--mono)}
+a{color:var(--link)}
+text{fill:var(--muted);font:11px var(--mono)}
+.lbl{fill:var(--fg);font:11px var(--body);paint-order:stroke;stroke:var(--panel);stroke-width:3px;stroke-linejoin:round;pointer-events:none}
+.lbl.seed{font-weight:600}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+<div class="wrap">
+<header><h1>Literature maps</h1>
+<p class="sub">Your maps from the DOI server on the Pi, read live. Grow them in chat with map_expand; decide here what to read.</p></header>
+
+<div class="bar">
+<label for="pick" class="lab">Map</label><select id="pick"><option>Loading maps…</option></select>
+<button id="watch" disabled>Check new citations</button>
+<button id="rename" disabled>Rename</button>
+<button id="del" disabled>Delete map</button>
+<span class="fresh" id="fresh"></span></div>
+<form id="renameForm" class="panel bar" hidden><label for="newName" class="lab">New name</label><input id="newName" maxlength="80" required><button type="submit">Save name</button><button type="button" id="renameCancel">Cancel</button></form>
+<form id="delForm" class="panel bar" hidden><span id="delQ">Delete this map?</span><button type="submit" id="delGo">Yes, delete</button><button type="button" id="delCancel">No</button></form>
+<div id="msg" class="msg" hidden></div>
+<div class="stats" id="stats"></div>
+
+<div class="bar">
+<div class="seg" role="group" aria-label="View"><button id="v-time" aria-pressed="true">Timeline</button><button id="v-net" aria-pressed="false">Similarity network</button></div>
+<span id="netmode" class="seg" role="group" aria-label="Similarity" hidden><button id="m-co" aria-pressed="true">Co-citation</button><button id="m-cp" aria-pressed="false">Coupling</button></span>
+<span id="thrbox" hidden><label for="thr" class="lab">min <span id="thrv"></span></label> <input type="range" id="thr"></span>
+<span><label for="topn" class="lab">Show <span id="topv"></span></label> <input type="range" id="topn" min="25" max="2000" step="25" value="150"></span>
+<label for="colour" class="lab">Colour</label><select id="colour"><option value="core">Core / not core</option><option value="cluster">Cluster (network)</option><option value="state">Reading state</option><option value="field">Field</option></select>
+<label class="lab"><input type="checkbox" id="arrows" checked> arrows</label>
+<label class="lab"><input type="checkbox" id="hide"> hide dismissed</label>
+</div>
+
+<div class="stage">
+<div class="panel chartbox"><svg class="chart" id="svg" role="img" aria-label="Map of the works"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1L10,5L0,9z" style="fill:var(--edge)"/></marker><marker id="ahh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1L10,5L0,9z" style="fill:var(--hi)"/></marker></defs></svg>
+<div class="zoombtns"><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">&minus;</button><button id="reset" aria-label="Reset zoom" style="font-size:12px">&#8634;</button></div>
+<div class="legend" id="legend"></div>
+<p class="note" id="caveat"></p>
+<p class="note">One finger scrolls the page; pinch or two fingers zoom and pan the chart. Tap a work to select it.</p></div>
+<section class="panel how" id="how"></section>
+<section class="panel" id="clusters" hidden><h2>Clusters in this network</h2><p class="m" style="color:var(--muted);font-size:13px;margin:0 0 8px">Groups found automatically from the links shown. Names are proposed by Claude from the titles of each group's most cited works: a reading aid to check against the works, not a classification. Tap a work to select it.</p><div class="bar" style="margin-bottom:8px"><button id="nameBtn">Propose names</button><span class="fresh" id="nameMsg"></span></div><div id="clist" class="clist"></div></section>
+<aside class="panel detail" id="detail" aria-live="polite"><h2>Selected work</h2><p class="m">Tap a work in the chart or in the list to see its links in the map.</p></aside>
+</div>
+
+<section class="panel"><h2>Suggested reading</h2>
+<div class="tbl"><table><thead><tr><th class="sort" data-k="rank" aria-sort="ascending">#</th><th>Work</th><th class="sort" data-k="year">Year</th><th class="sort" data-k="cited_by">Cited by</th><th class="sort" data-k="seeds_linked">Seeds</th><th>State</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="fresh">Choose a map to see its suggestions.</td></tr></tbody></table></div>
+<p class="note" style="padding:8px 0 0">Ranked by links to the seeds, then co-citation with a seed, then coupling, co-citation in the whole map and citations. Scores are lower bounds: a map is a sample, and humanities works often lack reference lists in OpenAlex. Dismiss hides a work from the suggestions and keeps it dismissed if a later expansion finds it again. States are saved in the map on the Pi, never in Zotero or in your notes.</p></section>
+</div>
+<div class="tip" id="tip" hidden></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script>
+const SERVER = "DOI", TOP_CORE = 20;
+const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const store = { get(k){ try { return localStorage.getItem(k) } catch { return null } }, set(k,v){ try { localStorage.setItem(k,v) } catch {} } };
+let mcp = null, maps = [], current = null, data = null, sug = [], byId = new Map(), rank = new Map();
+let clusterOf = new Map();
+let view = 'time', mode = 'co', selected = null, zoom = null, k = 1, out = new Map(), inn = new Map();
+const fieldVars = ['--f0','--f1','--f2','--f3','--f4','--f5'], fieldIdx = new Map();
+
+function say(text){ const m = $('msg'); m.hidden = !text; m.textContent = text || '' }
+function explain(e){
+  const c = e && e.code;
+  if (c === 'server_not_connected' || c === 'selection_required') return `The ${SERVER} connector is not available in this view. Add or choose it in claude.ai Settings → Connectors.`;
+  if (c === 'needs_reauth') return `Reconnect the ${SERVER} connector in claude.ai Settings → Connectors.`;
+  if (c === 'not_in_manifest' || c === 'approval_required' || c === 'consent_required') return `This page needs your permission to use the ${SERVER} connector. Allow it from the page's permissions, then reload.`;
+  if (c === 'server_unavailable') return `The DOI server on the Pi did not answer. Check that the Pi is on, then reload.`;
+  if (c === 'tool_error') return `The DOI server reported an error: ${e.message}. If it says the tool is unknown, reload the ${SERVER} connector so it sees the new map tools.`;
+  return `Could not reach the ${SERVER} connector (${c || 'unknown error'}).`;
+}
+
+/* ---------- encodings ---------- */
+const isCore = w => w.role === 'seed' || (w.zotero_tags || []).includes('core/seminal') || (!w.in_library && rank.has(w.id) && rank.get(w.id) <= TOP_CORE);
+const roleOf = w => w.role === 'seed' ? 'seed' : (w.found_by || []).some(f => f.startsWith('references:')) ? 'reference'
+  : (w.found_by || []).some(f => f.startsWith('citing:') || f.startsWith('watch:')) ? 'citing' : 'related';
+function colour(w){
+  const m = $('colour').value;
+  if (m === 'state') return w.role === 'seed' ? css('--core') : css({to_read: '--toread', read: '--read', dismissed: '--gone'}[w.state] || '--new');
+  if (m === 'cluster'){ const c = clusterOf.get(w.id); return c == null ? css('--other') : css(fieldVars[c % fieldVars.length]) }
+  if (m === 'field'){ const f = w.field || 'Other'; if (!fieldIdx.has(f)) fieldIdx.set(f, fieldIdx.size); const i = fieldIdx.get(f); return css(i < fieldVars.length ? fieldVars[i] : '--f6') }
+  return isCore(w) ? css('--core') : css('--other');
+}
+const size = w => w.role === 'seed' ? 8 : 4 + 2 * Math.min(w.seeds_linked || 0, 4);
+const shape = w => ({seed: d3.symbolCircle, reference: d3.symbolCircle, citing: d3.symbolSquare, related: d3.symbolDiamond})[roleOf(w)];
+const sym = w => d3.symbol().type(shape(w)).size(Math.PI * size(w) ** 2 * (roleOf(w) === 'citing' ? .8 : 1))();
+function paint(sel){
+  sel.attr('d', sym)
+    .style('fill', w => w.in_library ? colour(w) : css('--panel'))
+    .style('stroke', colour).style('stroke-width', w => w.role === 'seed' ? 3 : 1.8);
+}
+const label = w => `${(w.first_author || '').split(' ').slice(-1)[0] || '?'} ${w.year || ''}`;
+
+function legend(){
+  const m = $('colour').value, dot = (fill, stroke, shp = 'circle') =>
+    `<svg width="14" height="14"><path transform="translate(7,7)" d="${d3.symbol().type(shp === 'square' ? d3.symbolSquare : shp === 'diamond' ? d3.symbolDiamond : d3.symbolCircle).size(70)()}" style="fill:${fill};stroke:${stroke};stroke-width:1.6"/></svg>`;
+  let items;
+  if (m === 'core') items = [[css('--core'), 'Core: seed, Zotero core/seminal, or a top-' + TOP_CORE + ' suggestion not in Zotero'], [css('--other'), 'Not core']];
+  else if (m === 'cluster') items = view === 'net' ? [[css(fieldVars[0]), 'Each colour is one cluster (see the list below the chart); grey: no cluster']] : [[css('--other'), 'Clusters exist only in the network view']];
+  else if (m === 'state') items = [[css('--new'), 'New'], [css('--toread'), 'To read'], [css('--read'), 'Read'], [css('--gone'), 'Dismissed']];
+  else items = [...fieldIdx.keys()].slice(0, 6).map((f, i) => [css(fieldVars[i]), f]).concat(fieldIdx.size > 6 ? [[css('--f6'), 'Other fields']] : []);
+  $('legend').innerHTML = items.map(([c, t]) => `<span>${dot(c, c)}${esc(t)}</span>`).join('')
+    + `<span>${dot(css('--other'), css('--other'))}filled: in Zotero</span><span>${dot(css('--panel'), css('--other'))}outline: not in Zotero</span>`
+    + `<span>${dot(css('--panel'), css('--muted'))}reference</span><span>${dot(css('--panel'), css('--muted'), 'square')}citing</span><span>${dot(css('--panel'), css('--muted'), 'diamond')}similar or same author</span>`;
+}
+
+/* ---------- data helpers ---------- */
+const relevance = (a, b) => (b.seeds_linked - a.seeds_linked) || (b.seed_cocited - a.seed_cocited) || (b.seed_coupling - a.seed_coupling) || ((b.cocited_total || 0) - (a.cocited_total || 0)) || ((b.cited_by || 0) - (a.cited_by || 0));
+function visibleWorks(){
+  if (!data) return [];
+  const pool = data.works.filter(w => !($('hide').checked && w.state === 'dismissed' && w.role !== 'seed'));
+  const seeds = pool.filter(w => w.role === 'seed'), rest = pool.filter(w => w.role !== 'seed').sort(relevance);
+  const n = +$('topn').value, keep = rest.slice(0, Math.max(0, n));
+  if (selected && byId.has(selected) && !keep.some(w => w.id === selected) && byId.get(selected).role !== 'seed') keep.push(byId.get(selected));
+  $('topv').textContent = `${Math.min(n, rest.length)} of ${rest.length} candidates`;
+  return seeds.concat(keep);
+}
+function setupTopN(){
+  const r = $('topn'), total = data ? data.works.filter(w => w.role !== 'seed').length : 0;
+  r.max = Math.max(25, Math.ceil(total / 25) * 25);
+  const saved = +store.get('lm-topn') || 150; r.value = Math.min(saved, +r.max);
+}
+function indexLinks(){
+  out = new Map(); inn = new Map();
+  for (const [a, b] of data.citation_edges){ (out.get(a) || out.set(a, []).get(a)).push(b); (inn.get(b) || inn.set(b, []).get(b)).push(a) }
+}
+function neighbours(id){
+  const s = new Set([id, ...(out.get(id) || []), ...(inn.get(id) || [])]);
+  if (view === 'net') for (const p of pairs()) { if (p.source === id || p.source?.id === id) s.add(p.target.id ?? p.target); if (p.target === id || p.target?.id === id) s.add(p.source.id ?? p.source) }
+  return s;
+}
+function thresholdSetup(){
+  const box = $('thrbox'), r = $('thr');
+  if (view !== 'net' || !data){ box.hidden = true; return }
+  box.hidden = false;
+  if (mode === 'co'){ const max = Math.max(2, ...data.cocitation.map(p => p[2])); r.min = 2; r.max = max; r.step = 1; if (+r.value < 2 || +r.value > max || r.dataset.m !== 'co') r.value = Math.min(3, max) }
+  else { r.min = 0.05; r.max = 0.5; r.step = 0.01; if (r.dataset.m !== 'cp') r.value = 0.1 }
+  r.dataset.m = mode; $('thrv').textContent = mode === 'co' ? `${r.value} co-citations` : `strength ${(+r.value).toFixed(2)}`;
+}
+let pairCache = [];
+function pairs(){ return pairCache }
+
+/* ---------- drawing ---------- */
+const svg = d3.select('#svg'), tip = $('tip');
+let root = svg.append('g'), dots, lines, labels, place = () => {};
+function showTip(e, w){ tip.hidden = false; tip.innerHTML = `<b>${esc(w.title || w.id)}</b><br>${esc(w.first_author)} · ${w.year || 'n.d.'} · cited by ${w.cited_by ?? '?'}<br><span class="fresh">${roleOf(w)}${w.in_library ? ' · in Zotero' : ''}${isCore(w) ? ' · core' : ''}</span>`; tip.style.left = Math.min(e.clientX + 12, innerWidth - 330) + 'px'; tip.style.top = (e.clientY + 12) + 'px' }
+const hideTip = () => { tip.hidden = true };
+
+function labelVisible(w){ return w.role === 'seed' && visibleWorks().length < 60 || w.id === selected || (rank.get(w.id) || 99) <= 5 || k >= 2.2 }
+function emphasis(){
+  if (!dots) return;
+  const nb = selected ? neighbours(selected) : null;
+  dots.style('opacity', w => !nb || nb.has(w.id) ? 1 : .15).attr('stroke-dasharray', w => w.id === selected ? '0' : null)
+    .style('stroke-width', w => w.id === selected ? 4 : w.role === 'seed' ? 3 : 1.8);
+  if (lines) lines.style('stroke', l => nb && (l.a === selected || l.b === selected) ? css('--hi') : css('--edge'))
+    .style('stroke-opacity', l => !nb ? .35 : (l.a === selected || l.b === selected) ? .9 : .04)
+    .attr('stroke-dasharray', l => nb && l.b === selected && view === 'time' ? '3 3' : null)
+    .attr('marker-end', l => view !== 'time' || !$('arrows').checked ? null : nb && (l.a === selected || l.b === selected) ? 'url(#ahh)' : 'url(#ah)');
+  if (labels) labels.style('display', w => labelVisible(w) ? null : 'none');
+}
+
+function draw(){
+  hideTip(); root.remove(); root = svg.append('g'); dots = lines = labels = null; k = 1;
+  const box = svg.node().getBoundingClientRect(), w = box.width, h = box.height;
+  svg.attr('viewBox', `0 0 ${w} ${h}`);
+  const W = visibleWorks();
+  thresholdSetup(); howToRead(); if (view !== 'net'){ clusterOf = new Map(); $('clusters').hidden = true } legend();
+  if (!W.length){ root.append('text').attr('x', 16).attr('y', 28).text(data ? 'This map has no works yet.' : 'No map loaded.'); return }
+  const vis = new Set(W.map(x => x.id));
+  if (view === 'time') drawTime(W, vis, w, h); else drawNet(W, vis, w, h);
+  dots.on('pointermove', showTip).on('pointerleave', hideTip).on('click', (e, x) => { e.stopPropagation(); select(x.id === selected ? null : x.id) });
+  svg.on('click', () => select(null));
+  zoom.filter(e => e.type === 'wheel' ? e.ctrlKey : e.type.startsWith('touch') ? e.touches.length > 1 : !e.button);
+  svg.call(zoom).on('dblclick.zoom', null);
+  emphasis();
+}
+
+function drawTime(W, vis, w, h){
+  const m = { l: 52, r: 24, t: 22, b: 32 }, pts = W.filter(d => d.year);
+  const x0 = d3.scaleLinear().domain(d3.extent(pts, d => d.year)).nice().range([m.l, w - m.r]);
+  const y0 = d3.scaleLog().domain([1, d3.max(pts, d => Math.max(2, d.cited_by || 0))]).nice().range([h - m.b, m.t]);
+  const grid = root.append('g'), gx = root.append('g').attr('transform', `translate(0,${h - m.b})`), gy = root.append('g').attr('transform', `translate(${m.l},0)`);
+  root.append('text').attr('x', m.l).attr('y', 12).text('cited by (log)');
+  root.append('clipPath').attr('id', 'clip').append('rect').attr('x', m.l).attr('y', m.t).attr('width', w - m.l - m.r).attr('height', h - m.t - m.b);
+  const plot = root.append('g').attr('clip-path', 'url(#clip)');
+  const cy = d => Math.max(1, d.cited_by || 1);
+  const jit = new Map(); for (const d of pts){ const key = d.year + '|' + Math.round(Math.log(cy(d)) * 4); const c = jit.get(key) || 0; jit.set(key, c + 1); d._jx = (c % 2 ? 1 : -1) * Math.ceil(c / 2) * .16 }
+  const E = data.citation_edges.filter(([a, b]) => vis.has(a) && vis.has(b) && byId.get(a).year && byId.get(b).year).map(([a, b]) => ({ a, b }));
+  lines = plot.append('g').selectAll('line').data(E).join('line').style('stroke-width', 1);
+  dots = plot.append('g').selectAll('path').data(pts).join('path').style('cursor', 'pointer').call(paint);
+  labels = plot.append('g').selectAll('text').data(pts).join('text').attr('class', d => 'lbl' + (d.role === 'seed' ? ' seed' : '')).text(label);
+  place = (X, Y) => {
+    gx.call(d3.axisBottom(X).ticks(Math.max(4, w / 90), 'd')); gy.call(d3.axisLeft(Y).ticks(5, '~s'));
+    grid.selectAll('*').remove(); Y.ticks(5).forEach(v => grid.append('line').attr('x1', m.l).attr('x2', w - m.r).attr('y1', Y(v)).attr('y2', Y(v)).style('stroke', css('--grid')));
+    root.selectAll('.domain,.tick line').style('stroke', css('--line'));
+    const px = d => X(d.year + d._jx), py = d => Y(cy(d));
+    dots.attr('transform', d => `translate(${px(d)},${py(d)})`);
+    const right = d => px(d) > w - m.r - 150;
+    labels.attr('text-anchor', d => right(d) ? 'end' : 'start').attr('x', d => right(d) ? px(d) - size(d) - 4 : px(d) + size(d) + 4)
+      .attr('y', d => py(d) < m.t + 12 ? py(d) + size(d) + 12 : py(d) > h - m.b - 4 ? py(d) - size(d) - 4 : py(d) + 4);
+    lines.each(function (l){ const A = byId.get(l.a), B = byId.get(l.b), x1 = px(A), y1 = py(A), x2 = px(B), y2 = py(B), dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1, r = size(B) + 3;
+      this.setAttribute('x1', x1); this.setAttribute('y1', y1); this.setAttribute('x2', x2 - dx / L * r); this.setAttribute('y2', y2 - dy / L * r) });
+  };
+  place(x0, y0);
+  zoom = d3.zoom().scaleExtent([1, 20]).extent([[m.l, m.t], [w - m.r, h - m.b]]).translateExtent([[m.l, m.t], [w - m.r, h - m.b]])
+    .on('zoom', e => { k = e.transform.k; place(e.transform.rescaleX(x0), e.transform.rescaleY(y0)); emphasis() });
+  $('caveat').textContent = `${pts.length} works with a year. Lines join citing and cited works${selected ? '; dashed lines arrive at the selected work' : ''}. Citation counts favour older works.`;
+}
+
+function drawNet(W, vis, w, h){
+  const thr = +$('thr').value;
+  const raw = mode === 'co' ? data.cocitation.filter(p => p[2] >= thr).map(([a, b, n]) => ({ a, b, w: n })) : data.coupling.filter(p => p[3] >= thr).map(([a, b, n, s]) => ({ a, b, w: s }));
+  const P = raw.filter(p => vis.has(p.a) && vis.has(p.b));
+  const ids = new Set(P.flatMap(p => [p.a, p.b])), nodes = W.filter(d => ids.has(d.id)).map(d => ({ ...d })), nm = new Map(nodes.map(n => [n.id, n]));
+  const L = P.map(p => ({ source: nm.get(p.a), target: nm.get(p.b), a: p.a, b: p.b, w: p.w }));
+  pairCache = L;
+  renderClusters(findClusters(nodes, L)); legend();
+  $('thrv').textContent = mode === 'co' ? `${thr} co-citations` : `strength ${thr.toFixed(2)}`;
+  if (!nodes.length){ root.append('text').attr('x', 16).attr('y', 28).text('No pairs at this threshold: lower it, or expand the map with references and citing works.'); dots = root.selectAll('.none'); zoom = d3.zoom(); $('caveat').textContent = ''; return }
+  const wmax = d3.max(L, l => l.w) || 1, g = root.append('g');
+  lines = g.append('g').selectAll('line').data(L).join('line').style('stroke-width', l => .6 + 3.4 * l.w / wmax);
+  dots = g.append('g').selectAll('path').data(nodes).join('path').style('cursor', 'pointer').call(paint);
+  labels = g.append('g').selectAll('text').data(nodes).join('text').attr('class', d => 'lbl' + (d.role === 'seed' ? ' seed' : '')).text(label);
+  const sim = d3.forceSimulation(nodes).force('link', d3.forceLink(L).distance(l => 80 - 45 * l.w / wmax).strength(l => .2 + .6 * l.w / wmax))
+    .force('charge', d3.forceManyBody().strength(nodes.length > 200 ? -40 : -120)).force('x', d3.forceX(w / 2).strength(.05)).force('y', d3.forceY(h / 2).strength(.07))
+    .force('collide', d3.forceCollide(d => size(d) + 3)).stop();
+  for (let i = 0; i < 260; i++) sim.tick();
+  const tick = () => { lines.attr('x1', l => l.source.x).attr('y1', l => l.source.y).attr('x2', l => l.target.x).attr('y2', l => l.target.y); dots.attr('transform', d => `translate(${d.x},${d.y})`); labels.attr('text-anchor', d => d.x > w - 150 ? 'end' : 'start').attr('x', d => d.x > w - 150 ? d.x - size(d) - 4 : d.x + size(d) + 4).attr('y', d => d.y < 14 ? d.y + size(d) + 12 : d.y + 4) };
+  tick(); sim.on('tick', tick);
+  dots.call(d3.drag().on('start', (e, d) => { if (!e.active) sim.alphaTarget(.2).restart(); d.fx = d.x; d.fy = d.y }).on('drag', (e, d) => { d.fx = e.x; d.fy = e.y }).on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = d.fy = null }));
+  zoom = d3.zoom().scaleExtent([.3, 8]).on('zoom', e => { g.attr('transform', e.transform); k = e.transform.k; emphasis() });
+  $('caveat').textContent = `${nodes.length} of ${W.length} works linked at this threshold; isolated works are hidden. Line width: ${mode === 'co' ? 'how often works in the map cite both' : 'shared references'}. Distances in this layout have no metric meaning.`;
+}
+
+/* ---------- how to read ---------- */
+function howToRead(){
+  const t = view === 'time'
+    ? `<h2>How to read the timeline</h2><p>Each mark is a work: <b>left to right</b> the year, <b>bottom to top</b> how often it has been cited (log scale, so each step up is ten times more). The clusters here only mean <b>period and fame</b>: top left are old classics, top right recent works that took off quickly, bottom right recent works not yet cited. A line joins a work to a work it cites.</p><p>Use it to see where a field starts, when it grew, and which recent works are already central.</p>`
+    : mode === 'co'
+    ? `<h2>How to read co-citation</h2><p>Two works are linked when <b>other works in this map cite both</b>; the thicker the line, the more often. It is the judgement of later authors: they keep reading and citing these works together.</p><p>A <b>cluster</b> is therefore a shared foundation: a school, a theory or a topic <b>as the citing literature sees it</b>. It looks backwards, so it favours older, established works and rarely shows very recent ones.</p><p class="vs">Co-citation vs coupling: co-citation looks at <b>who cites</b> two works, coupling at <b>what they cite</b>.</p>`
+    : `<h2>How to read coupling</h2><p>Two works are linked when <b>their own reference lists overlap</b>; the thicker the line, the larger the share of references they have in common. It depends only on what the authors themselves read.</p><p>A <b>cluster</b> is therefore a group of works <b>building on the same sources</b>: usually a research front working on the same problem. It works for recent works too, which nobody has co-cited yet; it says little about classics, whose reference lists are old or missing.</p><p class="vs">Coupling vs co-citation: coupling looks at <b>what two works cite</b>, co-citation at <b>who cites them</b>.</p>`;
+  $('how').innerHTML = t;
+}
+
+/* ---------- clusters (label propagation on the network shown) ---------- */
+function findClusters(nodes, L){
+  const nb = new Map(nodes.map(n => [n.id, []]));
+  for (const l of L){ nb.get(l.a).push([l.b, l.w]); nb.get(l.b).push([l.a, l.w]) }
+  const lab = new Map(nodes.map(n => [n.id, n.id])), order = nodes.map(n => n.id).sort();
+  for (let it = 0; it < 20; it++){
+    let moved = 0;
+    for (const id of order){
+      const score = new Map();
+      for (const [o, w] of nb.get(id)) score.set(lab.get(o), (score.get(lab.get(o)) || 0) + w);
+      if (!score.size) continue;
+      const best = [...score].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))[0][0];
+      if (best !== lab.get(id)){ lab.set(id, best); moved++ }
+    }
+    if (!moved) break;
+  }
+  const groups = new Map();
+  for (const [id, g] of lab){ (groups.get(g) || groups.set(g, []).get(g)).push(id) }
+  return [...groups.values()].filter(g => g.length >= 3).sort((a, b) => b.length - a.length);
+}
+function renderClusters(groups){
+  clusterOf = new Map(); groups.forEach((g, i) => g.forEach(id => clusterOf.set(id, i)));
+  const box = $('clusters');
+  if (view !== 'net' || !groups.length){ box.hidden = true; return }
+  box.hidden = false;
+  $('clist').innerHTML = groups.slice(0, 12).map((g, i) => {
+    const ws = g.map(id => byId.get(id)).filter(Boolean), top = ws.slice().sort((a, b) => (b.cited_by || 0) - (a.cited_by || 0)).slice(0, 4);
+    const years = ws.map(w => w.year).filter(Boolean).sort((a, b) => a - b), mid = years[Math.floor(years.length / 2)];
+    const fields = [...ws.reduce((m, w) => m.set(w.field || 'Other', (m.get(w.field || 'Other') || 0) + 1), new Map())].sort((a, b) => b[1] - a[1]).slice(0, 2).map(f => f[0]).join(', ');
+    const inLib = ws.filter(w => w.in_library).length, seeds = ws.filter(w => w.role === 'seed').length;
+    const nm = clusterNames.get(sigOf(g));
+    return `<div class="cl"><h3><svg width="10" height="10"><circle cx="5" cy="5" r="5" style="fill:${css(fieldVars[i % fieldVars.length])}"/></svg>${nm ? esc(nm) + ' <span class="fresh">(proposed)</span>' : 'Cluster ' + (i + 1)} · ${ws.length} works</h3>
+      <div class="fresh">${years[0] || '?'}–${years[years.length - 1] || '?'} (median ${mid || '?'}) · ${esc(fields)} · ${seeds} seeds · ${inLib} in Zotero</div>
+      <div class="nav" style="margin-top:4px">${top.map(w => `<button data-go="${esc(w.id)}">${esc(label(w))}: ${esc((w.title || '').slice(0, 70))}</button>`).join('')}</div></div>`;
+  }).join('') + (groups.length > 12 ? `<p class="fresh">and ${groups.length - 12} smaller clusters</p>` : '');
+}
+let lastGroups = [], sampler = null;
+const clusterNames = new Map();
+const sigOf = g => (current || '') + '|' + mode + '|' + g.slice().sort().slice(0, 12).join(',');
+function loadNames(){ try { const o = JSON.parse(store.get('lm-names') || '{}'); for (const k in o) clusterNames.set(k, o[k]) } catch {} }
+function saveNames(){ store.set('lm-names', JSON.stringify(Object.fromEntries([...clusterNames].slice(-300)))) }
+loadNames();
+const _render = renderClusters;
+renderClusters = groups => { lastGroups = groups; _render(groups); $('nameBtn').disabled = !sampler || !groups.length };
+$('nameBtn').onclick = async () => {
+  if (!sampler || !lastGroups.length) return;
+  const todo = lastGroups.slice(0, 12).map((g, i) => ({ i, g, works: g.map(id => byId.get(id)).filter(Boolean).sort((a, b) => (b.cited_by || 0) - (a.cited_by || 0)).slice(0, 8) }));
+  $('nameBtn').disabled = true; $('nameMsg').textContent = 'Asking Claude…';
+  try {
+    const prompt = 'You name clusters of academic works found in a ' + (mode === 'co' ? 'co-citation' : 'bibliographic coupling') + ' network. For each cluster give a short, specific name (2 to 6 words, English) for the shared topic, school or research front its works suggest. Use only the titles given; if they do not share a clear topic, answer "Mixed". Reply as JSON: {"names": [{"cluster": number, "name": string}]}.\n\n'
+      + todo.map(t => `Cluster ${t.i + 1}:\n` + t.works.map(w => `- ${w.title} (${w.first_author || '?'}, ${w.year || 'n.d.'})`).join('\n')).join('\n\n');
+    const res = await sampler.json(prompt, { modelTier: 'quick' });
+    for (const n of res?.names || []){ const t = todo.find(x => x.i + 1 === n.cluster); if (t && typeof n.name === 'string') clusterNames.set(sigOf(t.g), n.name.slice(0, 60)) }
+    saveNames(); $('nameMsg').textContent = ''; _render(lastGroups);
+  } catch (e) { $('nameMsg').textContent = e?.code === 'not_granted' ? 'Naming needs permission to ask Claude.' : e?.code === 'rate_limited' ? 'Usage limit reached; try later.' : 'Could not get names (' + (e?.code || 'error') + ').' }
+  $('nameBtn').disabled = false;
+};
+$('clist').addEventListener('click', e => { const go = e.target.closest('button[data-go]'); if (go) select(go.dataset.go) });
+
+/* ---------- detail panel ---------- */
+function select(id){ selected = id; emphasis(); renderDetail(); document.querySelectorAll('#rows tr').forEach(tr => tr.classList.toggle('on', tr.dataset.id === id)) }
+function links(ids){
+  if (!ids.length) return '<span class="m">none in this map</span>';
+  return '<div class="nav">' + ids.slice(0, 12).map(i => `<button data-go="${esc(i)}">${esc(label(byId.get(i)))}: ${esc((byId.get(i).title || '').slice(0, 60))}</button>`).join('') + (ids.length > 12 ? `<span class="m">and ${ids.length - 12} more</span>` : '') + '</div>';
+}
+function chips(w){
+  return (w.is_retracted ? '<span class="chip ret">retracted</span>' : '') + (isCore(w) ? '<span class="chip core">core</span>' : '')
+    + (w.zotero_key ? `<a class="chip lib" href="zotero://select/library/items/${esc(w.zotero_key)}">in Zotero</a>` : '')
+    + (w.notes || []).map(n => `<a class="chip note" href="obsidian://open?vault=${encodeURIComponent('Knowledge Graph')}&file=${encodeURIComponent(n.path.replace(/\.md$/, ''))}">note: ${esc(n.title)}</a>`).join('');
+}
+function stateButtons(w){
+  if (w.role === 'seed') return '<span class="m">seed</span>';
+  return `<div class="st" data-id="${esc(w.id)}">${['to_read', 'read', 'dismissed'].map(s => `<button data-s="${s}" aria-pressed="${w.state === s}">${s === 'to_read' ? 'To read' : s === 'read' ? 'Read' : 'Dismiss'}</button>`).join('')}</div>`;
+}
+function renderDetail(){
+  const d = $('detail'), w = selected && byId.get(selected);
+  if (!w){ d.innerHTML = '<h2>Selected work</h2><p class="m">Tap a work in the chart or in the list to see its links in the map.</p>'; return }
+  const cites = out.get(w.id) || [], cited = inn.get(w.id) || [];
+  d.innerHTML = `<h2>Selected work</h2><div><div class="t">${w.doi ? `<a href="https://doi.org/${encodeURI(w.doi)}" target="_blank" rel="noopener">${esc(w.title || w.id)}</a>` : esc(w.title || w.id)}</div>
+    <div class="m">${esc(w.first_author)} · ${w.year || 'n.d.'} · cited by ${w.cited_by ?? '?'}${w.field ? ' · ' + esc(w.field) : ''}</div><div class="chips">${chips(w)}</div></div>
+    ${stateButtons(w)}
+    <div class="cols"><dl><dt>Role</dt><dd>${roleOf(w)}${rank.has(w.id) ? ` · suggestion #${rank.get(w.id)}` : ''}</dd>
+    <dt>Found by</dt><dd>${esc((w.found_by || []).map(f => f.split(':')[0]).filter((v, i, a) => a.indexOf(v) === i).join(', '))}</dd>
+    <dt>Scores</dt><dd class="fresh">seeds ${w.seeds_linked} · co-cited with a seed ${w.seed_cocited} · coupling ${w.seed_coupling}</dd>
+    ${w.note ? `<dt>Note</dt><dd>${esc(w.note)}</dd>` : ''}</dl>
+    <dl><dt>Cites</dt><dd>${links(cites)}</dd><dt>Cited by</dt><dd>${links(cited)}</dd></dl></div>`;
+}
+$('detail').addEventListener('click', e => { const go = e.target.closest('button[data-go]'); if (go) select(go.dataset.go) });
+
+/* ---------- list and actions ---------- */
+function renderStats(){
+  if (!data){ $('stats').innerHTML = ''; return }
+  const W = data.works, c = s => W.filter(w => w.state === s && w.role !== 'seed').length;
+  $('stats').innerHTML = `<span><b>${W.filter(w => w.role === 'seed').length}</b> seeds</span><span><b>${W.length}</b> works</span><span><b>${W.filter(w => w.in_library).length}</b> in Zotero</span><span><b>${c('to_read')}</b> to read</span><span><b>${c('read')}</b> read</span><span><b>${c('dismissed')}</b> dismissed</span>`;
+}
+let sortKey = 'rank', sortDir = 1;
+document.querySelector('thead').addEventListener('click', e => {
+  const th = e.target.closest('th.sort'); if (!th) return;
+  const k = th.dataset.k; if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = k === 'rank' ? 1 : -1 }
+  document.querySelectorAll('th.sort').forEach(x => { if (x.dataset.k === sortKey) x.setAttribute('aria-sort', sortDir === 1 ? 'ascending' : 'descending'); else x.removeAttribute('aria-sort') });
+  renderRows();
+});
+function renderRows(){
+  const tbody = $('rows');
+  if (!sug.length){ tbody.innerHTML = `<tr><td colspan="6" class="fresh">${data && data.works.some(w => w.role !== 'seed') ? 'No open suggestions: everything is read or dismissed.' : 'Only seeds so far. Ask Claude to run map_expand on this map, then reload.'}</td></tr>`; return }
+  const rows = sug.slice(0, 40).map((s, i) => ({ ...(byId.get(s.id) || s), _rank: i + 1 }));
+  const val = w => sortKey === 'rank' ? w._rank : (w[sortKey] ?? -1);
+  rows.sort((a, b) => (val(a) - val(b)) * sortDir);
+  tbody.innerHTML = rows.map(w => { return `<tr class="pick${w.id === selected ? ' on' : ''}" data-id="${esc(w.id)}"><td class="n">${w._rank}</td><td>${esc(w.title || w.id)}<br><span class="fresh">${esc(w.first_author)}</span><span class="chips">${chips(w)}</span></td><td class="n">${w.year || ''}</td><td class="n">${w.cited_by ?? ''}</td><td class="n">${w.seeds_linked}</td><td>${stateButtons(w)}</td></tr>` }).join('');
+}
+async function act(btns, call, failText){
+  btns.forEach(b => b.disabled = true);
+  try { await call(); say(''); await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) }
+  catch (err) { say(explain(err) + ' ' + failText); btns.forEach(b => b.disabled = false) }
+}
+document.addEventListener('click', e => {
+  const holder = e.target.closest('.st'); if (!holder || !mcp) return;
+  const id = holder.dataset.id, btns = [...holder.querySelectorAll('button')], w = byId.get(id);
+  if (e.target.closest('button[data-rm]')){ e.stopPropagation(); act(btns, () => mcp.callTool(SERVER, 'map_remove', { map: current, ids: [id] }), 'Reload to check whether the work was removed.'); return }
+  const b = e.target.closest('button[data-s]'); if (!b) return; e.stopPropagation();
+  const next = w.state === b.dataset.s ? 'new' : b.dataset.s;
+  act(btns, () => mcp.callTool(SERVER, 'map_mark', { map: current, ids: [id], state: next }), 'The state may or may not have been saved; reload to check.');
+});
+$('rows').addEventListener('click', e => { if (e.target.closest('button,a')) return; const tr = e.target.closest('tr[data-id]'); if (tr) select(tr.dataset.id) });
+
+async function loadMap(name, fresh){
+  current = name; store.set('lm-map', name);
+  const opts = fresh ? { cache: { refresh: true } } : undefined;
+  try {
+    const [g, s] = await Promise.all([mcp.callTool(SERVER, 'map_get', { map: name }, opts), mcp.callTool(SERVER, 'map_suggest', { map: name, limit: 200 }, opts)]);
+    if (g.payload?.status !== 'ok') throw { code: 'tool_error', message: g.payload?.detail || 'map not found' };
+    data = g.payload; sug = s.payload?.suggestions || [];
+    byId = new Map(data.works.map(w => [w.id, w])); rank = new Map(sug.map((x, i) => [x.id, i + 1])); fieldIdx.clear();
+    indexLinks(); setupTopN();
+    if (selected && !byId.has(selected)) selected = null;
+    const at = g.cache?.storedAt; $('fresh').textContent = at ? `updated ${new Date(at).toLocaleTimeString()}` : 'live';
+    if ((s.payload?.warnings || []).length) say(s.payload.warnings.join(' ')); else say('');
+  } catch (e) { data = null; sug = []; byId = new Map(); say(explain(e)) }
+  renderStats(); renderRows(); draw(); renderDetail();
+}
+
+function controls(on){ ['watch', 'rename', 'del'].forEach(id => $(id).disabled = !on) }
+function renderPicker(){
+  const pick = $('pick'); controls(maps.length > 0);
+  if (!maps.length){ pick.innerHTML = '<option>No maps yet</option>'; pick.disabled = true; say('No maps yet. In a chat, ask Claude to create one (map_create) from a few DOIs or a Zotero tag.'); return }
+  pick.disabled = false;
+  pick.innerHTML = maps.map(m => `<option value="${esc(m.name)}">${esc(m.name)} · ${m.works} works</option>`).join('');
+  const want = store.get('lm-map'), name = maps.some(m => m.name === want) ? want : maps[0].name;
+  pick.value = name; loadMap(name);
+}
+async function refreshList(){ try { const r = await mcp.callTool(SERVER, 'map_list', {}, { cache: { refresh: true } }); maps = r.payload?.maps || []; renderPicker() } catch (err) { say(explain(err)) } }
+$('pick').addEventListener('change', e => { selected = null; loadMap(e.target.value) });
+$('watch').onclick = async () => {
+  controls(false); $('watch').textContent = 'Checking…';
+  try { const r = await mcp.callTool(SERVER, 'map_watch', { map: current }); const n = r.payload?.new?.length || 0;
+    say(''); $('fresh').textContent = n ? `${n} new citing works since ${r.payload.since}` : `no new citing works since ${r.payload?.since || 'last check'}`;
+    await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) }
+  catch (err) { say(explain(err)) }
+  $('watch').textContent = 'Check new citations'; controls(true);
+};
+$('rename').onclick = () => { $('renameForm').hidden = false; $('newName').value = current; $('newName').focus() };
+$('renameCancel').onclick = () => { $('renameForm').hidden = true };
+$('renameForm').addEventListener('submit', async e => { e.preventDefault(); const name = $('newName').value.trim(); if (!name || name === current) return;
+  try { const r = await mcp.callTool(SERVER, 'map_rename', { map: current, new_name: name }); if (r.payload?.status !== 'ok'){ say(r.payload?.detail || 'Could not rename the map.'); return }
+    store.set('lm-map', name); current = name; $('renameForm').hidden = true; await refreshList() } catch (err) { say(explain(err)) } });
+$('del').onclick = () => { $('delQ').textContent = `Delete "${current}" with its works and reading states? This cannot be undone.`; $('delForm').hidden = false; $('delCancel').focus() };
+$('delCancel').onclick = () => { $('delForm').hidden = true };
+$('delForm').addEventListener('submit', async e => { e.preventDefault(); if (!current) return;
+  try { const r = await mcp.callTool(SERVER, 'map_delete', { map: current, confirm_name: current }); if (r.payload?.status !== 'ok'){ say(r.payload?.detail || 'The map was not deleted.'); return }
+    $('delForm').hidden = true; say(`Deleted "${r.payload.deleted}".`); store.set('lm-map', ''); current = null; data = null; sug = []; selected = null; renderStats(); renderRows(); draw(); renderDetail(); await refreshList() }
+  catch (err) { say(explain(err) + ' Reload to check whether the map still exists.') } });
+
+/* ---------- view controls ---------- */
+function setView(v){ view = v; ['time', 'net'].forEach(x => $('v-' + x).setAttribute('aria-pressed', x === v)); $('netmode').hidden = v !== 'net'; draw() }
+$('v-time').onclick = () => setView('time'); $('v-net').onclick = () => setView('net');
+function setMode(m){ mode = m; $('m-co').setAttribute('aria-pressed', m === 'co'); $('m-cp').setAttribute('aria-pressed', m === 'cp'); draw() }
+$('m-co').onclick = () => setMode('co'); $('m-cp').onclick = () => setMode('cp');
+$('thr').addEventListener('input', () => { $('thrv').textContent = mode === 'co' ? `${$('thr').value} co-citations` : `strength ${(+$('thr').value).toFixed(2)}` });
+$('thr').addEventListener('change', draw);
+$('colour').addEventListener('change', () => { store.set('lm-colour', $('colour').value); draw(); renderRows(); renderDetail() });
+$('topn').addEventListener('input', () => { const total = data ? data.works.filter(w => w.role !== 'seed').length : 0; $('topv').textContent = `${Math.min(+$('topn').value, total)} of ${total} candidates` });
+$('topn').addEventListener('change', () => { store.set('lm-topn', $('topn').value); draw() });
+$('arrows').onchange = emphasis; $('hide').onchange = draw;
+$('zin').onclick = () => zoom && svg.transition().duration(200).call(zoom.scaleBy, 1.6);
+$('zout').onclick = () => zoom && svg.transition().duration(200).call(zoom.scaleBy, 1 / 1.6);
+$('reset').onclick = () => zoom && svg.transition().duration(250).call(zoom.transform, d3.zoomIdentity);
+{ const c = store.get('lm-colour'); if (c && ['core', 'cluster', 'state', 'field'].includes(c)) $('colour').value = c }
+let lastW = 0, rt; new ResizeObserver(() => { const w = Math.round(svg.node().getBoundingClientRect().width); if (Math.abs(w - lastW) < 8) return; lastW = w; clearTimeout(rt); rt = setTimeout(draw, 150) }).observe(svg.node());
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+draw();
+
+claude.use('sample').then(sm => { sampler = sm; $('nameBtn').hidden = !sm; $('nameBtn').disabled = !sm || !lastGroups.length });
+(async () => {
+  mcp = await claude.use('mcp');
+  if (!mcp){ $('pick').innerHTML = '<option>Unavailable</option>'; say('This view cannot reach your connectors. Open the page in claude.ai while signed in.'); return }
+  mcp.watchTool(SERVER, 'map_list', {}, ev => {
+    if (ev.type === 'error'){ if (!maps.length){ $('pick').innerHTML = '<option>Unavailable</option>'; say(explain(ev.error)) } return }
+    const fresh = ev.result.payload?.maps || [];
+    const changed = JSON.stringify(fresh.map(m => [m.name, m.updated])) !== JSON.stringify(maps.map(m => [m.name, m.updated]));
+    maps = fresh; if (changed) renderPicker();
+  }, { refetchInterval: 60000 });
+})();
+</script>
