@@ -13,7 +13,7 @@ import time
 
 DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "maps.sqlite")
 STATES = ("new", "to_read", "read", "dismissed")
-NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted")
+NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted", "subfield", "topic", "momentum")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS maps (
@@ -44,7 +44,8 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     db.executescript(SCHEMA)
     # columns added after the first release
     for table, column, kind in (("nodes", "is_retracted", "INTEGER"), ("nodes", "refs_source", "TEXT"),
-                                ("maps", "watched", "TEXT")):
+                                ("maps", "watched", "TEXT"), ("nodes", "subfield", "TEXT"), ("nodes", "topic", "TEXT"),
+                                ("nodes", "momentum", "INTEGER")):
         if column not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     return db
@@ -74,17 +75,19 @@ def upsert(db: sqlite3.Connection, map_id: int, node: dict, role: str, found_by:
                      (map_id, node["id"])).fetchone()
     values = [node.get(k) for k in NODE_FIELDS]
     refs = json.dumps([r for r in node.get("refs") or [] if r])
+    cols = ", ".join(NODE_FIELDS)
     if old is None:
-        db.execute("INSERT INTO nodes (map_id, work_id, doi, title, first_author, year, cited_by, field,"
-                   " is_retracted, refs, refs_source, role, found_by, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        db.execute(f"INSERT INTO nodes (map_id, work_id, {cols}, refs, refs_source, role, found_by, added)"
+                   f" VALUES (?, ?, {', '.join('?' * len(NODE_FIELDS))}, ?, ?, ?, ?, ?)",
                    (map_id, node["id"], *values, refs, node.get("refs_source"), role, json.dumps([found_by]), now()))
         return "added"
     sources = json.loads(old["found_by"])
     if found_by not in sources:
         sources.append(found_by)
     new_role = "seed" if "seed" in (old["role"], role) else "candidate"
-    db.execute("UPDATE nodes SET doi = ?, title = ?, first_author = ?, year = ?, cited_by = ?, field = ?,"
-               " is_retracted = ?, refs = CASE WHEN ? = '[]' THEN refs ELSE ? END,"
+    # a field missing from the new record (None) keeps the stored value
+    sets = ", ".join(f"{c} = COALESCE(?, {c})" for c in NODE_FIELDS)
+    db.execute(f"UPDATE nodes SET {sets}, refs = CASE WHEN ? = '[]' THEN refs ELSE ? END,"
                " refs_source = CASE WHEN ? = '[]' THEN refs_source ELSE ? END, role = ?, found_by = ?"
                " WHERE map_id = ? AND work_id = ?",
                (*values, refs, refs, refs, node.get("refs_source"), new_role, json.dumps(sources), map_id, node["id"]))

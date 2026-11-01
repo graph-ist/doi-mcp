@@ -159,4 +159,49 @@ def test_full_map_keeps_most_linked(db, monkeypatch):
     out = run(s.map_expand("Cap", ["references"]))
     # W3 is cited by both seeds; W4 and W5 by one each, W5 more cited: W3 and W5 enter
     ids = {w["id"] for w in run(s.map_get("Cap"))["works"]}
-    assert out["skipped_map_full"] == 1 and ids == {"W1", "W2", "W3", "W5"}
+    assert out["skipped"] == 1 and ids == {"W1", "W2", "W3", "W5"}
+
+
+def test_duplicates_merged_and_prune(db, monkeypatch):
+    db["W3"]["title"] = "Resilience and stability of ecological systems"
+    db["W5"] = {**node("W5", ["W9"], cited=10), "title": "Resilience and Stability of Ecological Systems", "year": 2001}
+    db["W3"]["year"] = 2000
+    run(s.map_create("D", ["W1", "W2"]))
+    out = run(s.map_expand("D", ["references"]))
+    assert out["duplicates_merged"] and out["duplicates_merged"][0]["kept"] == "W3"
+    ids = {w["id"] for w in run(s.map_get("D"))["works"]}
+    assert "W5" not in ids and "W3" in ids
+    run(s.map_mark("D", ["W4"], "dismissed"))
+    pr = run(s.map_prune("D", keep=0))
+    left = {w["id"]: w for w in run(s.map_get("D"))["works"]}
+    assert set(left) == {"W1", "W2", "W4"} and pr["removed"] == 1
+
+
+def test_max_new_and_expand_from_candidate(db):
+    run(s.map_create("N", ["W1", "W2"]))
+    out = run(s.map_expand("N", ["references"], max_new=1))
+    assert out["added"] == 1 and out["skipped"] >= 1
+    ids = {w["id"] for w in run(s.map_get("N"))["works"]}
+    assert "W3" in ids  # linked to both seeds: enters first
+    out = run(s.map_expand("N", ["citing"], seeds=["W3"]))
+    assert out["started_from"] == ["W3"]
+
+
+def test_momentum():
+    import datetime
+    y = datetime.datetime.now(datetime.timezone.utc).year
+    assert s._momentum([{"year": y, "cited_by_count": 50}, {"year": y - 1, "cited_by_count": 3}, {"year": y - 3, "cited_by_count": 2}, {"year": y - 4, "cited_by_count": 9}]) == 5
+    assert s._momentum(None) is None
+
+
+def test_refresh_keeps_state(db, monkeypatch):
+    run(s.map_create("R", ["W1"]))
+    run(s.map_expand("R", ["references"]))
+    run(s.map_mark("R", ["W3"], "read"))
+
+    async def batch(key, ids):
+        return [{**db[i], "cited_by": 999, "momentum": 42} for i in ids if i in db], []
+    monkeypatch.setattr(s, "_oa_batch", batch)
+    out = run(s.map_refresh("R"))
+    w3 = next(w for w in run(s.map_get("R"))["works"] if w["id"] == "W3")
+    assert out["refreshed"] == 3 and w3["cited_by"] == 999 and w3["momentum"] == 42 and w3["state"] == "read"

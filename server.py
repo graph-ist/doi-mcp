@@ -2305,11 +2305,19 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
 
 
 CG_SELECT = ("id,doi,title,publication_year,cited_by_count,authorships,primary_topic,"
-             "referenced_works,is_retracted")
+             "referenced_works,is_retracted,counts_by_year")
 
 
 def _oa_id(url: str | None) -> str | None:
     return url.rsplit("/", 1)[-1].upper() if url else None
+
+
+def _momentum(counts: list | None) -> int | None:
+    """Citations received in the last three complete years: how much a work is cited now."""
+    if counts is None:
+        return None
+    this_year = datetime.now(timezone.utc).year
+    return sum(c.get("cited_by_count", 0) for c in counts if this_year - 3 <= c.get("year", 0) < this_year)
 
 
 def _cg_node(it: dict) -> dict:
@@ -2318,6 +2326,9 @@ def _cg_node(it: dict) -> dict:
             "first_author": (auth[0].get("author") or {}).get("display_name") if auth else None,
             "year": it.get("publication_year"), "cited_by": it.get("cited_by_count") or 0,
             "field": ((it.get("primary_topic") or {}).get("field") or {}).get("display_name"),
+            "subfield": ((it.get("primary_topic") or {}).get("subfield") or {}).get("display_name"),
+            "topic": (it.get("primary_topic") or {}).get("display_name"),
+            "momentum": _momentum(it.get("counts_by_year")),
             "is_retracted": it.get("is_retracted"),
             "refs": [_oa_id(r) for r in it.get("referenced_works") or []]}
 
@@ -2796,22 +2807,24 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
         for r in found:
             added[r["id"]] = maps.upsert(db, m["id"], r, "seed", "seed")
         maps.touch(db, m["id"])
-    return {"status": "ok" if added else "not_found", "map": m["name"], "seeds": added,
+    merged = _merge_duplicates(maps, db, m["id"])
+    return {"status": "ok" if added else "not_found", "map": m["name"], "seeds": added, "duplicates_merged": merged,
             "references_from_semantic_scholar": [r["id"] for r in found if r.get("refs_source") == "semantic_scholar"],
             "warnings": warnings, "source_errors": errors}
 
 
 @mcp.tool()
 async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 20,
-                     seeds: list[str] | None = None) -> dict:
+                     seeds: list[str] | None = None, max_new: int = 150) -> dict:
     """Grow a map from its seeds (or from the given seed ids): 'references' (works the seeds
     cite), 'citing' (most-cited works citing each seed), 'similar' (Semantic Scholar
     recommendations for all seeds together), 'authors' (most-cited works of each seed's first
     three authors). Default: references and citing. New works enter as candidates with
     state 'new'; existing ones keep their state and gain the new 'found_by'. per_seed caps
-    citing/similar/authors per seed (max 100). A map holds at most 2000 works; when an
-    expansion would overflow it, the works linked to most seeds and then the most cited enter
-    first. With many seeds, use a small per_seed (5-10) and expand one mode at a time. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    citing/similar/authors per seed (max 100). seeds may name any works in the map (not only
+    seeds) to expand from them. At most max_new new works enter per call (default 150; a map
+    holds at most 2000): those linked to most starting works first, then the most cited.
+    Duplicate records of one work (preprint and published version) are merged afterwards. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
     """
     maps, db = _map_db()
     try:
@@ -2823,9 +2836,13 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
         return {"status": "invalid_input", "detail": f"unknown modes {bad}; use {', '.join(EXPAND_MODES)}"}
     per_seed = max(1, min(int(per_seed), 100))
     current = maps.nodes(db, m["id"])
-    chosen = [n for n in current.values() if n["role"] == "seed" and (not seeds or n["id"] in {_oa_id(x) or x for x in seeds})]
+    if seeds:
+        wanted = set(_resolve_ids(current, seeds))
+        chosen = [n for n in current.values() if n["id"] in wanted]
+    else:
+        chosen = [n for n in current.values() if n["role"] == "seed"]
     if not chosen:
-        return {"status": "no_seeds", "detail": "add seeds with map_add_seeds first"}
+        return {"status": "no_seeds", "detail": "add seeds with map_add_seeds first, or give ids of works in the map"}
     found, errors = [], []
     for mode, (pairs, errs) in zip(modes, await asyncio.gather(*(_expand(x, chosen, per_seed) for x in modes))):
         found += pairs
@@ -2837,20 +2854,25 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
         links.setdefault(node["id"], set()).add(how.split(":", 1)[-1])
     found.sort(key=lambda p: (p[0]["id"] in current, len(links[p[0]["id"]]), p[0].get("cited_by") or 0), reverse=True)
     counts, skipped = {"added": 0, "updated": 0, "promoted": 0}, 0
+    max_new = max(1, min(int(max_new), MAP_MAX_NODES))
+    new_ids: set[str] = set()
     with db:
         size = len(current)
         for node, how in found:
-            if node["id"] not in current and size >= MAP_MAX_NODES:
+            if node["id"] not in current and node["id"] not in new_ids and (size >= MAP_MAX_NODES or len(new_ids) >= max_new):
                 skipped += 1
                 continue
             result = maps.upsert(db, m["id"], node, "candidate", how)
             if result == "added":
                 current[node["id"]] = node
+                new_ids.add(node["id"])
                 size += 1
             counts[result] += 1
         maps.touch(db, m["id"])
-    return {"status": "ok", "map": m["name"], "modes": modes, "seeds_used": [n["id"] for n in chosen],
-            **counts, "skipped_map_full": skipped, "works_in_map": size, "source_errors": errors}
+    merged = _merge_duplicates(maps, db, m["id"])
+    return {"status": "ok", "map": m["name"], "modes": modes, "started_from": [n["id"] for n in chosen],
+            **counts, "skipped": skipped, "duplicates_merged": merged, "works_in_map": size - len(merged),
+            "source_errors": errors}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -2933,6 +2955,90 @@ def _resolve_ids(nodes: dict, ids: list[str]) -> list[str]:
     by_doi = {n["doi"]: k for k, n in nodes.items() if n.get("doi")}
     return [(_oa_id(x) if re.fullmatch(r"(?:https://openalex\.org/)?W\d+", x.strip(), re.I)
              else by_doi.get(_clean_doi(x) or "", x)) for x in ids]
+
+
+def _dup_key(n: dict) -> str | None:
+    title = re.sub(r"[^a-z0-9]+", " ", unicodedata.normalize("NFKD", n.get("title") or "").encode("ascii", "ignore").decode().lower()).strip()
+    author = re.sub(r"[^a-z]", "", (unicodedata.normalize("NFKD", (n.get("first_author") or "").split(" ")[-1]).encode("ascii", "ignore").decode().lower()))
+    return f"{title[:120]}|{author}" if len(title) >= 12 else None
+
+
+def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
+    """Merge records of the same work (same normalised title and first author's surname, years
+    at most 2 apart): the most cited record stays, takes the union of found_by and references,
+    the seed role and the most advanced reading state."""
+    nodes = maps.nodes(db, map_id)
+    groups: dict[str, list[dict]] = {}
+    for n in nodes.values():
+        if (k := _dup_key(n)):
+            groups.setdefault(k, []).append(n)
+    order = {"new": 0, "dismissed": 1, "to_read": 2, "read": 3}
+    merged = []
+    with db:
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            years = [g["year"] for g in group if g.get("year")]
+            if years and max(years) - min(years) > 2:
+                continue
+            keep = max(group, key=lambda g: (g["role"] == "seed", g.get("cited_by") or 0))
+            drop = [g for g in group if g is not keep]
+            refs = list(dict.fromkeys(keep["refs"] + [r for g in drop for r in g["refs"]]))
+            found = list(dict.fromkeys(keep["found_by"] + [f for g in drop for f in g["found_by"]]))
+            state = max([keep] + drop, key=lambda g: order.get(g["state"], 0))["state"]
+            role = "seed" if any(g["role"] == "seed" for g in group) else "candidate"
+            note = keep.get("note") or next((g["note"] for g in drop if g.get("note")), None)
+            db.execute("UPDATE nodes SET refs = ?, found_by = ?, state = ?, role = ?, note = ? WHERE map_id = ? AND work_id = ?",
+                       (json.dumps(refs), json.dumps(found), state, role, note, map_id, keep["id"]))
+            for g in drop:
+                db.execute("DELETE FROM nodes WHERE map_id = ? AND work_id = ?", (map_id, g["id"]))
+            merged.append({"kept": keep["id"], "removed": [g["id"] for g in drop], "title": (keep.get("title") or "")[:80]})
+    return merged
+
+
+@mcp.tool()
+async def map_refresh(map: str) -> dict:
+    """Fetch fresh metadata from OpenAlex for every work in a map (citation counts, momentum,
+    topic, retraction flag, reference lists), 50 works per request. States, roles and notes are
+    kept. Also merges duplicate records."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    found, errors = await _oa_batch("openalex", list(nodes))
+    with db:
+        for n in found:
+            if n["id"] in nodes:
+                old = nodes[n["id"]]
+                maps.upsert(db, m["id"], n, old["role"], old["found_by"][0] if old["found_by"] else "refresh")
+        maps.touch(db, m["id"])
+    merged = _merge_duplicates(maps, db, m["id"])
+    return {"status": "ok", "map": m["name"], "refreshed": len(found), "works": len(nodes),
+            "duplicates_merged": len(merged), "source_errors": errors}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+async def map_prune(map: str, keep: int = 300) -> dict:
+    """Shrink a map: keep the seeds, every work marked to_read, read or dismissed (so a dismissed
+    work stays dismissed), and the `keep` candidates most linked to the seeds; remove the other
+    new candidates. Also merges duplicate records. Ask the user before calling."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    merged = _merge_duplicates(maps, db, m["id"])
+    nodes = maps.nodes(db, m["id"])
+    _map_view(nodes)
+    loose = sorted((n for n in nodes.values() if n["role"] == "candidate" and n["state"] == "new"),
+                   key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cocited_total"],
+                                  n["cited_by"] or 0), reverse=True)
+    drop = [n["id"] for n in loose[max(0, int(keep)):]]
+    removed = maps.remove(db, m["id"], drop) if drop else 0
+    return {"status": "ok", "map": m["name"], "removed": removed, "duplicates_merged": len(merged),
+            "works_in_map": len(nodes) - removed}
 
 
 @mcp.tool()
