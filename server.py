@@ -2778,7 +2778,7 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
             **counts, "skipped_map_full": skipped, "works_in_map": size, "source_errors": errors}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_suggest(map: str, limit: int = 20, include_states: list[str] | None = None) -> dict:
     """Candidates most likely missing from the reading, ranked like citation_graph: by how many
     seeds they cite or are cited by (seeds_linked), then how often works in the map cite them
@@ -2822,13 +2822,14 @@ async def map_mark(map: str, ids: list[str], state: Literal["new", "to_read", "r
     return {"status": "ok", "map": m["name"], "state": state, "marked": len(wanted) - len(missing), "not_in_map": missing}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_get(map: str, states: list[str] | None = None, min_cocitation: int = 2,
                   min_coupling: int = 3) -> dict:
     """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
     and links computed on the whole map: citation_edges, cocitation, coupling (same format and
     caveats as citation_graph). states filters the works returned (links are kept only
-    between returned works)."""
+    between returned works). To SHOW a map, send the user to the 'Literature maps' page
+    (MAPS_PAGE_URL), which reads maps live; build a separate artifact only if asked."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -2843,9 +2844,11 @@ async def map_get(map: str, states: list[str] | None = None, min_cocitation: int
             "coupling": [p for p in coupling if inside(p)]}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_list() -> dict:
-    """All literature maps with counts: seeds, works, to_read, read, dismissed."""
+    """All literature maps with counts: seeds, works, to_read, read, dismissed.
+    To SHOW maps, send the user to the 'Literature maps' page (MAPS_PAGE_URL), which reads
+    them live (timeline, network, suggestions, reading state); do not draw a new one."""
     maps, db = _map_db()
     return {"status": "ok", "maps": maps.summary(db)}
 
