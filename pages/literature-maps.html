@@ -52,6 +52,10 @@ button:disabled{opacity:.5;cursor:default}
 .detail dt{color:var(--muted)}.detail dd{margin:0;overflow-wrap:anywhere}
 .nav{display:flex;flex-direction:column;align-items:flex-start;gap:2px}
 .nav button{all:unset;cursor:pointer;color:var(--link);text-decoration:underline;text-underline-offset:2px;font-size:13px}
+.helpwrap{position:relative}
+.help{width:28px;height:28px;padding:0;border-radius:50%;font-weight:600}
+.how{position:absolute;z-index:6;top:34px;left:0;width:min(380px,calc(100vw - 32px));background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;box-shadow:0 6px 20px rgba(0,0,0,.16)}
+.how h2{font-size:1rem;margin:0 0 6px}
 .how p{margin:0 0 8px;font-size:14px;line-height:1.55;max-width:70ch;text-wrap:pretty}.how p.vs{color:var(--muted);border-top:1px solid var(--line);padding-top:8px;margin-top:4px}.how b{font-weight:600}
 .clist{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
 .cl{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;min-width:0}
@@ -83,6 +87,7 @@ text{fill:var(--muted);font:11px var(--mono)}
 <div class="bar">
 <label for="pick" class="lab">Map</label><select id="pick"><option>Loading maps…</option></select>
 <button id="watch" disabled>Check new citations</button>
+<button id="snap" title="Update which works are in Zotero and which notes cite them">Refresh library and notes</button>
 <button id="rename" disabled>Rename</button>
 <button id="del" disabled>Delete map</button>
 <span class="fresh" id="fresh"></span></div>
@@ -96,6 +101,7 @@ text{fill:var(--muted);font:11px var(--mono)}
 <span id="netmode" class="seg" role="group" aria-label="Similarity" hidden><button id="m-co" aria-pressed="true">Co-citation</button><button id="m-cp" aria-pressed="false">Coupling</button></span>
 <span id="thrbox" hidden><label for="thr" class="lab">min <span id="thrv"></span></label> <input type="range" id="thr"></span>
 <span><label for="topn" class="lab">Show <span id="topv"></span></label> <input type="range" id="topn" min="25" max="2000" step="25" value="150"></span>
+<span class="helpwrap"><button id="help" class="help" aria-expanded="false" aria-controls="how" aria-label="How to read this view">?</button><div class="how" id="how" role="tooltip" hidden></div></span>
 <label for="colour" class="lab">Colour</label><select id="colour"><option value="core">Core / not core</option><option value="cluster">Cluster (network)</option><option value="state">Reading state</option><option value="field">Field</option></select>
 <label class="lab"><input type="checkbox" id="arrows" checked> arrows</label>
 <label class="lab"><input type="checkbox" id="hide"> hide dismissed</label>
@@ -107,7 +113,7 @@ text{fill:var(--muted);font:11px var(--mono)}
 <div class="legend" id="legend"></div>
 <p class="note" id="caveat"></p>
 <p class="note">One finger scrolls the page; pinch or two fingers zoom and pan the chart. Tap a work to select it.</p></div>
-<section class="panel how" id="how"></section>
+
 <section class="panel" id="clusters" hidden><h2>Clusters in this network</h2><p class="m" style="color:var(--muted);font-size:13px;margin:0 0 8px">Groups found automatically from the links shown. Names are proposed by Claude from the titles of each group's most cited works: a reading aid to check against the works, not a classification. Tap a work to select it.</p><div class="bar" style="margin-bottom:8px"><button id="nameBtn">Propose names</button><span class="fresh" id="nameMsg"></span></div><div id="clist" class="clist"></div></section>
 <aside class="panel detail" id="detail" aria-live="polite"><h2>Selected work</h2><p class="m">Tap a work in the chart or in the list to see its links in the map.</p></aside>
 </div>
@@ -247,21 +253,25 @@ function draw(){
 
 function drawTime(W, vis, w, h){
   const m = { l: 52, r: 24, t: 22, b: 32 }, pts = W.filter(d => d.year);
-  const x0 = d3.scaleLinear().domain(d3.extent(pts, d => d.year)).nice().range([m.l, w - m.r]);
-  const y0 = d3.scaleLog().domain([1, d3.max(pts, d => Math.max(2, d.cited_by || 0))]).nice().range([h - m.b, m.t]);
+  const [y1, y2] = d3.extent(pts, d => d.year);
+  const x0 = d3.scaleLinear().domain([y1 - 2, y2 + 2]).range([m.l, w - m.r]);
+  // symlog: like a log scale above 10, linear near 0, so works never cited sit on a 0 line
+  const top = d3.max(pts, d => d.cited_by || 0) || 1;
+  const y0 = d3.scaleSymlog().constant(1).domain([0, Math.pow(10, Math.ceil(Math.log10(top * 1.5)))]).range([h - m.b, m.t]);
+  const yTicks = Y => [0, 1, 10, 100, 1000, 10000, 100000, 1000000].filter(v => v >= Y.domain()[0] && v <= Y.domain()[1]);
   const grid = root.append('g'), gx = root.append('g').attr('transform', `translate(0,${h - m.b})`), gy = root.append('g').attr('transform', `translate(${m.l},0)`);
-  root.append('text').attr('x', m.l).attr('y', 12).text('cited by (log)');
+  root.append('text').attr('x', m.l).attr('y', 12).text('cited by (0, then log)');
   root.append('clipPath').attr('id', 'clip').append('rect').attr('x', m.l).attr('y', m.t).attr('width', w - m.l - m.r).attr('height', h - m.t - m.b);
   const plot = root.append('g').attr('clip-path', 'url(#clip)');
-  const cy = d => Math.max(1, d.cited_by || 1);
+  const cy = d => d.cited_by || 0;
   const jit = new Map(); for (const d of pts){ const key = d.year + '|' + Math.round(Math.log(cy(d)) * 4); const c = jit.get(key) || 0; jit.set(key, c + 1); d._jx = (c % 2 ? 1 : -1) * Math.ceil(c / 2) * .16 }
   const E = data.citation_edges.filter(([a, b]) => vis.has(a) && vis.has(b) && byId.get(a).year && byId.get(b).year).map(([a, b]) => ({ a, b }));
   lines = plot.append('g').selectAll('line').data(E).join('line').style('stroke-width', 1);
   dots = plot.append('g').selectAll('path').data(pts).join('path').style('cursor', 'pointer').call(paint);
   labels = plot.append('g').selectAll('text').data(pts).join('text').attr('class', d => 'lbl' + (d.role === 'seed' ? ' seed' : '')).text(label);
   place = (X, Y) => {
-    gx.call(d3.axisBottom(X).ticks(Math.max(4, w / 90), 'd')); gy.call(d3.axisLeft(Y).ticks(5, '~s'));
-    grid.selectAll('*').remove(); Y.ticks(5).forEach(v => grid.append('line').attr('x1', m.l).attr('x2', w - m.r).attr('y1', Y(v)).attr('y2', Y(v)).style('stroke', css('--grid')));
+    gx.call(d3.axisBottom(X).ticks(Math.max(4, w / 90)).tickFormat(d3.format('d'))); gy.call(d3.axisLeft(Y).tickValues(yTicks(Y)).tickFormat(d3.format('~s')));
+    grid.selectAll('*').remove(); yTicks(Y).forEach(v => grid.append('line').attr('x1', m.l).attr('x2', w - m.r).attr('y1', Y(v)).attr('y2', Y(v)).style('stroke', css('--grid')));
     root.selectAll('.domain,.tick line').style('stroke', css('--line'));
     const px = d => X(d.year + d._jx), py = d => Y(cy(d));
     dots.attr('transform', d => `translate(${px(d)},${py(d)})`);
@@ -305,12 +315,19 @@ function drawNet(W, vis, w, h){
 /* ---------- how to read ---------- */
 function howToRead(){
   const t = view === 'time'
-    ? `<h2>How to read the timeline</h2><p>Each mark is a work: <b>left to right</b> the year, <b>bottom to top</b> how often it has been cited (log scale, so each step up is ten times more). The clusters here only mean <b>period and fame</b>: top left are old classics, top right recent works that took off quickly, bottom right recent works not yet cited. A line joins a work to a work it cites.</p><p>Use it to see where a field starts, when it grew, and which recent works are already central.</p>`
+    ? `<h2>Timeline</h2><p><b>Across:</b> year. <b>Up:</b> citations (0, then ×10 per step). Groups mean only <b>period and fame</b>: classics top left, fast-rising recent work top right, new work bottom right. A line joins a work to one it cites.</p>`
     : mode === 'co'
-    ? `<h2>How to read co-citation</h2><p>Two works are linked when <b>other works in this map cite both</b>; the thicker the line, the more often. It is the judgement of later authors: they keep reading and citing these works together.</p><p>A <b>cluster</b> is therefore a shared foundation: a school, a theory or a topic <b>as the citing literature sees it</b>. It looks backwards, so it favours older, established works and rarely shows very recent ones.</p><p class="vs">Co-citation vs coupling: co-citation looks at <b>who cites</b> two works, coupling at <b>what they cite</b>.</p>`
-    : `<h2>How to read coupling</h2><p>Two works are linked when <b>their own reference lists overlap</b>; the thicker the line, the larger the share of references they have in common. It depends only on what the authors themselves read.</p><p>A <b>cluster</b> is therefore a group of works <b>building on the same sources</b>: usually a research front working on the same problem. It works for recent works too, which nobody has co-cited yet; it says little about classics, whose reference lists are old or missing.</p><p class="vs">Coupling vs co-citation: coupling looks at <b>what two works cite</b>, co-citation at <b>who cites them</b>.</p>`;
+    ? `<h2>Co-citation</h2><p>Linked when <b>other works cite both</b>; thicker = more often. A group is a <b>shared foundation</b> (a school or topic, as later authors see it). Favours older works.</p><p class="vs">Co-citation: <b>who cites</b> them. Coupling: <b>what they cite</b>.</p>`
+    : `<h2>Coupling</h2><p>Linked when <b>their reference lists overlap</b>; thicker = more shared. A group is a <b>research front</b> building on the same sources. Works for recent papers, less for classics.</p><p class="vs">Coupling: <b>what they cite</b>. Co-citation: <b>who cites</b> them.</p>`;
   $('how').innerHTML = t;
 }
+{ const btn = $('help'), box = $('how'), wrap = btn.parentElement; let pinned = false;
+  const show = on => { box.hidden = !on; btn.setAttribute('aria-expanded', on) };
+  wrap.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse') show(true) });
+  wrap.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !pinned) show(false) });
+  btn.addEventListener('click', e => { e.stopPropagation(); pinned = !pinned || box.hidden; show(pinned) });
+  document.addEventListener('click', e => { if (!wrap.contains(e.target)){ pinned = false; show(false) } });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape'){ pinned = false; show(false) } }); }
 
 /* ---------- clusters (label propagation on the network shown) ---------- */
 function findClusters(nodes, L){
@@ -355,7 +372,7 @@ function loadNames(){ try { const o = JSON.parse(store.get('lm-names') || '{}');
 function saveNames(){ store.set('lm-names', JSON.stringify(Object.fromEntries([...clusterNames].slice(-300)))) }
 loadNames();
 const _render = renderClusters;
-renderClusters = groups => { lastGroups = groups; _render(groups); $('nameBtn').disabled = !sampler || !groups.length };
+renderClusters = groups => { lastGroups = groups; _render(groups); $('nameBtn').disabled = !sampler || !groups.length; renderDetail() };
 $('nameBtn').onclick = async () => {
   if (!sampler || !lastGroups.length) return;
   const todo = lastGroups.slice(0, 12).map((g, i) => ({ i, g, works: g.map(id => byId.get(id)).filter(Boolean).sort((a, b) => (b.cited_by || 0) - (a.cited_by || 0)).slice(0, 8) }));
@@ -365,7 +382,7 @@ $('nameBtn').onclick = async () => {
       + todo.map(t => `Cluster ${t.i + 1}:\n` + t.works.map(w => `- ${w.title} (${w.first_author || '?'}, ${w.year || 'n.d.'})`).join('\n')).join('\n\n');
     const res = await sampler.json(prompt, { modelTier: 'quick' });
     for (const n of res?.names || []){ const t = todo.find(x => x.i + 1 === n.cluster); if (t && typeof n.name === 'string') clusterNames.set(sigOf(t.g), n.name.slice(0, 60)) }
-    saveNames(); $('nameMsg').textContent = ''; _render(lastGroups);
+    saveNames(); $('nameMsg').textContent = ''; _render(lastGroups); renderDetail();
   } catch (e) { $('nameMsg').textContent = e?.code === 'not_granted' ? 'Naming needs permission to ask Claude.' : e?.code === 'rate_limited' ? 'Usage limit reached; try later.' : 'Could not get names (' + (e?.code || 'error') + ').' }
   $('nameBtn').disabled = false;
 };
@@ -394,6 +411,7 @@ function renderDetail(){
     <div class="m">${esc(w.first_author)} · ${w.year || 'n.d.'} · cited by ${w.cited_by ?? '?'}${w.field ? ' · ' + esc(w.field) : ''}</div><div class="chips">${chips(w)}</div></div>
     ${stateButtons(w)}
     <div class="cols"><dl><dt>Role</dt><dd>${roleOf(w)}${rank.has(w.id) ? ` · suggestion #${rank.get(w.id)}` : ''}</dd>
+    ${view === 'net' ? `<dt>Cluster</dt><dd>${clusterOf.has(w.id) ? (() => { const i = clusterOf.get(w.id), g = lastGroups[i] || [], nm = clusterNames.get(sigOf(g)); return `<svg width="10" height="10"><circle cx="5" cy="5" r="5" style="fill:${css(fieldVars[i % fieldVars.length])}"/></svg> ${nm ? esc(nm) + ' <span class="fresh">(proposed)</span>' : 'Cluster ' + (i + 1)} · ${g.length} works` })() : '<span class="m">not in a cluster at this threshold</span>'}</dd>` : ''}
     <dt>Found by</dt><dd>${esc((w.found_by || []).map(f => f.split(':')[0]).filter((v, i, a) => a.indexOf(v) === i).join(', '))}</dd>
     <dt>Scores</dt><dd class="fresh">seeds ${w.seeds_linked} · co-cited with a seed ${w.seed_cocited} · coupling ${w.seed_coupling}</dd>
     ${w.note ? `<dt>Note</dt><dd>${esc(w.note)}</dd>` : ''}</dl>
@@ -453,6 +471,15 @@ async function loadMap(name, fresh){
   renderStats(); renderRows(); draw(); renderDetail();
 }
 
+$('snap').onclick = async () => {
+  if (!mcp) return; $('snap').disabled = true; $('snap').textContent = 'Refreshing…';
+  const res = await Promise.allSettled([mcp.callTool('Zotero', 'refresh_library_snapshot', {}), mcp.callTool('Obsidian', 'refresh_notes_snapshot', {})]);
+  const bad = res.map((r, i) => r.status === 'rejected' ? `${i ? 'Obsidian' : 'Zotero'}: ${explain(r.reason).replace(/the DOI|DOI/g, i ? 'Obsidian' : 'Zotero')}` : null).filter(Boolean);
+  say(bad.join(' '));
+  if (bad.length < 2 && current){ await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) }
+  $('fresh').textContent = bad.length ? 'refresh incomplete' : 'library and notes refreshed';
+  $('snap').textContent = 'Refresh library and notes'; $('snap').disabled = false;
+};
 function controls(on){ ['watch', 'rename', 'del'].forEach(id => $(id).disabled = !on) }
 function renderPicker(){
   const pick = $('pick'); controls(maps.length > 0);
