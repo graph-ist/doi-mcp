@@ -51,6 +51,8 @@ S2_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
 GB_KEY = os.environ.get("GOOGLE_BOOKS_API_KEY", "")
 ORCID_CLIENT_ID = os.environ.get("ORCID_CLIENT_ID", "")
 ORCID_CLIENT_SECRET = os.environ.get("ORCID_CLIENT_SECRET", "")
+IA_ACCESS = os.environ.get("IA_ACCESS_KEY", "")
+IA_SECRET = os.environ.get("IA_SECRET_KEY", "")
 UA = f"paper-doi-mcp/{VERSION}" + (f" (mailto:{EMAIL})" if EMAIL else "")
 TITLE_THRESHOLD = 0.88
 # Titles shorter than this identify little on their own, so a match also needs the author
@@ -176,7 +178,7 @@ class _PoliteTransport(httpx.AsyncHTTPTransport):
     """Caps concurrency per host; intervals cover all endpoints, including retries."""
     # Crossref: polite pool allows a few concurrent requests; beyond that it answers 429
     CONCURRENCY = {"api.semanticscholar.org": 1, "export.arxiv.org": 1,
-                   "api.openalex.org": 1, "user.openalex.org": 1, "api.crossref.org": 2}
+                   "api.openalex.org": 1, "user.openalex.org": 1, "api.crossref.org": 2, "archive.org": 2}
     MIN_INTERVAL = {"api.semanticscholar.org": 1.0, "export.arxiv.org": 3.0,
                     "api.openalex.org": 1.0, "user.openalex.org": 1.0, "api.crossref.org": 0.12}
 
@@ -1402,6 +1404,72 @@ async def check_retractions(dois: list[str]) -> dict:
     return {"status": "ok", "checked": len(cleaned) - len(not_checked) - len(errors),
             "retracted": sum(f["is_retracted"] for f in flagged),
             "with_notices": flagged, "not_checked": not_checked, "errors": errors, "invalid": invalid}
+
+
+IA_FIELDS = ["identifier", "title", "creator", "year", "date", "publisher", "language", "isbn",
+             "collection", "lending___status", "access-restricted-item", "imagecount"]
+
+
+def _ia_terms(value: str) -> str:
+    """Words of a field value as a Lucene group, with query syntax removed."""
+    words = re.findall(r"[\w'-]+", value, re.UNICODE)
+    return "(" + " ".join(words) + ")" if words else ""
+
+
+def _ia_access(doc: dict) -> str:
+    if str(doc.get("access-restricted-item")).lower() != "true":
+        return "public"
+    status = doc.get("lending___status") or ""
+    status = " ".join(status) if isinstance(status, list) else status
+    return "print_disabled_only" if status == "is_printdisabled" else "borrowable"
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def internet_archive(title: str | None = None, author: str | None = None, year: int | None = None,
+                           isbn: str | None = None, query: str | None = None, limit: int = 10,
+                           public_only: bool = False) -> dict:
+    """Digitised books (and other texts) on the Internet Archive / Open Library scans: identifier,
+    edition data, and access: 'public' (free to read and download), 'borrowable' (controlled
+    lending with an archive.org account), 'print_disabled_only'. Give title/author/year/isbn, or a
+    raw Lucene `query` (e.g. 'subject:(phenomenology) AND language:ita'). Useful for an old
+    or foreign edition, for checking a page, or as a PDF source for public domain books."""
+    parts = ["mediatype:texts"]
+    for field, value in (("title", title), ("creator", author)):
+        if value and (terms := _ia_terms(value)):
+            parts.append(f"{field}:{terms}")
+    if year:
+        parts.append(f"year:{int(year)}")
+    if isbn:
+        digits = re.sub(r"[^0-9Xx]", "", isbn)
+        if digits:
+            parts.append(f"isbn:{digits}")
+    if query:
+        parts.append(f"({query})")
+    if public_only:
+        parts.append("NOT access-restricted-item:true")
+    if len(parts) == 1:
+        return {"status": "invalid_input", "detail": "give title, author, year, isbn or query"}
+    limit = max(1, min(int(limit), 50))
+    headers = {"Authorization": f"LOW {IA_ACCESS}:{IA_SECRET}"} if IA_ACCESS and IA_SECRET else {}
+    params = [("q", " AND ".join(parts)), ("rows", str(limit)), ("output", "json")] + [("fl[]", f) for f in IA_FIELDS]
+    try:
+        r = await _http().get("https://archive.org/advancedsearch.php", params=params, headers=headers)
+    except httpx.HTTPError as e:
+        return {"status": "error", "detail": _err("Internet Archive", e)}
+    if r.status_code != 200:
+        return {"status": "error", "http_status": r.status_code}
+    data = r.json().get("response", {})
+    records = []
+    for doc in data.get("docs", []):
+        ident = doc.get("identifier")
+        records.append({
+            "identifier": ident, "title": doc.get("title"), "creator": doc.get("creator"),
+            "year": doc.get("year") or (str(doc.get("date") or "")[:4] or None),
+            "publisher": doc.get("publisher"), "language": doc.get("language"), "isbn": doc.get("isbn"),
+            "pages": doc.get("imagecount"), "access": _ia_access(doc),
+            "url": f"https://archive.org/details/{ident}",
+            "pdf": f"https://archive.org/download/{ident}/{ident}.pdf" if _ia_access(doc) == "public" else None})
+    return {"status": "ok", "query": " AND ".join(parts), "total": data.get("numFound", 0), "records": records}
 
 
 OA_SELECT = ("id,doi,title,publication_year,type,authorships,primary_location,"

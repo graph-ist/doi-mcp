@@ -1211,3 +1211,28 @@ def test_format_reference_negotiates(monkeypatch, fmt, accept):
 
 def test_format_reference_rejects_bad_style():
     assert asyncio.run(s.format_reference("10.1234/x", "Bad Style!"))["status"] == "invalid_format"
+
+
+def test_internet_archive_builds_query_and_access(monkeypatch):
+    seen = {}
+
+    async def fake_request(transport, request):
+        seen["q"] = request.url.params.get("q")
+        seen["auth"] = request.headers.get("authorization")
+        docs = [{"identifier": "a", "title": "A", "access-restricted-item": "true", "lending___status": "is_printdisabled"},
+                {"identifier": "b", "title": "B", "lending___status": "is_lendable", "access-restricted-item": "true"},
+                {"identifier": "c", "title": "C"}]
+        return httpx.Response(200, json={"response": {"numFound": 3, "docs": docs}})
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", fake_request)
+    monkeypatch.setattr(s, "_client", None, raising=False)
+    monkeypatch.setattr(s, "IA_ACCESS", "")
+    out = asyncio.run(s.internet_archive(title="The reflective: practitioner", author="Schön", year=1983))
+    assert seen["q"] == "mediatype:texts AND title:(The reflective practitioner) AND creator:(Schön) AND year:1983"
+    assert seen["auth"] is None
+    assert [r["access"] for r in out["records"]] == ["print_disabled_only", "borrowable", "public"]
+    assert out["records"][2]["pdf"].endswith("/c/c.pdf") and out["records"][0]["pdf"] is None
+
+
+def test_internet_archive_needs_a_criterion():
+    assert asyncio.run(s.internet_archive())["status"] == "invalid_input"
