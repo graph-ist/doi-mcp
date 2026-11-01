@@ -2809,7 +2809,9 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
     recommendations for all seeds together), 'authors' (most-cited works of each seed's first
     three authors). Default: references and citing. New works enter as candidates with
     state 'new'; existing ones keep their state and gain the new 'found_by'. per_seed caps
-    citing/similar/authors per seed (max 100). A map holds at most 2000 works. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    citing/similar/authors per seed (max 100). A map holds at most 2000 works; when an
+    expansion would overflow it, the works linked to most seeds and then the most cited enter
+    first. With many seeds, use a small per_seed (5-10) and expand one mode at a time. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
     """
     maps, db = _map_db()
     try:
@@ -2828,6 +2830,12 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
     for mode, (pairs, errs) in zip(modes, await asyncio.gather(*(_expand(x, chosen, per_seed) for x in modes))):
         found += pairs
         errors += errs
+    # When the map would overflow, the works linked to most seeds enter first, then the most cited:
+    # never an arbitrary cut by arrival order.
+    links: dict[str, set] = {}
+    for node, how in found:
+        links.setdefault(node["id"], set()).add(how.split(":", 1)[-1])
+    found.sort(key=lambda p: (p[0]["id"] in current, len(links[p[0]["id"]]), p[0].get("cited_by") or 0), reverse=True)
     counts, skipped = {"added": 0, "updated": 0, "promoted": 0}, 0
     with db:
         size = len(current)

@@ -151,3 +151,12 @@ def test_watch_adds_new_citing(db, monkeypatch, snapshot):
     out = run(s.map_watch("W"))
     assert [n["id"] for n in out["new"]] == ["W99"] and calls[0].startswith("cites:W1,from_created_date:")
     assert run(s.map_watch("W"))["new"] == []
+
+
+def test_full_map_keeps_most_linked(db, monkeypatch):
+    monkeypatch.setattr(s, "MAP_MAX_NODES", 4)
+    run(s.map_create("Cap", ["W1", "W2"]))
+    out = run(s.map_expand("Cap", ["references"]))
+    # W3 is cited by both seeds; W4 and W5 by one each, W5 more cited: W3 and W5 enter
+    ids = {w["id"] for w in run(s.map_get("Cap"))["works"]}
+    assert out["skipped_map_full"] == 1 and ids == {"W1", "W2", "W3", "W5"}
