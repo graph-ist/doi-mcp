@@ -67,6 +67,11 @@ flowchart TD
 | `check_retractions` | Ritrattazioni, expression of concern e correzioni per una lista di DOI (fino a 1000, es. tutta la libreria Zotero), da Crossref con i dati Retraction Watch. I DOI DataCite finiscono in `not_checked`. Al massimo 2 richieste parallele verso Crossref, con nuovi tentativi sui 429. | Crossref |
 | `search_literature` | Ricerca con sintassi booleana su uno o più database, con abstract e keyword, deduplicazione e log riproducibile delle query. | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo |
 | `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione, coppie co-citate e accoppiamento bibliografico (riferimenti in comune). Per ogni nodo indica a quanti seed è collegato. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di somiglianza). Con `check_coverage` (predefinito) confronta per ogni seed con DOI i conteggi di riferimenti e citazioni tra OpenAlex e Semantic Scholar (`coverage_check`), per distinguere un'assenza reale da una lacuna di copertura. | OpenAlex, Semantic Scholar (solo controllo) |
+| `map_create`, `map_add_seeds` | Crea una mappa della letteratura persistente (SQLite sul Pi) e aggiunge i seed (DOI o id OpenAlex); un candidato già nella mappa diventa seed. | OpenAlex |
+| `map_expand` | Fa crescere la mappa dai seed: `references`, `citing`, `similar` (raccomandazioni Semantic Scholar), `authors` (lavori più citati dei primi tre autori). I nuovi lavori entrano come candidati con stato `new`; massimo 2000 lavori per mappa. | OpenAlex, Semantic Scholar |
+| `map_suggest` | Candidati più probabilmente mancanti, ordinati per `seeds_linked`, `seed_cocited`, `seed_coupling`, citazioni; esclude letti e scartati. Dice perché (`found_by`). | Calcolo locale |
+| `map_mark` | Stato di lettura: `to_read`, `read`, `dismissed`, `new`, con una nota facoltativa. Lo stato vive nella mappa, non nelle note. | Calcolo locale |
+| `map_get`, `map_list` | Contenuto di una mappa (lavori e collegamenti ricalcolati: citazioni, co-citazione, coupling) e elenco delle mappe con i conteggi. | Calcolo locale |
 | `paper_table` | Righe di dettaglio per una lista di DOI, id OpenAlex o id arXiv (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), arXiv come riserva, Semantic Scholar (una richiesta batch) |
 | `semantic_scholar` | Academic Graph e Datasets in uno strumento con 18 azioni: paper (dettagli, autori, citazioni, riferimenti, batch, ricerca per rilevanza, bulk booleana, match, autocompletamento), autori (dettagli, pubblicazioni, ricerca, batch), estratti testuali, release e link dei dataset. Non scarica i file. | Semantic Scholar Academic Graph e Datasets |
 | `semantic_scholar_recommendations` | Raccomandazioni da un paper o da liste di esempi positivi e negativi. | Semantic Scholar Recommendations |
@@ -331,6 +336,7 @@ Per aggiornare: copiare `server.py` (e, se cambiano le dipendenze, rifare l'inst
 | Variabile | Uso |
 |---|---|
 | `CONTACT_EMAIL` | Email per il polite pool di Crossref e OpenAlex (consigliata) |
+| `STATE_DIRECTORY` | Cartella delle mappe (`maps.sqlite`); impostata da systemd con `StateDirectory=doi-mcp`, cioè `/var/lib/doi-mcp` |
 | `IA_ACCESS_KEY`, `IA_SECRET_KEY` | Chiavi S3 di archive.org (facoltative): la ricerca funziona anche senza; se presenti vengono inviate come `Authorization: LOW` |
 | `OPENALEX_API_KEY` | Chiave OpenAlex: parametro `api_key` su `api.openalex.org`, header Bearer su `user.openalex.org` per le correzioni |
 | `OPENALEX_ENABLE_WRITES` | Abilita le scritture confermate dell'account OpenAlex solo se impostata a `true`; default disattivato |

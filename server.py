@@ -2602,6 +2602,254 @@ async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -
             "source_errors": errors}
 
 
+# ---------------------------------------------------------------------------------------------
+# Literature maps: persistent seeds, candidates and reading state (maps.py), built on the
+# citation_graph fetchers and _graph_links. Links are recomputed from stored reference lists.
+
+MAP_MAX_NODES = 2000
+EXPAND_MODES = ("references", "citing", "similar", "authors")
+
+
+def _map_db():
+    import maps
+    return maps, maps.connect()
+
+
+async def _oa_batch(filter_key: str, values: list[str]) -> tuple[list[dict], list[str]]:
+    """OpenAlex works for many ids or DOIs, 50 per request, as citation_graph nodes."""
+    values = [v for v in dict.fromkeys(values) if v and not re.search(r"[|,]", v)]
+    res = await asyncio.gather(*(
+        _oa_get("works", filter=f"{filter_key}:" + "|".join(values[i:i + 50]), select=CG_SELECT,
+                **{"per-page": 50}) for i in range(0, len(values), 50)), return_exceptions=True)
+    found, errors = [], []
+    for r in res:
+        if isinstance(r, Exception):
+            errors.append(_err(f"openalex {filter_key}", r))
+        else:
+            found += [_cg_node(it) for it in r.get("results", [])]
+    return found, errors
+
+
+async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tuple[dict, str]], list[str]]:
+    """(node, found_by) pairs for one expansion mode."""
+    out, errors = [], []
+    if mode == "references":
+        owner = {}
+        for sd in seeds:
+            for rid in sd["refs"]:
+                owner.setdefault(rid, sd["id"])
+        found, errors = await _oa_batch("openalex", list(owner))
+        out = [(n, f"references:{owner[n['id']]}") for n in found if n["id"] in owner]
+    elif mode == "citing":
+        res = await asyncio.gather(*(
+            _oa_get("works", filter=f"cites:{sd['id']}", sort="cited_by_count:desc", select=CG_SELECT,
+                    **{"per-page": per_seed}) for sd in seeds), return_exceptions=True)
+        for sd, r in zip(seeds, res):
+            if isinstance(r, Exception):
+                errors.append(_err(f"citing {sd['id']}", r))
+            else:
+                out += [(_cg_node(it), f"citing:{sd['id']}") for it in r.get("results", [])]
+    elif mode == "similar":
+        with_doi = [sd for sd in seeds if sd.get("doi")][:100]
+        if not with_doi:
+            return [], ["similar: no seed has a DOI"]
+        r = await _s2_api("recommendations/v1/papers/", {"fields": "externalIds", "limit": min(per_seed * len(with_doi), 500)},
+                          {"positivePaperIds": [f"DOI:{sd['doi']}" for sd in with_doi]})
+        if r["status"] != "ok":
+            return [], [f"similar: semantic_scholar {r.get('http_status') or r.get('detail')}"]
+        dois = [_clean_doi((p.get("externalIds") or {}).get("DOI")) for p in r["data"].get("recommendedPapers", [])]
+        found, errors = await _oa_batch("doi", [d for d in dois if d])
+        out = [(n, "similar:semantic_scholar") for n in found]
+    elif mode == "authors":
+        res = await asyncio.gather(*(_oa_get(f"works/{sd['id']}", select="id,authorships") for sd in seeds),
+                                   return_exceptions=True)
+        authors = {}
+        for sd, r in zip(seeds, res):
+            if isinstance(r, Exception):
+                errors.append(_err(f"authors {sd['id']}", r))
+                continue
+            for a in (r.get("authorships") or [])[:3]:
+                if aid := _oa_id((a.get("author") or {}).get("id")):
+                    authors.setdefault(aid, sd["id"])
+        res = await asyncio.gather(*(
+            _oa_get("works", filter=f"authorships.author.id:{aid}", sort="cited_by_count:desc",
+                    select=CG_SELECT, **{"per-page": per_seed}) for aid in authors), return_exceptions=True)
+        for aid, r in zip(authors, res):
+            if isinstance(r, Exception):
+                errors.append(_err(f"works of {aid}", r))
+            else:
+                out += [(_cg_node(it), f"authors:{authors[aid]}") for it in r.get("results", [])]
+    return out, errors
+
+
+def _map_view(nodes: dict[str, dict], min_cocitation: int = 2, min_coupling: int = 3) -> tuple[list, list, list]:
+    seeds = [k for k, n in nodes.items() if n["role"] == "seed"]
+    return _graph_links(nodes, seeds, min_cocitation, min_coupling)
+
+
+def _public_node(n: dict) -> dict:
+    return {k: v for k, v in n.items() if k != "refs"}
+
+
+@mcp.tool()
+async def map_create(name: str, seeds: list[str] | None = None, description: str | None = None) -> dict:
+    """Create a persistent literature map, optionally with seed works (DOIs or OpenAlex ids).
+    Maps live on the Pi (SQLite) and keep seeds, candidates and reading state across chats;
+    the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get."""
+    maps, db = _map_db()
+    try:
+        maps.create(db, name, description)
+    except ValueError as e:
+        return {"status": "invalid_input", "detail": str(e)}
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            return {"status": "exists", "detail": f"a map named {name!r} already exists"}
+        raise
+    out = {"status": "ok", "map": name.strip()}
+    if seeds:
+        out.update(await map_add_seeds(name, seeds))
+        out["status"] = "ok"
+    return out
+
+
+@mcp.tool()
+async def map_add_seeds(map: str, seeds: list[str]) -> dict:
+    """Add seed works (DOIs or OpenAlex ids, max 25 per call) to a map. A candidate already in
+    the map is promoted to seed. Seeds are what map_expand grows from and what map_suggest
+    ranks against."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    seeds = [x for x in dict.fromkeys(s.strip() for s in seeds) if x][:25]
+    res = await asyncio.gather(*(_cg_seed(x) for x in seeds), return_exceptions=True)
+    added, errors = {}, []
+    with db:
+        for x, r in zip(seeds, res):
+            if isinstance(r, Exception):
+                errors.append(_err(x, r))
+            else:
+                added[r["id"]] = maps.upsert(db, m["id"], r, "seed", "seed")
+        maps.touch(db, m["id"])
+    return {"status": "ok" if added else "not_found", "map": m["name"], "seeds": added, "source_errors": errors}
+
+
+@mcp.tool()
+async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 20,
+                     seeds: list[str] | None = None) -> dict:
+    """Grow a map from its seeds (or from the given seed ids): 'references' (works the seeds
+    cite), 'citing' (most-cited works citing each seed), 'similar' (Semantic Scholar
+    recommendations for all seeds together), 'authors' (most-cited works of each seed's first
+    three authors). Default: references and citing. New works enter as candidates with
+    state 'new'; existing ones keep their state and gain the new 'found_by'. per_seed caps
+    citing/similar/authors per seed (max 100). A map holds at most 2000 works."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    modes = modes or ["references", "citing"]
+    if bad := [x for x in modes if x not in EXPAND_MODES]:
+        return {"status": "invalid_input", "detail": f"unknown modes {bad}; use {', '.join(EXPAND_MODES)}"}
+    per_seed = max(1, min(int(per_seed), 100))
+    current = maps.nodes(db, m["id"])
+    chosen = [n for n in current.values() if n["role"] == "seed" and (not seeds or n["id"] in {_oa_id(x) or x for x in seeds})]
+    if not chosen:
+        return {"status": "no_seeds", "detail": "add seeds with map_add_seeds first"}
+    found, errors = [], []
+    for mode, (pairs, errs) in zip(modes, await asyncio.gather(*(_expand(x, chosen, per_seed) for x in modes))):
+        found += pairs
+        errors += errs
+    counts, skipped = {"added": 0, "updated": 0, "promoted": 0}, 0
+    with db:
+        size = len(current)
+        for node, how in found:
+            if node["id"] not in current and size >= MAP_MAX_NODES:
+                skipped += 1
+                continue
+            result = maps.upsert(db, m["id"], node, "candidate", how)
+            if result == "added":
+                current[node["id"]] = node
+                size += 1
+            counts[result] += 1
+        maps.touch(db, m["id"])
+    return {"status": "ok", "map": m["name"], "modes": modes, "seeds_used": [n["id"] for n in chosen],
+            **counts, "skipped_map_full": skipped, "works_in_map": size, "source_errors": errors}
+
+
+@mcp.tool()
+async def map_suggest(map: str, limit: int = 20, include_states: list[str] | None = None) -> dict:
+    """Candidates most likely missing from the reading, ranked like citation_graph: by how many
+    seeds they cite or are cited by (seeds_linked), then how often works in the map cite them
+    together with a seed (seed_cocited), then the strongest coupling with a seed, then citation
+    count. Dismissed and read works are left out unless include_states asks for them. Each
+    suggestion says why (found_by, the three scores). The map is a sample: scores are lower
+    bounds, and humanities and older works often lack reference lists in OpenAlex."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    _map_view(nodes)
+    states = set(include_states or ["new", "to_read"])
+    ranked = sorted((n for n in nodes.values() if n["role"] == "candidate" and n["state"] in states),
+                    key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cited_by"] or 0),
+                    reverse=True)
+    keep = ("id", "doi", "title", "first_author", "year", "cited_by", "state", "found_by",
+            "seeds_linked", "seed_cocited", "seed_coupling")
+    return {"status": "ok", "map": m["name"], "candidates": len(ranked),
+            "suggestions": [{k: n.get(k) for k in keep} for n in ranked[:max(1, min(limit, 200))]]}
+
+
+@mcp.tool()
+async def map_mark(map: str, ids: list[str], state: Literal["new", "to_read", "read", "dismissed"],
+                   note: str | None = None) -> dict:
+    """Set the reading state of works in a map (OpenAlex ids, or DOIs of works in the map):
+    to_read, read, dismissed (hidden from suggestions), or back to new. The optional note
+    (why it was dismissed, what to look for) is kept with the work. State stays in the map."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    by_doi = {n["doi"]: k for k, n in nodes.items() if n.get("doi")}
+    wanted = [(_oa_id(x) if re.fullmatch(r"(?:https://openalex\.org/)?W\d+", x.strip(), re.I)
+               else by_doi.get(_clean_doi(x) or "", x)) for x in ids]
+    missing = maps.mark(db, m["id"], wanted, state, note)
+    return {"status": "ok", "map": m["name"], "state": state, "marked": len(wanted) - len(missing), "not_in_map": missing}
+
+
+@mcp.tool()
+async def map_get(map: str, states: list[str] | None = None, min_cocitation: int = 2,
+                  min_coupling: int = 3) -> dict:
+    """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
+    and links computed on the whole map: citation_edges, cocitation, coupling (same format and
+    caveats as citation_graph). states filters the works returned (links are kept only
+    between returned works)."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    edges, cocit, coupling = _map_view(nodes, min_cocitation, min_coupling)
+    keep = {k for k, n in nodes.items() if not states or n["state"] in states or n["role"] == "seed"}
+    inside = lambda pair: pair[0] in keep and pair[1] in keep
+    return {"status": "ok", "map": dict(m), "works": [_public_node(n) for k, n in nodes.items() if k in keep],
+            "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
+            "coupling": [p for p in coupling if inside(p)]}
+
+
+@mcp.tool()
+async def map_list() -> dict:
+    """All literature maps with counts: seeds, works, to_read, read, dismissed."""
+    maps, db = _map_db()
+    return {"status": "ok", "maps": maps.summary(db)}
+
+
 PROMPT_RULES = ("Regole: allega un DOI solo se find_doi restituisce `match` e verify_doi "
                 "`registered_match`; non fornire mai un DOI a memoria. Se `is_retracted` è vero, "
                 "segnalalo. Riporta solo correzioni, campi non verificati, DOI mancanti e "
