@@ -2653,8 +2653,15 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
         with_doi = [sd for sd in seeds if sd.get("doi")][:100]
         if not with_doi:
             return [], ["similar: no seed has a DOI"]
-        r = await _s2_api("recommendations/v1/papers/", {"fields": "externalIds", "limit": min(per_seed * len(with_doi), 500)},
-                          {"positivePaperIds": [f"DOI:{sd['doi']}" for sd in with_doi]})
+        ids = [f"DOI:{sd['doi']}" for sd in with_doi]
+        # Semantic Scholar refuses the whole request (400) if one id is unknown: keep the known ones
+        known = await _s2_api("graph/v1/paper/batch", {"fields": "paperId"}, {"ids": ids})
+        if known["status"] == "ok":
+            ids = [i for i, hit in zip(ids, known["data"]) if hit]
+            if not ids:
+                return [], ["similar: no seed is in Semantic Scholar"]
+        r = await _s2_api("recommendations/v1/papers/", {"fields": "externalIds", "limit": min(per_seed * len(ids), 500)},
+                          {"positivePaperIds": ids})
         if r["status"] != "ok":
             return [], [f"similar: semantic_scholar {r.get('http_status') or r.get('detail')}"]
         dois = [_clean_doi((p.get("externalIds") or {}).get("DOI")) for p in r["data"].get("recommendedPapers", [])]
