@@ -1169,3 +1169,45 @@ def test_find_doi_filters_google_books_book_info(monkeypatch):
     result = _run_with(monkeypatch, handle, lambda: s.find_doi(
         "The Google Story", "Vise", 2005, is_book=True))
     assert [r["title"] for r in result["book_info_google_books"]] == ["The Google Story"]
+
+
+def test_check_retractions_flags_notices(monkeypatch):
+    records = {
+        "10.1234/ret": (200, {"title": ["RETRACTED: Bad study"], "author": [{"family": "Doe"}],
+                           "updated-by": [{"type": "retraction", "DOI": "10.1234/notice", "source": "retraction-watch",
+                                           "updated": {"date-time": "2020-05-01T00:00:00Z"}}]}),
+        "10.1234/eoc": (200, {"title": ["Doubtful"], "updated-by": [{"type": "expression_of_concern", "DOI": "10.1234/e"}]}),
+        "10.1234/ok": (200, {"title": ["Fine"]}),
+        "10.5281/zenodo.1": (404, None),
+    }
+
+    async def fake_work(d):
+        return records[d]
+
+    monkeypatch.setattr(s, "_crossref_work", fake_work)
+    out = asyncio.run(s.check_retractions(["10.1234/ok", "https://doi.org/10.1234/RET", "10.1234/eoc", "10.5281/zenodo.1", "nope"]))
+    assert out["retracted"] == 1 and out["checked"] == 3
+    assert [f["doi"] for f in out["with_notices"]] == ["10.1234/ret", "10.1234/eoc"]
+    assert out["with_notices"][0]["title"] == "Bad study"
+    assert out["not_checked"] == ["10.5281/zenodo.1"] and out["invalid"] == ["nope"]
+
+
+@pytest.mark.parametrize("fmt,accept", [
+    ("bibtex", "application/x-bibtex"),
+    ("chicago-author-date", "text/x-bibliography; style=chicago-author-date; locale=en-US"),
+])
+def test_format_reference_negotiates(monkeypatch, fmt, accept):
+    seen = []
+
+    async def fake_request(transport, request):
+        seen.append(request.headers["accept"])
+        return httpx.Response(200, headers={"content-type": "text/plain"}, text="@article{x}")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", fake_request)
+    monkeypatch.setattr(s, "_client", None, raising=False)
+    out = asyncio.run(s.format_reference("10.1234/x", fmt))
+    assert out["status"] == "ok" and seen == [accept]
+
+
+def test_format_reference_rejects_bad_style():
+    assert asyncio.run(s.format_reference("10.1234/x", "Bad Style!"))["status"] == "invalid_format"

@@ -174,10 +174,11 @@ def _err(name: str, e: BaseException) -> str:
 
 class _PoliteTransport(httpx.AsyncHTTPTransport):
     """Caps concurrency per host; intervals cover all endpoints, including retries."""
+    # Crossref: polite pool allows a few concurrent requests; beyond that it answers 429
     CONCURRENCY = {"api.semanticscholar.org": 1, "export.arxiv.org": 1,
-                   "api.openalex.org": 1, "user.openalex.org": 1}
+                   "api.openalex.org": 1, "user.openalex.org": 1, "api.crossref.org": 2}
     MIN_INTERVAL = {"api.semanticscholar.org": 1.0, "export.arxiv.org": 3.0,
-                    "api.openalex.org": 1.0, "user.openalex.org": 1.0}
+                    "api.openalex.org": 1.0, "user.openalex.org": 1.0, "api.crossref.org": 0.12}
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -214,8 +215,12 @@ async def _crossref_work(d: str) -> tuple[int, dict | None]:
     hit = _WORK_CACHE.get(d)
     if hit and time.monotonic() - hit[0] < 3600:
         return hit[1], hit[2]
-    r = await _http().get(f"https://api.crossref.org/works/{_doi_path(d)}",
-                          params={"mailto": EMAIL} if EMAIL else {})
+    for attempt in range(4):
+        r = await _http().get(f"https://api.crossref.org/works/{_doi_path(d)}",
+                              params={"mailto": EMAIL} if EMAIL else {})
+        if r.status_code != 429 or attempt == 3:
+            break
+        await asyncio.sleep(min(float(r.headers.get("Retry-After") or 2 ** attempt), 10))
     msg = r.json()["message"] if r.status_code == 200 else None
     if r.status_code in (200, 404):
         if len(_WORK_CACHE) >= 1000:
@@ -1309,6 +1314,94 @@ async def format_apa(doi: str) -> dict:
             out["note"] = ("The title looks title-cased; APA requires sentence case for article "
                            "and chapter titles. Lower it by hand, keeping proper nouns and acronyms.")
     return out
+
+
+REF_FORMATS = {"bibtex": "application/x-bibtex", "ris": "application/x-research-info-systems",
+               "csl_json": "application/vnd.citationstyles.csl+json"}
+CSL_STYLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,80}$")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def format_reference(doi: str, format: str = "bibtex", locale: str = "en-US") -> dict:
+    """A DOI's reference in another format, from doi.org content negotiation: 'bibtex', 'ris',
+    'csl_json', or the name of any CSL style ('chicago-author-date', 'modern-language-association',
+    'harvard-cite-them-right', 'ieee', 'vancouver'...; see the CSL style repository). For APA use
+    format_apa, which also checks the title case. Same caveat: the text reproduces the metadata as
+    deposited, it is not checked against the cited work (verify_doi first)."""
+    d = _clean_doi(doi)
+    if not d:
+        return {"status": "invalid_format", "doi": doi}
+    fmt = format.strip().lower()
+    if fmt in REF_FORMATS:
+        accept = REF_FORMATS[fmt]
+    elif CSL_STYLE_RE.fullmatch(fmt) and re.fullmatch(r"[A-Za-z]{2}(-[A-Za-z]{2})?", locale):
+        accept = f"text/x-bibliography; style={fmt}; locale={locale}"
+    else:
+        return {"status": "invalid_format", "format": format,
+                "detail": "use bibtex, ris, csl_json or a CSL style name in lowercase with hyphens"}
+    try:
+        r = await _http().get(f"https://doi.org/{_doi_path(d)}", follow_redirects=True,
+                              headers={"Accept": accept})
+    except httpx.HTTPError as e:
+        return {"status": "error", "doi": d, "detail": _err("doi.org", e)}
+    if r.status_code == 404:
+        return {"status": "not_found", "doi": d}
+    if r.status_code != 200:
+        return {"status": "error", "http_status": r.status_code, "doi": d,
+                "detail": "unknown CSL style?" if accept.startswith("text/x-bibliography") else None}
+    if r.headers.get("content-type", "").startswith("text/html"):
+        return {"status": "unsupported", "doi": d,
+                "detail": "this registration agency offers no such format; format it manually"}
+    body = r.text.strip()
+    return {"status": "ok", "doi": d, "format": fmt,
+            "reference": json.loads(body) if fmt == "csl_json" else body}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def check_retractions(dois: list[str]) -> dict:
+    """Retractions, expressions of concern and corrections for a list of DOIs (up to 1000), from
+    Crossref, which includes Retraction Watch: e.g. a whole Zotero library (Zotero MCP find_dois
+    or search results give the DOIs). A retracted work may still be cited, but the text must
+    say so. Only works with a notice are listed; DataCite DOIs have no retraction source and are
+    reported as 'not_checked'."""
+    if len(dois) > 1000:
+        return {"status": "invalid_input", "detail": "at most 1000 DOIs per call"}
+    cleaned = {}
+    for raw in dois:
+        d = _clean_doi(raw)
+        if d:
+            cleaned.setdefault(d, raw)
+    invalid = [raw for raw in dois if not _clean_doi(raw)]
+    gate = asyncio.Semaphore(2)
+
+    async def one(d: str):
+        async with gate:
+            try:
+                return d, *await _crossref_work(d)
+            except httpx.HTTPError as e:
+                return d, 0, {"error": _err("Crossref", e)}
+
+    flagged, not_checked, errors = [], [], []
+    for d, code, m in await asyncio.gather(*(one(d) for d in cleaned)):
+        if code == 404:
+            not_checked.append(d)
+            continue
+        if code != 200 or not m or "error" in m:
+            errors.append({"doi": d, "http_status": code or None})
+            continue
+        raw_title = (m.get("title") or [""])[0]
+        updates = [{"type": u.get("type"), "notice_doi": u.get("DOI"), "source": u.get("source"),
+                    "date": ((u.get("updated") or {}).get("date-time") or "")[:10] or None}
+                   for u in m.get("updated-by", [])]
+        retracted = any(u["type"] in RETRACTION_TYPES for u in updates) or bool(RETRACTED_PREFIX_RE.match(raw_title))
+        if retracted or updates:
+            flagged.append({"doi": d, "title": _clean_title(raw_title)[:200], "is_retracted": retracted,
+                            "authors": [a.get("family", a.get("name", "")) for a in m.get("author", [])][:3],
+                            "updates": updates})
+    flagged.sort(key=lambda f: (not f["is_retracted"], f["doi"]))
+    return {"status": "ok", "checked": len(cleaned) - len(not_checked) - len(errors),
+            "retracted": sum(f["is_retracted"] for f in flagged),
+            "with_notices": flagged, "not_checked": not_checked, "errors": errors, "invalid": invalid}
 
 
 OA_SELECT = ("id,doi,title,publication_year,type,authorships,primary_location,"

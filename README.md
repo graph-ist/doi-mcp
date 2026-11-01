@@ -13,7 +13,7 @@ flowchart TD
   Trasporto -->|HTTP con token| Server
 
   Server --> Strumento{"Strumento MCP"}
-  Strumento -->|find_doi, verify_doi, verify_book, format_apa| Riferimenti["Risoluzione e verifica dei riferimenti"]
+  Strumento -->|find_doi, verify_doi, verify_book, format_apa, format_reference, check_retractions| Riferimenti["Risoluzione e verifica dei riferimenti"]
   Strumento -->|google_books, orcid| Registri["Libri e identità degli autori"]
   Strumento -->|search_literature, paper_table| Ricerca["Ricerca e dettagli dei paper"]
   Strumento -->|citation_graph| Grafo["Grafo delle citazioni"]
@@ -62,6 +62,8 @@ flowchart TD
 | `google_books` | Ricerca (`search`, con le parole chiave native `intitle:`, `inauthor:`, `isbn:`...) e lettura di un volume (`volume`): titolo, autori, editore, data, ISBN. Parametri nativi inoltrati in `params`; restituisce il JSON originale. | Google Books API |
 | `orcid` | Ricerca nel registro (`search`, sintassi Solr, con ORCID iD, nomi e istituzioni) e lettura dei dati pubblici di un record (`person`, `works`). L'iD viene validato col checksum prima della richiesta. Funziona senza credenziali; con `ORCID_CLIENT_ID` e `ORCID_CLIENT_SECRET` usa un token `/read-public`. Una corrispondenza di nome è un candidato, non un'identità. | ORCID Public API |
 | `format_apa` | Restituisce il riferimento APA di un DOI tramite content negotiation, con i campi strutturati del record. Segnala con `title_case_suspected` i titoli che sembrano in title case (APA vuole il sentence case) senza convertirli. `unsupported` se l'agenzia di registrazione non lo offre. | doi.org |
+| `format_reference` | Riferimento di un DOI in BibTeX, RIS, CSL-JSON o in qualsiasi stile CSL (`chicago-author-date`, `modern-language-association`, `ieee`…), tramite content negotiation. Stessa avvertenza di `format_apa`: i metadati non sono verificati. | doi.org |
+| `check_retractions` | Ritrattazioni, expression of concern e correzioni per una lista di DOI (fino a 1000, es. tutta la libreria Zotero), da Crossref con i dati Retraction Watch. I DOI DataCite finiscono in `not_checked`. Al massimo 2 richieste parallele verso Crossref, con nuovi tentativi sui 429. | Crossref |
 | `search_literature` | Ricerca con sintassi booleana su uno o più database, con abstract e keyword, deduplicazione e log riproducibile delle query. | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo |
 | `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione, coppie co-citate e accoppiamento bibliografico (riferimenti in comune). Per ogni nodo indica a quanti seed è collegato. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di somiglianza). Con `check_coverage` (predefinito) confronta per ogni seed con DOI i conteggi di riferimenti e citazioni tra OpenAlex e Semantic Scholar (`coverage_check`), per distinguere un'assenza reale da una lacuna di copertura. | OpenAlex, Semantic Scholar (solo controllo) |
 | `paper_table` | Righe di dettaglio per una lista di DOI, id OpenAlex o id arXiv (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), arXiv come riserva, Semantic Scholar (una richiesta batch) |
