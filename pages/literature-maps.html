@@ -52,6 +52,7 @@ button:disabled{opacity:.5;cursor:default}
 .detail dt{color:var(--muted)}.detail dd{margin:0;overflow-wrap:anywhere}
 .nav{display:flex;flex-direction:column;align-items:flex-start;gap:2px}
 .nav button{all:unset;cursor:pointer;color:var(--link);text-decoration:underline;text-underline-offset:2px;font-size:13px}
+.inl{font-size:13px;line-height:1.7}.inl button{all:unset;cursor:pointer;color:var(--link);text-decoration:underline;text-underline-offset:2px}
 #foot{padding-top:10px}
 .help{width:28px;height:28px;padding:0;border-radius:50%;font-weight:600}
 .clist{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
@@ -409,7 +410,9 @@ $('clist').addEventListener('click', e => { const go = e.target.closest('button[
 function select(id){ selected = id; emphasis(); renderDetail(); document.querySelectorAll('#rows tr').forEach(tr => tr.classList.toggle('on', tr.dataset.id === id)) }
 function links(ids){
   if (!ids.length) return '<span class="m">none in this map</span>';
-  return '<div class="nav">' + ids.slice(0, 12).map(i => `<button data-go="${esc(i)}">${esc(label(byId.get(i)))}: ${esc((byId.get(i).title || '').slice(0, 60))}</button>`).join('') + (ids.length > 12 ? `<span class="m">and ${ids.length - 12} more</span>` : '') + '</div>';
+  // compact: "Olsen 1992, Cross 2011, …", oldest first; the full title shows on hover
+  const ws = ids.map(i => byId.get(i)).filter(Boolean).sort((a, b) => (a.year || 9999) - (b.year || 9999));
+  return '<span class="inl">' + ws.slice(0, 40).map(w => `<button data-go="${esc(w.id)}" title="${esc(w.title || '')}">${esc(label(w))}</button>`).join(', ') + (ws.length > 40 ? `<span class="m">, and ${ws.length - 40} more</span>` : '') + '</span>';
 }
 function chips(w){
   return (relevanceOf(w.id) === 'off' ? '<span class="chip off">off-topic?</span>' : '') + (w.is_retracted ? '<span class="chip ret">retracted</span>' : '') + (isCore(w) ? '<span class="chip core">core</span>' : '')
