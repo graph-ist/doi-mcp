@@ -2828,8 +2828,9 @@ async def map_get(map: str, states: list[str] | None = None, min_cocitation: int
     """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
     and links computed on the whole map: citation_edges, cocitation, coupling (same format and
     caveats as citation_graph). states filters the works returned (links are kept only
-    between returned works). To SHOW a map, send the user to the 'Literature maps' page
-    (MAPS_PAGE_URL), which reads maps live; build a separate artifact only if asked."""
+    between returned works). To SHOW a map, build an artifact from this result: timeline (x year,
+    y cited_by on a log scale, seeds highlighted, colour by state) and similarity network
+    (cocitation / coupling toggle), with the top map_suggest rows as a reading list."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -2846,9 +2847,7 @@ async def map_get(map: str, states: list[str] | None = None, min_cocitation: int
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_list() -> dict:
-    """All literature maps with counts: seeds, works, to_read, read, dismissed.
-    To SHOW maps, send the user to the 'Literature maps' page (MAPS_PAGE_URL), which reads
-    them live (timeline, network, suggestions, reading state); do not draw a new one."""
+    """All literature maps with counts: seeds, works, to_read, read, dismissed."""
     maps, db = _map_db()
     return {"status": "ok", "maps": maps.summary(db)}
 
