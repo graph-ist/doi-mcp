@@ -72,3 +72,81 @@ def test_map_errors(db):
     run(s.map_create("Empty"))
     assert run(s.map_expand("Empty"))["status"] == "no_seeds"
     assert run(s.map_expand("Empty", ["sideways"]))["status"] == "invalid_input"
+
+
+@pytest.fixture
+def snapshot(monkeypatch, tmp_path):
+    import json, knowledge
+    d = tmp_path / "knowledge"; d.mkdir()
+    (d / "library.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "items": [
+        {"key": "ZKEY0001", "doi": "10.1234/one", "title": "One", "tags": ["cited/x"], "collections": ["Design › Theory"]},
+        {"key": "ZKEY0002", "doi": None, "title": "Book without DOI", "tags": ["cited/x"], "collections": []}]}))
+    (d / "notes.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "notes": [
+        {"title": "One note", "path": "Zettelkasten/Summaries/One note.md", "zotero_keys": ["ZKEY0001"]}]}))
+    monkeypatch.setattr(knowledge, "KNOWLEDGE_DIR", str(d))
+    knowledge._cache.clear()
+
+
+def test_zotero_tag_seeds_and_bridges(db, snapshot):
+    run(s.map_create("Z"))
+    out = run(s.map_add_seeds("Z", zotero_tag="cited/x"))
+    assert out["seeds"] == {"W1": "added"} and "1 items have no DOI" in out["warnings"][0]
+    w1 = next(w for w in run(s.map_get("Z"))["works"] if w["id"] == "W1")
+    assert w1["in_library"] and w1["zotero_key"] == "ZKEY0001" and w1["notes"][0]["title"] == "One note"
+    assert run(s.map_add_seeds("Z", zotero_collection="theory"))["seeds"] == {"W1": "updated"}
+
+
+def test_refs_fallback_and_warning(db, monkeypatch, snapshot):
+    db["W7"] = node("W7", [], "10.1234/book")
+    db["W8"] = node("W8", [])
+
+    async def s2_refs(doi):
+        return ["W3", "W4"] if doi == "10.1234/book" else []
+    monkeypatch.setattr(s, "_s2_reference_ids", s2_refs)
+    run(s.map_create("B"))
+    out = run(s.map_add_seeds("B", ["W7", "W8"]))
+    assert out["references_from_semantic_scholar"] == ["W7"]
+    assert len(out["warnings"]) == 1 and "W8" in out["warnings"][0]
+
+
+def test_rename_remove_delete(db, snapshot):
+    run(s.map_create("Old", ["W1"]))
+    run(s.map_expand("Old"))
+    assert run(s.map_rename("Old", "New", "desc"))["map"] == "New"
+    assert run(s.map_remove("New", ["W3", "W404"]))["removed"] == 1
+    assert "W3" not in {w["id"] for w in run(s.map_get("New"))["works"]}
+    assert run(s.map_delete("New", "new"))["status"] == "not_confirmed"
+    assert run(s.map_delete("New", "New"))["status"] == "ok"
+    assert run(s.map_get("New"))["status"] == "not_found"
+
+
+def test_cocited_total_breaks_ties():
+    nodes = {k: {"id": k, "role": "candidate", "refs": []} for k in ("S", "A", "B", "C", "X", "Y")}
+    nodes["S"]["role"] = "seed"
+    nodes["X"]["refs"] = ["A", "B"]
+    nodes["Y"]["refs"] = ["A", "C"]
+    s._map_view(nodes)
+    assert nodes["A"]["cocited_total"] == 2 and nodes["B"]["cocited_total"] == 1 and nodes["S"]["cocited_total"] == 0
+
+
+def test_export_markdown(db, snapshot):
+    run(s.map_create("E", ["W1"]))
+    run(s.map_expand("E"))
+    run(s.map_mark("E", ["W3"], "to_read", "check ch. 2"))
+    md = run(s.map_export("E"))["markdown"]
+    assert "## Seeds" in md and "## To read" in md and "check ch. 2" in md
+    assert "[Zotero](zotero://select/library/items/ZKEY0001)" in md and "[[One note]]" in md
+
+
+def test_watch_adds_new_citing(db, monkeypatch, snapshot):
+    run(s.map_create("W", ["W1"]))
+    calls = []
+
+    async def oa_get(path, **params):
+        calls.append(params["filter"])
+        return {"results": [{"id": "https://openalex.org/W99", "doi": None, "title": "Fresh", "authorships": [],
+                             "publication_year": 2026, "cited_by_count": 0, "referenced_works": []}]}
+    monkeypatch.setattr(s, "_oa_get", oa_get)
+    out = run(s.map_watch("W"))
+    assert [n["id"] for n in out["new"]] == ["W99"] and calls[0].startswith("cites:W1,from_created_date:")
+    assert run(s.map_watch("W"))["new"] == []

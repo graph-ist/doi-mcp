@@ -72,6 +72,10 @@ flowchart TD
 | `map_suggest` | Candidati più probabilmente mancanti, ordinati per `seeds_linked`, `seed_cocited`, `seed_coupling`, citazioni; esclude letti e scartati. Dice perché (`found_by`). | Calcolo locale |
 | `map_mark` | Stato di lettura: `to_read`, `read`, `dismissed`, `new`, con una nota facoltativa. Lo stato vive nella mappa, non nelle note. | Calcolo locale |
 | `map_get`, `map_list` | Contenuto di una mappa (lavori e collegamenti ricalcolati: citazioni, co-citazione, coupling) e elenco delle mappe con i conteggi. | Calcolo locale |
+| `map_rename`, `map_remove`, `map_delete` | Rinomina una mappa o ne cambia la descrizione; toglie singoli lavori; elimina una mappa intera (serve ripetere il nome esatto in `confirm_name`). | Calcolo locale |
+| `map_watch` | Nuovi lavori che citano i seed dall'ultimo controllo (o dalla creazione), aggiunti come candidati. Controllo su richiesta, non un avviso in background. | OpenAlex |
+| `map_check_retractions` | Ritrattazioni, expression of concern e correzioni per tutti i lavori con DOI della mappa; i ritrattati vengono segnati. | Crossref |
+| `map_export` | La mappa come lista di lettura in Markdown (seed, poi lavori per stato, con link DOI, Zotero e note), da salvare in Obsidian fuori dallo schema, es. `Maps/<nome>.md`. | Calcolo locale |
 | `paper_table` | Righe di dettaglio per una lista di DOI, id OpenAlex o id arXiv (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), arXiv come riserva, Semantic Scholar (una richiesta batch) |
 | `semantic_scholar` | Academic Graph e Datasets in uno strumento con 18 azioni: paper (dettagli, autori, citazioni, riferimenti, batch, ricerca per rilevanza, bulk booleana, match, autocompletamento), autori (dettagli, pubblicazioni, ricerca, batch), estratti testuali, release e link dei dataset. Non scarica i file. | Semantic Scholar Academic Graph e Datasets |
 | `semantic_scholar_recommendations` | Raccomandazioni da un paper o da liste di esempi positivi e negativi. | Semantic Scholar Recommendations |
@@ -347,3 +351,21 @@ Per aggiornare: copiare `server.py` (e, se cambiano le dipendenze, rifare l'inst
 | `PORT` | Porta HTTP, default 3002 |
 | `MCP_AUTH_TOKEN` | Obbligatorio in modalità HTTP, almeno 32 caratteri (`openssl rand -hex 32`) |
 | `MCP_ALLOWED_HOSTS` | Host pubblici accettati dietro il proxy, separati da virgola |
+
+## Mappe: ponte con Zotero e Obsidian
+
+Il DOI MCP non chiama Zotero e non legge il vault. Legge due istantanee in `/var/lib/knowledge` (gruppo `knowledge`, sola lettura per questo servizio), aggiornate ogni ora da altri servizi: `library.json` dall'MCP Zotero (`snapshot.py`), `notes.json` dall'MCP Obsidian (`dist/snapshot.js`). Da lì `map_get`, `map_suggest` e `map_export` aggiungono a ogni lavoro `in_library`, `zotero_key` e le note che lo citano nel `reference`; `map_add_seeds` accetta `zotero_collection` o `zotero_tag`. Senza istantanee queste funzioni lo dicono e il resto funziona.
+
+Quando OpenAlex non ha la bibliografia di un seed (libri, scienze umane), `map_add_seeds` la prende da Semantic Scholar se c'è; `map_suggest` usa anche `cocited_total` (co-citazione con qualsiasi lavoro della mappa) per separare i candidati quando un solo seed li collega tutti, e avvisa se nessun seed ha bibliografia.
+
+La pagina *Literature maps* (https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT) legge le mappe dal vivo tramite il connettore DOI.
+
+Drop-in systemd usato sul Pi (`/etc/systemd/system/doi-mcp.service.d/state.conf`):
+
+```
+[Service]
+StateDirectory=doi-mcp
+StateDirectoryMode=0750
+SupplementaryGroups=knowledge
+Environment=KNOWLEDGE_DIR=/var/lib/knowledge
+```

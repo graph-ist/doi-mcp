@@ -13,16 +13,17 @@ import time
 
 DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "maps.sqlite")
 STATES = ("new", "to_read", "read", "dismissed")
-NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field")
+NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS maps (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, description TEXT,
-  created TEXT NOT NULL, updated TEXT NOT NULL);
+  created TEXT NOT NULL, updated TEXT NOT NULL, watched TEXT);
 CREATE TABLE IF NOT EXISTS nodes (
   map_id INTEGER NOT NULL REFERENCES maps(id) ON DELETE CASCADE,
   work_id TEXT NOT NULL, doi TEXT, title TEXT, first_author TEXT, year INTEGER,
-  cited_by INTEGER, field TEXT, refs TEXT NOT NULL DEFAULT '[]',
+  cited_by INTEGER, field TEXT, is_retracted INTEGER, refs TEXT NOT NULL DEFAULT '[]',
+  refs_source TEXT,
   role TEXT NOT NULL CHECK (role IN ('seed', 'candidate')),
   state TEXT NOT NULL DEFAULT 'new' CHECK (state IN ('new', 'to_read', 'read', 'dismissed')),
   found_by TEXT NOT NULL DEFAULT '[]', added TEXT NOT NULL, note TEXT,
@@ -41,6 +42,11 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     db.executescript(SCHEMA)
+    # columns added after the first release
+    for table, column, kind in (("nodes", "is_retracted", "INTEGER"), ("nodes", "refs_source", "TEXT"),
+                                ("maps", "watched", "TEXT")):
+        if column not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     return db
 
 
@@ -70,17 +76,18 @@ def upsert(db: sqlite3.Connection, map_id: int, node: dict, role: str, found_by:
     refs = json.dumps([r for r in node.get("refs") or [] if r])
     if old is None:
         db.execute("INSERT INTO nodes (map_id, work_id, doi, title, first_author, year, cited_by, field,"
-                   " refs, role, found_by, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                   (map_id, node["id"], *values, refs, role, json.dumps([found_by]), now()))
+                   " is_retracted, refs, refs_source, role, found_by, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (map_id, node["id"], *values, refs, node.get("refs_source"), role, json.dumps([found_by]), now()))
         return "added"
     sources = json.loads(old["found_by"])
     if found_by not in sources:
         sources.append(found_by)
     new_role = "seed" if "seed" in (old["role"], role) else "candidate"
     db.execute("UPDATE nodes SET doi = ?, title = ?, first_author = ?, year = ?, cited_by = ?, field = ?,"
-               " refs = CASE WHEN ? = '[]' THEN refs ELSE ? END, role = ?, found_by = ?"
+               " is_retracted = ?, refs = CASE WHEN ? = '[]' THEN refs ELSE ? END,"
+               " refs_source = CASE WHEN ? = '[]' THEN refs_source ELSE ? END, role = ?, found_by = ?"
                " WHERE map_id = ? AND work_id = ?",
-               (*values, refs, refs, new_role, json.dumps(sources), map_id, node["id"]))
+               (*values, refs, refs, refs, node.get("refs_source"), new_role, json.dumps(sources), map_id, node["id"]))
     return "promoted" if new_role != old["role"] else "updated"
 
 
@@ -95,6 +102,7 @@ def nodes(db: sqlite3.Connection, map_id: int) -> dict[str, dict]:
         n["id"] = n.pop("work_id")
         n["refs"] = json.loads(n["refs"])
         n["found_by"] = json.loads(n["found_by"])
+        n["is_retracted"] = None if n["is_retracted"] is None else bool(n["is_retracted"])
         del n["map_id"]
         out[n["id"]] = n
     return out
@@ -131,3 +139,28 @@ def summary(db: sqlite3.Connection) -> list[dict]:
         " FROM maps m LEFT JOIN nodes n ON n.map_id = m.id GROUP BY m.id ORDER BY m.updated DESC").fetchall()
     return [{k: (r[k] or 0) if k in ("seeds", "works", "to_read", "read", "dismissed") else r[k]
              for k in r.keys()} for r in rows]
+
+
+def rename(db: sqlite3.Connection, map_id: int, name: str | None, description: str | None) -> None:
+    with db:
+        if name is not None:
+            name = name.strip()
+            if not re.fullmatch(r"[\w .,'()&+-]{1,80}", name, re.UNICODE):
+                raise ValueError("map name: 1-80 letters, digits, spaces or .,'()&+-")
+            db.execute("UPDATE maps SET name = ? WHERE id = ?", (name, map_id))
+        if description is not None:
+            db.execute("UPDATE maps SET description = ? WHERE id = ?", (description or None, map_id))
+        touch(db, map_id)
+
+
+def delete(db: sqlite3.Connection, map_id: int) -> int:
+    with db:
+        works = db.execute("SELECT COUNT(*) FROM nodes WHERE map_id = ?", (map_id,)).fetchone()[0]
+        db.execute("DELETE FROM nodes WHERE map_id = ?", (map_id,))
+        db.execute("DELETE FROM maps WHERE id = ?", (map_id,))
+    return works
+
+
+def set_watched(db: sqlite3.Connection, map_id: int, when: str) -> None:
+    with db:
+        db.execute("UPDATE maps SET watched = ? WHERE id = ?", (when, map_id))

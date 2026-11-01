@@ -2305,7 +2305,7 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
 
 
 CG_SELECT = ("id,doi,title,publication_year,cited_by_count,authorships,primary_topic,"
-             "referenced_works")
+             "referenced_works,is_retracted")
 
 
 def _oa_id(url: str | None) -> str | None:
@@ -2318,6 +2318,7 @@ def _cg_node(it: dict) -> dict:
             "first_author": (auth[0].get("author") or {}).get("display_name") if auth else None,
             "year": it.get("publication_year"), "cited_by": it.get("cited_by_count") or 0,
             "field": ((it.get("primary_topic") or {}).get("field") or {}).get("display_name"),
+            "is_retracted": it.get("is_retracted"),
             "refs": [_oa_id(r) for r in it.get("referenced_works") or []]}
 
 
@@ -2607,6 +2608,7 @@ async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -
 # citation_graph fetchers and _graph_links. Links are recomputed from stored reference lists.
 
 MAP_MAX_NODES = 2000
+MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 EXPAND_MODES = ("references", "citing", "similar", "authors")
 
 
@@ -2691,7 +2693,33 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
 
 def _map_view(nodes: dict[str, dict], min_cocitation: int = 2, min_coupling: int = 3) -> tuple[list, list, list]:
     seeds = [k for k, n in nodes.items() if n["role"] == "seed"]
-    return _graph_links(nodes, seeds, min_cocitation, min_coupling)
+    edges, cocit, coupling = _graph_links(nodes, seeds, min_cocitation, min_coupling)
+    # co-cited with anything in the map: separates candidates when one seed links them all
+    total = {k: 0 for k in nodes}
+    for n in nodes.values():
+        inside = {r for r in n["refs"] if r in nodes and r != n["id"]}
+        for r in inside:
+            total[r] += len(inside) - 1
+    for k, n in nodes.items():
+        n["cocited_total"] = total[k]
+    return edges, cocit, coupling
+
+
+async def _s2_reference_ids(doi: str) -> list[str]:
+    """OpenAlex ids of a work's references taken from Semantic Scholar, for works whose OpenAlex
+    record has none (common for books and the humanities)."""
+    r = await _s2_api(f"graph/v1/paper/DOI:{doi}/references", {"fields": "externalIds", "limit": 1000})
+    if r["status"] != "ok":
+        return []
+    dois = [_clean_doi(((x.get("citedPaper") or {}).get("externalIds") or {}).get("DOI"))
+            for x in r["data"].get("data") or []]
+    found, _ = await _oa_batch("doi", [d for d in dois if d])
+    return [n["id"] for n in found]
+
+
+def _knowledge():
+    import knowledge
+    return knowledge
 
 
 def _public_node(n: dict) -> dict:
@@ -2721,26 +2749,56 @@ async def map_create(name: str, seeds: list[str] | None = None, description: str
 
 
 @mcp.tool()
-async def map_add_seeds(map: str, seeds: list[str]) -> dict:
-    """Add seed works (DOIs or OpenAlex ids, max 25 per call) to a map. A candidate already in
-    the map is promoted to seed. Seeds are what map_expand grows from and what map_suggest
-    ranks against."""
+async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collection: str | None = None,
+                        zotero_tag: str | None = None) -> dict:
+    """Add seed works to a map: DOIs or OpenAlex ids, and/or every item with a DOI in a Zotero
+    collection (name or path, subcollections included) or with a Zotero tag (e.g.
+    'cited/designing-resilience'), read from the library snapshot on the Pi. Max 50 seeds per
+    call. A candidate already in the map is promoted to seed. When OpenAlex has no reference
+    list for a seed (books, humanities), the references come from Semantic Scholar if it has
+    them; 'warnings' names seeds that still have none, which make sparse maps: add more seeds
+    from the same field. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT ."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
-    seeds = [x for x in dict.fromkeys(s.strip() for s in seeds) if x][:25]
-    res = await asyncio.gather(*(_cg_seed(x) for x in seeds), return_exceptions=True)
-    added, errors = {}, []
+    wanted, warnings = list(seeds or []), []
+    if zotero_collection or zotero_tag:
+        k = _knowledge()
+        if not k.library():
+            return {"status": "no_snapshot", "detail": "the Zotero library snapshot is missing on the Pi"}
+        items = k.items_where(zotero_collection, zotero_tag)
+        if not items:
+            return {"status": "not_found", "detail": "no library items match that collection/tag"}
+        wanted += [it["doi"] for it in items if it.get("doi")]
+        if without := [it["title"] for it in items if not it.get("doi")]:
+            warnings.append(f"{len(without)} items have no DOI and were skipped: " + "; ".join(t[:60] for t in without[:5]))
+    wanted = [x for x in dict.fromkeys(w.strip() for w in wanted) if x][:50]
+    if not wanted:
+        return {"status": "invalid_input", "detail": "give seeds, zotero_collection or zotero_tag"}
+    res = await asyncio.gather(*(_cg_seed(x) for x in wanted), return_exceptions=True)
+    found, errors = [], []
+    for x, r in zip(wanted, res):
+        if isinstance(r, Exception):
+            errors.append(_err(x, r))
+        else:
+            found.append(r)
+    for r in found:
+        r["refs_source"] = "openalex" if r["refs"] else None
+        if not r["refs"] and r.get("doi"):
+            r["refs"] = await _s2_reference_ids(r["doi"])
+            r["refs_source"] = "semantic_scholar" if r["refs"] else None
+        if not r["refs"]:
+            warnings.append(f"no reference list for {r['id']} ({(r.get('title') or '')[:60]}): expect a sparse map")
+    added = {}
     with db:
-        for x, r in zip(seeds, res):
-            if isinstance(r, Exception):
-                errors.append(_err(x, r))
-            else:
-                added[r["id"]] = maps.upsert(db, m["id"], r, "seed", "seed")
+        for r in found:
+            added[r["id"]] = maps.upsert(db, m["id"], r, "seed", "seed")
         maps.touch(db, m["id"])
-    return {"status": "ok" if added else "not_found", "map": m["name"], "seeds": added, "source_errors": errors}
+    return {"status": "ok" if added else "not_found", "map": m["name"], "seeds": added,
+            "references_from_semantic_scholar": [r["id"] for r in found if r.get("refs_source") == "semantic_scholar"],
+            "warnings": warnings, "source_errors": errors}
 
 
 @mcp.tool()
@@ -2804,12 +2862,19 @@ async def map_suggest(map: str, limit: int = 20, include_states: list[str] | Non
     _map_view(nodes)
     states = set(include_states or ["new", "to_read"])
     ranked = sorted((n for n in nodes.values() if n["role"] == "candidate" and n["state"] in states),
-                    key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cited_by"] or 0),
-                    reverse=True)
-    keep = ("id", "doi", "title", "first_author", "year", "cited_by", "state", "found_by",
-            "seeds_linked", "seed_cocited", "seed_coupling")
-    return {"status": "ok", "map": m["name"], "candidates": len(ranked),
-            "suggestions": [{k: n.get(k) for k in keep} for n in ranked[:max(1, min(limit, 200))]]}
+                    key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cocited_total"],
+                                   n["cited_by"] or 0), reverse=True)
+    top = ranked[:max(1, min(limit, 200))]
+    _knowledge().annotate(top)
+    keep = ("id", "doi", "title", "first_author", "year", "cited_by", "state", "found_by", "seeds_linked",
+            "seed_cocited", "seed_coupling", "cocited_total", "is_retracted", "in_library", "zotero_key", "notes")
+    seeds = [n for n in nodes.values() if n["role"] == "seed"]
+    warnings = []
+    if seeds and not any(n["refs"] for n in seeds):
+        warnings.append("no seed has a reference list: the ranking rests on citing works and citation counts; "
+                        "add seeds from the same field for co-citation")
+    return {"status": "ok", "map": m["name"], "candidates": len(ranked), "warnings": warnings,
+            "suggestions": [{k: n.get(k) for k in keep} for n in top]}
 
 
 @mcp.tool()
@@ -2849,9 +2914,155 @@ async def map_get(map: str, states: list[str] | None = None, min_cocitation: int
     edges, cocit, coupling = _map_view(nodes, min_cocitation, min_coupling)
     keep = {k for k, n in nodes.items() if not states or n["state"] in states or n["role"] == "seed"}
     inside = lambda pair: pair[0] in keep and pair[1] in keep
-    return {"status": "ok", "map": dict(m), "works": [_public_node(n) for k, n in nodes.items() if k in keep],
+    works = [_public_node(n) for k, n in nodes.items() if k in keep]
+    _knowledge().annotate(works)
+    return {"status": "ok", "map": dict(m), "works": works, "snapshots": _knowledge().status(),
             "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
             "coupling": [p for p in coupling if inside(p)]}
+
+
+def _resolve_ids(nodes: dict, ids: list[str]) -> list[str]:
+    by_doi = {n["doi"]: k for k, n in nodes.items() if n.get("doi")}
+    return [(_oa_id(x) if re.fullmatch(r"(?:https://openalex\.org/)?W\d+", x.strip(), re.I)
+             else by_doi.get(_clean_doi(x) or "", x)) for x in ids]
+
+
+@mcp.tool()
+async def map_rename(map: str, new_name: str | None = None, description: str | None = None) -> dict:
+    """Rename a map and/or change its description ('' clears it)."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+        maps.rename(db, m["id"], new_name, description)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    except ValueError as e:
+        return {"status": "invalid_input", "detail": str(e)}
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            return {"status": "exists", "detail": f"a map named {new_name!r} already exists"}
+        raise
+    return {"status": "ok", "map": (new_name or m["name"]).strip()}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+async def map_remove(map: str, ids: list[str]) -> dict:
+    """Remove works from a map (OpenAlex ids or DOIs). Unlike map_mark 'dismissed', the work
+    and its state are gone; a later map_expand may bring it back as new."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    wanted = _resolve_ids(maps.nodes(db, m["id"]), ids)
+    return {"status": "ok", "map": m["name"], "removed": maps.remove(db, m["id"], wanted)}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+async def map_delete(map: str, confirm_name: str) -> dict:
+    """Delete a whole map with its works and reading states. Cannot be undone. confirm_name
+    must repeat the map's name exactly; ask the user to confirm before calling."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    if confirm_name.strip() != m["name"]:
+        return {"status": "not_confirmed", "detail": f"confirm_name must be exactly {m['name']!r}"}
+    return {"status": "ok", "deleted": m["name"], "works": maps.delete(db, m["id"])}
+
+
+@mcp.tool()
+async def map_watch(map: str, per_seed: int = 25) -> dict:
+    """New works citing the map's seeds since the last watch (or since the map was created),
+    added as candidates with state 'new' and found_by 'watch:<date>'. Run it when you come back
+    to a map: it is a check on demand, not a background alert."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    since = (m["watched"] or m["created"])[:10]
+    current = maps.nodes(db, m["id"])
+    seeds = [k for k, n in current.items() if n["role"] == "seed"]
+    if not seeds:
+        return {"status": "no_seeds"}
+    res = await asyncio.gather(*(
+        _oa_get("works", filter=f"cites:{sid},from_created_date:{since}", sort="publication_date:desc",
+                select=CG_SELECT, **{"per-page": max(1, min(per_seed, 100))}) for sid in seeds),
+        return_exceptions=True)
+    today, new, errors = maps.now()[:10], [], []
+    with db:
+        for sid, r in zip(seeds, res):
+            if isinstance(r, Exception):
+                errors.append(_err(f"citing {sid}", r))
+                continue
+            for it in r.get("results", []):
+                n = _cg_node(it)
+                if n["id"] not in current and maps.upsert(db, m["id"], n, "candidate", f"watch:{today}") == "added":
+                    current[n["id"]] = n
+                    new.append({k: n.get(k) for k in ("id", "doi", "title", "first_author", "year")})
+        maps.touch(db, m["id"])
+    maps.set_watched(db, m["id"], maps.now())
+    return {"status": "ok", "map": m["name"], "since": since, "new": new, "source_errors": errors}
+
+
+@mcp.tool()
+async def map_check_retractions(map: str) -> dict:
+    """Retractions, expressions of concern and corrections for every work with a DOI in the map
+    (Crossref with Retraction Watch, as check_retractions); retracted works are flagged in the
+    map. OpenAlex's own retraction flag is already set when works enter the map."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    by_doi = {n["doi"]: k for k, n in nodes.items() if n.get("doi")}
+    out = await check_retractions(list(by_doi))
+    with db:
+        for f in out.get("with_notices", []):
+            if f["is_retracted"] and f["doi"] in by_doi:
+                db.execute("UPDATE nodes SET is_retracted = 1 WHERE map_id = ? AND work_id = ?", (m["id"], by_doi[f["doi"]]))
+    return {**out, "map": m["name"]}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def map_export(map: str, states: list[str] | None = None) -> dict:
+    """A map as a Markdown reading list (seeds, then works by state, with DOI links and
+    whether each is in Zotero or has a note), to save in Obsidian with the Obsidian MCP's
+    write_note outside the schema scope, e.g. 'Maps/<map name>.md'. states defaults to
+    to_read and read."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    _map_view(nodes)
+    works = list(nodes.values())
+    _knowledge().annotate(works)
+    states = states or ["to_read", "read"]
+
+    def line(n):
+        ref = f"{n.get('first_author') or 'Unknown'} ({n.get('year') or 'n.d.'}). {n.get('title') or n['id']}."
+        bits = [f"[DOI](https://doi.org/{n['doi']})" if n.get("doi") else None,
+                f"[Zotero](zotero://select/library/items/{n['zotero_key']})" if n.get("zotero_key") else None,
+                ", ".join(f"[[{x['title']}]]" for x in n.get("notes", [])) or None,
+                "**retracted**" if n.get("is_retracted") else None,
+                n.get("note")]
+        return "- " + ref + "".join(f" · {b}" for b in bits if b)
+
+    title = {"to_read": "To read", "read": "Read", "new": "New", "dismissed": "Dismissed"}
+    parts = [f"# {m['name']}", "", m["description"] or "", "",
+             f"Literature map exported {maps.now()[:10]}; live view: {MAPS_PAGE}", "", "## Seeds", ""]
+    parts += [line(n) for n in works if n["role"] == "seed"]
+    for st in states:
+        rows = sorted((n for n in works if n["role"] == "candidate" and n["state"] == st),
+                      key=lambda n: (-n["seeds_linked"], -n["seed_cocited"], -(n["cited_by"] or 0)))
+        if rows:
+            parts += ["", f"## {title.get(st, st)}", ""] + [line(n) for n in rows]
+    return {"status": "ok", "map": m["name"], "suggested_path": f"Maps/{m['name']}.md", "markdown": "\n".join(parts) + "\n"}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
