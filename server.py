@@ -2702,7 +2702,8 @@ def _public_node(n: dict) -> dict:
 async def map_create(name: str, seeds: list[str] | None = None, description: str | None = None) -> dict:
     """Create a persistent literature map, optionally with seed works (DOIs or OpenAlex ids).
     Maps live on the Pi (SQLite) and keep seeds, candidates and reading state across chats;
-    the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get."""
+    the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    """
     maps, db = _map_db()
     try:
         maps.create(db, name, description)
@@ -2750,7 +2751,8 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
     recommendations for all seeds together), 'authors' (most-cited works of each seed's first
     three authors). Default: references and citing. New works enter as candidates with
     state 'new'; existing ones keep their state and gain the new 'found_by'. per_seed caps
-    citing/similar/authors per seed (max 100). A map holds at most 2000 works."""
+    citing/similar/authors per seed (max 100). A map holds at most 2000 works. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    """
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -2835,9 +2837,9 @@ async def map_get(map: str, states: list[str] | None = None, min_cocitation: int
     """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
     and links computed on the whole map: citation_edges, cocitation, coupling (same format and
     caveats as citation_graph). states filters the works returned (links are kept only
-    between returned works). To SHOW a map, build an artifact from this result: timeline (x year,
-    y cited_by on a log scale, seeds highlighted, colour by state) and similarity network
-    (cocitation / coupling toggle), with the top map_suggest rows as a reading list."""
+    between returned works). To SHOW a map, give the user the 'Literature maps' page, which
+    reads every map live: https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT (choose the map in its menu). Build a separate artifact only
+    if the user asks for one."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -2854,7 +2856,10 @@ async def map_get(map: str, states: list[str] | None = None, min_cocitation: int
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_list() -> dict:
-    """All literature maps with counts: seeds, works, to_read, read, dismissed."""
+    """All literature maps with counts: seeds, works, to_read, read, dismissed.
+    The user sees and manages maps on the 'Literature maps' page, which reads them live
+    (timeline, network, suggestions, reading-state buttons): https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT . Give this link whenever
+    a map is created, expanded or asked for; it is the only map page."""
     maps, db = _map_db()
     return {"status": "ok", "maps": maps.summary(db)}
 
