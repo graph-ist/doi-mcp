@@ -329,8 +329,8 @@ def test_openalex_entity_single_identifier(monkeypatch, identifier):
 
 
 @pytest.mark.parametrize("tool,kwargs,method,path,body", [
-    (s.openalex_autocomplete, {"query": "design"}, "GET", "/autocomplete", None),
-    (s.openalex_autocomplete, {"query": "Smith", "entity": "authors"},
+    (s.openalex_entity, {"entity": "works", "autocomplete": "design"}, "GET", "/autocomplete/works", None),
+    (s.openalex_entity, {"entity": "authors", "autocomplete": "Smith"},
      "GET", "/autocomplete/authors", None),
     (s.openalex_text, {"title": "Human computer interaction and ethics"},
      "POST", "/text", {"title": "Human computer interaction and ethics", "abstract": ""}),
@@ -371,8 +371,8 @@ def test_openalex_special_routes(monkeypatch, tool, kwargs, method, path, body):
         assert request.url.path == path
         assert request.url.params["api_key"] == "test-key"
         assert (json.loads(request.content) if request.content else None) == body
-        if tool is s.openalex_autocomplete:
-            assert request.url.params["q"] == kwargs["query"]
+        if kwargs.get("autocomplete"):
+            assert request.url.params["q"] == kwargs["autocomplete"]
         if tool is s.openalex_query_inspect and kwargs["action"] in {"validate", "context"}:
             assert request.url.params["q"] == kwargs["query"]
         return httpx.Response(200, json={"api_key": "test-key", "results": [],
@@ -468,8 +468,9 @@ def test_openalex_single_routes(monkeypatch, entity):
     (s.openalex_entity, {"entity": "works", "entity_id": " "}),
     (s.openalex_entity, {"entity": "raw-affiliation-strings", "entity_id": "123"}),
     (s.openalex_entity, {"entity": "works", "params": {"api_key": "do-not-send"}}),
-    (s.openalex_autocomplete, {"query": " "}),
-    (s.openalex_autocomplete, {"query": "test", "entity": "unknown"}),
+    (s.openalex_entity, {"entity": "works", "autocomplete": " "}),
+    (s.openalex_entity, {"entity": "sdgs", "autocomplete": "test"}),
+    (s.openalex_entity, {"entity": "works", "entity_id": "W1", "autocomplete": "test"}),
     (s.openalex_text, {"title": "short"}),
     (s.openalex_text, {"title": "x" * 2001}),
     (s.openalex_query, {"query": " "}),
@@ -576,7 +577,7 @@ def test_openalex_write_disabled_by_default(monkeypatch):
 
 def test_openalex_mcp_tool_annotations():
     tools = {tool.name: tool for tool in asyncio.run(s.mcp.list_tools())}
-    for name in ("entity", "autocomplete", "text", "query", "status", "account_read"):
+    for name in ("entity", "text", "query", "query_inspect", "status", "account_read"):
         assert tools[f"openalex_{name}"].annotations.readOnlyHint is True
     assert tools["openalex_account_write"].annotations.readOnlyHint is False
     assert tools["openalex_account_write"].annotations.destructiveHint is True

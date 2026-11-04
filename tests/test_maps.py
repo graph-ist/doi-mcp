@@ -148,9 +148,12 @@ def test_watch_adds_new_citing(db, monkeypatch, snapshot):
         return {"results": [{"id": "https://openalex.org/W99", "doi": None, "title": "Fresh", "authorships": [],
                              "publication_year": 2026, "cited_by_count": 0, "referenced_works": []}]}
     monkeypatch.setattr(s, "_oa_get", oa_get)
-    out = run(s.map_watch("W"))
+    async def batch_none(key, values):
+        return [], []
+    monkeypatch.setattr(s, "_oa_batch", batch_none)
+    out = run(s.map_refresh("W", new_citing=True))
     assert [n["id"] for n in out["new"]] == ["W99"] and calls[0].startswith("cites:W1,from_created_date:")
-    assert run(s.map_watch("W"))["new"] == []
+    assert run(s.map_refresh("W", new_citing=True))["new"] == []
 
 
 def test_full_map_keeps_most_linked(db, monkeypatch):
