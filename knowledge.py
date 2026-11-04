@@ -1,6 +1,6 @@
-"""Read-only view of the Zotero library and the Obsidian vault, from the snapshots on the Pi.
+"""Read-only view of the Zotero library and the Obsidian vault, from snapshot files.
 
-Two JSON files in KNOWLEDGE_DIR (/var/lib/knowledge), written by their own services:
+Two JSON files in KNOWLEDGE_DIR (default /var/lib/knowledge), written by their own services:
 - library.json, by the Zotero MCP (snapshot.py): items with key, DOI, title, tags, collections;
 - notes.json, by the Obsidian MCP (deploy/snapshot.mjs): notes with the Zotero keys their
   `reference` links to.

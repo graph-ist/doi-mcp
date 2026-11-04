@@ -83,7 +83,7 @@ text{fill:var(--muted);font:11px var(--mono)}
 </style>
 <div class="wrap">
 <header><h1>Literature maps</h1>
-<p class="sub">Your maps from the DOI server on the Pi, read live. Grow them in chat with map_expand; decide here what to read.</p></header>
+<p class="sub">Your maps from the DOI server, read live. Grow them in chat with map_expand; decide here what to read.</p></header>
 
 <div class="bar">
 <label for="pick" class="lab">Map</label><select id="pick"><option>Loading maps…</option></select>
@@ -131,7 +131,7 @@ text{fill:var(--muted);font:11px var(--mono)}
 
 <section class="panel"><h2>Suggested reading</h2>
 <div class="tbl"><table><thead><tr><th class="sort" data-k="rank" aria-sort="ascending">#</th><th>Work</th><th class="sort" data-k="year">Year</th><th class="sort" data-k="cited_by">Cited by</th><th class="sort" data-k="seeds_linked">Seeds</th><th>State</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="fresh">Choose a map to see its suggestions.</td></tr></tbody></table></div>
-<p class="note" style="padding:8px 0 0">Ranked by links to the seeds, then co-citation with a seed, then coupling, co-citation in the whole map and citations. Scores are lower bounds: a map is a sample, and humanities works often lack reference lists in OpenAlex. Dismiss hides a work from the suggestions and keeps it dismissed if a later expansion finds it again. States are saved in the map on the Pi, never in Zotero or in your notes.</p></section>
+<p class="note" style="padding:8px 0 0">Ranked by links to the seeds, then co-citation with a seed, then coupling, co-citation in the whole map and citations. Scores are lower bounds: a map is a sample, and humanities works often lack reference lists in OpenAlex. Dismiss hides a work from the suggestions and keeps it dismissed if a later expansion finds it again. States are saved in the map on the server, never in Zotero or in your notes.</p></section>
 </div>
 <div class="tip" id="tip" hidden></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
@@ -152,7 +152,7 @@ function explain(e){
   if (c === 'server_not_connected' || c === 'selection_required') return `The ${SERVER} connector is not available in this view. Add or choose it in claude.ai Settings → Connectors.`;
   if (c === 'needs_reauth') return `Reconnect the ${SERVER} connector in claude.ai Settings → Connectors.`;
   if (c === 'not_in_manifest' || c === 'approval_required' || c === 'consent_required') return `This page needs your permission to use the ${SERVER} connector. Allow it from the page's permissions, then reload.`;
-  if (c === 'server_unavailable') return `The DOI server on the Pi did not answer. Check that the Pi is on, then reload.`;
+  if (c === 'server_unavailable') return `The DOI server did not answer. Check that it is running, then reload.`;
   if (c === 'tool_error') return `The DOI server reported an error: ${e.message}. If it says the tool is unknown, reload the ${SERVER} connector so it sees the new map tools.`;
   return `Could not reach the ${SERVER} connector (${c || 'unknown error'}).`;
 }
@@ -573,7 +573,7 @@ async function refreshList(){ try { const r = await mcp.callTool(SERVER, 'map_li
 $('pick').addEventListener('change', e => { selected = null; loadMap(e.target.value) });
 $('watch').onclick = async () => {
   controls(false); $('watch').textContent = 'Checking…';
-  try { const r = await mcp.callTool(SERVER, 'map_watch', { map: current }); const n = r.payload?.new?.length || 0;
+  try { const r = await mcp.callTool(SERVER, 'map_refresh', { map: current, new_citing: true }); const n = r.payload?.new?.length || 0;
     say(''); $('fresh').textContent = n ? `${n} new citing works since ${r.payload.since}` : `no new citing works since ${r.payload?.since || 'last check'}`;
     await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) }
   catch (err) { say(explain(err)) }

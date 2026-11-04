@@ -17,6 +17,7 @@ Env (optional):
 """
 
 import asyncio
+import functools
 import hmac
 import html
 import json
@@ -36,13 +37,48 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
-mcp = FastMCP("paper-doi", stateless_http=True, transport_security=TransportSecuritySettings(
+MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
+INSTRUCTIONS = (
+    "Citation verification: find_doi then verify_doi (verify_book for editions); format_apa "
+    "or format_reference only after verification; check_citations cross-checks in-text "
+    "citations with a reference list offline. Literature search: search_literature; "
+    "paper_table for details on a list of ids. Persistent literature maps (map_* tools) are "
+    "viewed by the user on the 'Literature maps' page, the only map page: " + MAPS_PAGE +
+    " . Give that link whenever a map is created, expanded or asked for. Raw API passthroughs "
+    "(openalex_*, semantic_scholar*, orcid, google_books) return native JSON: keep per_page "
+    "and limit small and use select/fields where the API offers them.")
+mcp = FastMCP("paper-doi", instructions=INSTRUCTIONS, stateless_http=True, transport_security=TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
     allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", *_PUBLIC_HOSTS],
     allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*",
                      *(f"https://{h}" for h in _PUBLIC_HOSTS)]))
+
+# The gateway layer (raw passthroughs to OpenAlex, Semantic Scholar, Google Books, ORCID)
+# is registered only when ENABLE_GATEWAY=true: it adds many tool definitions to every
+# session and returns native JSON without the checks the verification tools apply.
+GATEWAY_ENABLED = os.environ.get("ENABLE_GATEWAY", "").strip().lower() == "true"
+GATEWAY_TOOLS: list[str] = []
+
+
+def _tool(fn=None, *, gateway: bool = False, **kw):
+    """Register an MCP tool. Every tool answers with a dict carrying 'status': a ValueError
+    raised by input validation becomes {'status': 'invalid_input', 'detail': ...} instead of
+    a protocol error. The undecorated coroutine is returned, so direct calls keep raising."""
+    def deco(f):
+        @functools.wraps(f)
+        async def wrapped(*args, **kwargs):
+            try:
+                return await f(*args, **kwargs)
+            except ValueError as e:
+                return {"status": "invalid_input", "detail": str(e)}
+        if gateway:
+            GATEWAY_TOOLS.append(f.__name__)
+        if not gateway or GATEWAY_ENABLED:
+            mcp.tool(**kw)(wrapped)
+        return f
+    return deco(fn) if fn is not None else deco
 
 EMAIL = os.environ.get("CONTACT_EMAIL", "")
 OA_KEY = os.environ.get("OPENALEX_API_KEY", "")
@@ -336,6 +372,8 @@ async def _oa_api(path: str, params: dict | None = None, method: str = "GET",
             "http_status": response.status_code, "data": data}
 
 
+_OA_AUTOCOMPLETE = ("works", "authors", "sources", "institutions", "topics", "keywords",
+                    "concepts", "publishers", "funders")
 OpenAlexEntity = Literal[
     "works", "authors", "sources", "institutions", "publishers", "funders", "awards",
     "locations", "raw-affiliation-strings", "topics", "subfields", "fields", "domains",
@@ -353,8 +391,9 @@ def _oa_segment(value: str) -> str:
     return quote(value.strip(), safe="")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def openalex_entity(entity: OpenAlexEntity, entity_id: str | None = None,
+                          autocomplete: str | None = None,
                           params: dict[str, str | int | float | bool] | None = None) -> dict:
     """Read OpenAlex entity lists or a single entity, with native query parameters.
 
@@ -363,8 +402,12 @@ async def openalex_entity(entity: OpenAlexEntity, entity_id: str | None = None,
     sdgs, study-designs, concepts (deprecated), and vocabulary endpoints.
     Omit entity_id for a list; provide an OpenAlex ID or supported external ID for
     details (DOI/PMID for works, ORCID for authors, ROR for institutions, ISSN for
-    sources). Identifiers are URL-encoded, never interpreted as a destination URL.
+    sources). autocomplete=<text> instead queries GET /autocomplete/{entity} (typeahead
+    matches and identifier hints; works, authors, sources, institutions, topics, keywords,
+    concepts, publishers, funders only). Identifiers are URL-encoded, never a destination URL.
     raw-affiliation-strings has no single-entity identifier; use its list filters.
+    Lists default to per_page=25 and are long: pass select (e.g. 'id,title,publication_year')
+    to keep the response readable.
 
     params forwards native filter, search, sort, group_by, select, page, per_page,
     cursor, sample, seed, corpus and other API-supported options without rewriting.
@@ -375,37 +418,26 @@ async def openalex_entity(entity: OpenAlexEntity, entity_id: str | None = None,
     Requests can consume your OpenAlex budget; no bulk auto-pagination or downloads.
     """
     if entity not in _OA_ENTITIES:
-        raise ValueError("Unknown OpenAlex entity")
+        raise ValueError(f"Unknown entity '{entity}'; use one of {', '.join(_OA_ENTITIES)}")
     path = entity
+    if autocomplete is not None:
+        if entity_id is not None:
+            raise ValueError("autocomplete and entity_id are alternatives; pass one")
+        if entity not in _OA_AUTOCOMPLETE:
+            raise ValueError(f"autocomplete supports only {', '.join(_OA_AUTOCOMPLETE)}")
+        if not autocomplete.strip() or "q" in (params or {}):
+            raise ValueError("autocomplete must be non-empty text; do not pass params.q")
+        return await _oa_api(f"autocomplete/{entity}", {**(params or {}), "q": autocomplete})
     if entity_id is not None:
         if entity in _OA_LIST_ONLY:
             raise ValueError(f"{entity} only supports list queries")
         path += "/" + _oa_segment(entity_id)
+    elif entity not in _OA_LIST_ONLY:
+        params = {"per_page": 25, **(params or {})}
     return await _oa_api(path, params)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def openalex_autocomplete(
-    query: str,
-    entity: Literal["works", "authors", "sources", "institutions", "topics", "keywords",
-                    "concepts", "publishers", "funders"] | None = None,
-    params: dict[str, str | int | bool] | None = None,
-) -> dict:
-    """GET /autocomplete or /autocomplete/{entity}; query becomes q.
-
-    Returns native typeahead matches, including hints and identifier lookups.
-    params can add filter/search; do not pass q there. concepts is deprecated.
-    Uses the server's OpenAlex credentials and shared conservative 1 request/s limit.
-    """
-    allowed = {"works", "authors", "sources", "institutions", "topics", "keywords",
-               "concepts", "publishers", "funders"}
-    if not query.strip() or "q" in (params or {}) or (entity is not None and entity not in allowed):
-        raise ValueError("Provide query, an optional supported entity, and no params.q")
-    return await _oa_api("autocomplete" + (f"/{entity}" if entity else ""),
-                         {**(params or {}), "q": query})
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def openalex_text(title: str, abstract: str = "",
                         target: Literal["all", "topics", "keywords"] = "all",
                         method: Literal["GET", "POST"] = "POST", version: int = 2) -> dict:
@@ -430,69 +462,83 @@ async def openalex_text(title: str, abstract: str = "",
     return await _oa_api(path, {"version": version}, "POST", content)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def openalex_query(
-    action: Literal["execute", "translate", "validate", "context", "properties", "spec"],
-    query: str | dict | None = None, query_format: Literal["oql", "oqo", "oxurl"] = "oql",
-    method: Literal["GET", "POST"] = "POST", entity: OpenAlexEntity | None = None,
-    artifact: str | None = None, params: dict[str, str | int | bool] | None = None,
+    query: str | dict, query_format: Literal["oql", "oqo"] = "oql",
+    method: Literal["GET", "POST"] = "POST",
+    params: dict[str, str | int | bool] | None = None,
 ) -> dict:
-    """Execute/translate OQL and OQO and inspect the OpenAlex query language.
+    """Execute an OpenAlex OQL query (string) or OQO query (JSON object); one page per call.
 
-    execute: GET or POST / with oql string or oqo object. oxurl is translation-only;
-    use openalex_entity for REST queries. params holds sibling view options (sort,
-    select, page, per_page, cursor, rerank, format). Fetches one page; retains
-    meta.next_cursor, validation diagnostics, costs and meta.x_query.
-    translate: GET /query/{query_format}/{query} or POST /query; accepts oql,
-    oqo or oxurl (classic URL). Translates and validates WITHOUT executing a search.
-    validate: GET /validate?q=<oql>; context: GET /parse-context?q=<oql>&pos=<n>.
-    properties: GET /properties or /properties/{entity} (queryable column registry).
-    spec: GET /query/spec or /query/spec/{artifact}, e.g. artifact='oqo'.
-    validate/context require an OQL string; context position goes in params.pos.
-    Execution consumes the account's query budget; translation is free. JSON and
-    CSV/text responses are supported; binary archive exports are not decoded.
+    Consumes the account's query budget. To translate, validate or inspect the language
+    without executing, use openalex_query_inspect; for classic REST filters use
+    openalex_entity. params holds view options (sort, select, page, per_page, cursor,
+    rerank, format); not the query itself. Returns meta.next_cursor, diagnostics, costs.
     """
-    if method not in {"GET", "POST"} or query_format not in {"oql", "oqo", "oxurl"}:
-        raise ValueError("Invalid query method or format")
-    if entity is not None and (entity not in _OA_ENTITIES or action != "properties"):
-        raise ValueError("entity is only supported for properties")
+    params = _oa_query_params(params)
+    _oa_query_check(query, query_format)
+    if method == "POST":
+        return await _oa_api("", params, "POST", {query_format: query})
+    encoded = json.dumps(query) if isinstance(query, dict) else query
+    return await _oa_api("", {**params, query_format: encoded})
+
+
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_query_inspect(
+    action: Literal["translate", "validate", "context", "properties", "spec"],
+    query: str | dict | None = None, query_format: Literal["oql", "oqo", "oxurl"] = "oql",
+    entity: OpenAlexEntity | None = None, artifact: str | None = None,
+    params: dict[str, str | int | bool] | None = None,
+) -> dict:
+    """Inspect the OpenAlex query language without executing a search (free).
+
+    translate: query in oql, oqo or oxurl (a classic REST URL) to the other forms, with
+    validation. validate: an oql string. context: parse context of an oql string at
+    params.pos. properties: the queryable columns, for all entities or for entity.
+    spec: the language specification, or one artifact of it (e.g. 'oqo').
+    To run a query use openalex_query.
+    """
+    params = _oa_query_params(params)
+    if entity is not None and action != "properties":
+        raise ValueError("entity is only accepted by action='properties'")
     if artifact is not None and action != "spec":
-        raise ValueError("artifact is only supported for spec")
-    params = dict(params or {})
-    if {"oql", "oqo", "oxurl", "q"} & params.keys():
-        raise ValueError("Pass query using the query argument, not params")
+        raise ValueError("artifact is only accepted by action='spec'")
     if action in {"properties", "spec"}:
         if query is not None:
-            raise ValueError("This action does not accept query")
+            raise ValueError(f"action='{action}' takes no query")
         path = "properties" if action == "properties" else "query/spec"
         suffix = entity if action == "properties" else artifact
         return await _oa_api(path + ("/" + _oa_segment(suffix) if suffix else ""), params)
     if query is None or (isinstance(query, str) and not query.strip()):
-        raise ValueError("query is required")
+        raise ValueError(f"action='{action}' requires query")
     if action in {"validate", "context"}:
         if query_format != "oql" or not isinstance(query, str):
-            raise ValueError("validate/context require OQL text")
-        path = "validate" if action == "validate" else "parse-context"
+            raise ValueError(f"action='{action}' requires an OQL string (query_format='oql')")
         if action == "context" and "pos" not in params:
-            raise ValueError("context requires params.pos")
-        return await _oa_api(path, {**params, "q": query})
+            raise ValueError("action='context' requires params.pos (cursor position)")
+        return await _oa_api("validate" if action == "validate" else "parse-context",
+                             {**params, "q": query})
+    _oa_query_check(query, query_format)
+    return await _oa_api("query", params, "POST", {query_format: query})
+
+
+def _oa_query_params(params: dict | None) -> dict:
+    params = dict(params or {})
+    if bad := {"oql", "oqo", "oxurl", "q"} & params.keys():
+        raise ValueError(f"Pass the query in the query argument, not params.{bad.pop()}")
+    return params
+
+
+def _oa_query_check(query: Any, query_format: str) -> None:
     if query_format == "oqo" and not isinstance(query, dict):
-        raise ValueError("oqo requires a JSON object")
+        raise ValueError("query_format='oqo' requires query to be a JSON object")
     if query_format != "oqo" and not isinstance(query, str):
-        raise ValueError("oql/oxurl require text")
-    if action not in {"execute", "translate"} or (action == "execute" and query_format == "oxurl"):
-        raise ValueError("Unsupported query action or execution format")
-    path = "" if action == "execute" else "query"
-    if method == "POST":
-        return await _oa_api(path, params, "POST", {query_format: query})
-    encoded_query = json.dumps(query) if isinstance(query, dict) else query
-    if action == "translate":
-        path += f"/{query_format}/{_oa_segment(encoded_query)}"
-        return await _oa_api(path, params)
-    return await _oa_api(path, {**params, query_format: encoded_query})
+        raise ValueError(f"query_format='{query_format}' requires query to be a string")
+    if isinstance(query, str) and not query.strip():
+        raise ValueError("query must not be empty")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def openalex_status(action: Literal["rate_limit", "changefiles"] = "rate_limit",
                           date: str | None = None) -> dict:
     """Read /rate-limit (credentials redacted) or /changefiles[/{date}].
@@ -545,7 +591,7 @@ def _oa_account_path(template: str, identifiers: dict[str, str | None]) -> str:
     return template.format_map(encoded)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def openalex_account_read(
     action: Literal["collections", "collection", "members", "imports", "import",
                     "saved_searches", "saved_search"],
@@ -574,8 +620,7 @@ async def openalex_account_read(
     return await _oa_api(path, params)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
-                                     idempotentHint=False))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
 async def openalex_account_write(
     action: Literal["create_collection", "update_collection", "delete_collection",
                     "add_members", "remove_members", "remove_member", "import_collection",
@@ -586,32 +631,22 @@ async def openalex_account_write(
 ) -> dict:
     """Modify OpenAlex account data. Defaults to preview ONLY; never silently confirm.
 
-    Show the exact operation/body and obtain explicit user approval BEFORE calling
-    with confirm=true. Requires the server's PERSONAL OPENALEX_API_KEY and appropriate
-    ownership/curator permissions. Successful writes are not automatically retried.
-
-    create_collection: POST /collections; body display_name, entity_type, optional
-    description, access, member_ids (max 10000); or copy_of to copy a collection.
-    update_collection: PATCH /collections/{collection_id}; display_name/description/access.
-    delete_collection: DELETE that path; permanently removes collection and members.
-    add_members: POST /collections/{collection_id}/members with body.member_ids.
-    remove_members: DELETE same path, params.member_ids comma-string (max 100), NO body.
-    remove_member: DELETE /collections/{collection_id}/members/{member_id}, NO body.
-    import_collection: POST /collections/{collection_id}/imports with exactly one of
-    body.query (OpenAlex search URL), body.oql, body.copy_of; optional exclude_ids.
-    Import executes server-side, can CONSUME QUERY CREDITS and add up to 1000000 members.
-    Inspect progress with openalex_account_read; no polling or import is automatic.
-
-    create_saved_search: POST /saved-searches with body.name, body.url, optional
-    description and alert={frequency:daily|weekly|monthly}; sends future account emails.
-    update_saved_search: PATCH /saved-searches/{saved_search_id}; same fields optional,
-    alert=null disables emails. delete_saved_search: DELETE path; also deletes its alert.
-
-    curate: POST https://user.openalex.org/curations using Bearer authentication;
-    body is a correction object or list of objects, each with entity, entity_id,
-    property, action, value. Correct authorships, display_name, full_name or orcid.
-    Only submit corrections the user has reviewed; changes can affect public records.
-    The API validates permissions and correction syntax. No admin/legacy routes.
+    Show the exact operation and body and obtain the user's explicit approval BEFORE
+    calling with confirm=true. Needs a PERSONAL OPENALEX_API_KEY with the right ownership
+    or curator permissions; writes are never retried.
+    Collections: create_collection (body display_name, entity_type, optional description,
+    access, member_ids up to 10000, or copy_of), update_collection, delete_collection
+    (permanent, members included), add_members (body.member_ids), remove_members
+    (params.member_ids comma-string, max 100, no body), remove_member (member_id),
+    import_collection (exactly one of body.query, body.oql, body.copy_of; runs server-side,
+    CONSUMES QUERY CREDITS, up to 1000000 members; progress via openalex_account_read).
+    Saved searches: create_saved_search (body.name, body.url, optional description and
+    alert={frequency: daily|weekly|monthly}, which sends emails), update_saved_search
+    (alert=null disables emails), delete_saved_search.
+    curate: POST corrections to user.openalex.org (Bearer); body is one object or a list,
+    each with entity, entity_id, property, action, value (authorships, display_name,
+    full_name, orcid). Submit only corrections the user has reviewed: they affect public
+    records. The API validates permissions and syntax.
     """
     if action not in _OA_ACCOUNT_WRITE_ROUTES:
         raise ValueError("Unknown account write action")
@@ -693,7 +728,7 @@ def _is_derivative(cand: dict, cited: str) -> bool:
     return bool(DERIVATIVE_RE.match(cand["title"] or "")) and not DERIVATIVE_RE.match(cited)
 
 
-@mcp.tool()
+@_tool()
 async def find_doi(title: str, first_author: str | None = None, year: int | None = None,
                    is_book: bool = False) -> dict:
     """Find the DOI of a paper from its title (optionally first author surname and year).
@@ -735,7 +770,8 @@ async def find_doi(title: str, first_author: str | None = None, year: int | None
 
     merged: dict[str, dict] = {}
     for cd in cands:
-        a = _assess(cd, title, first_author, year)
+        # Books: the year decides the edition, not the match; checked exactly below
+        a = _assess(cd, title, first_author, None if is_book else year)
         m = merged.setdefault(cd["doi"], {**cd, "score": -1.0, "title_tokens": 0,
                                           "year_ok": None, "author_ok": None, "sources": []})
         m["sources"].append(cd["source"])
@@ -827,7 +863,7 @@ def _datacite_as_crossref(a: dict) -> dict:
             "publisher": pub.get("name") if isinstance(pub, dict) else pub, "updated-by": []}
 
 
-@mcp.tool()
+@_tool()
 async def verify_doi(doi: str, expected_title: str | None = None,
                      expected_first_author: str | None = None, expected_year: int | None = None,
                      expected_volume: str | None = None, expected_issue: str | None = None,
@@ -1039,7 +1075,7 @@ def _book_conflicts(matched: list[dict]) -> list[dict]:
     return out
 
 
-@mcp.tool()
+@_tool()
 async def verify_book(title: str, first_author: str | None = None, year: int | None = None,
                       publisher: str | None = None, isbn: str | None = None) -> dict:
     """Verify a book edition (year, publisher, ISBN) against four catalogues.
@@ -1130,7 +1166,7 @@ async def _json_api(source: str, request) -> dict:
             "http_status": response.status_code, "data": data}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def google_books(action: Literal["search", "volume"], query: str | None = None,
                        volume_id: str | None = None,
                        params: dict[str, str | int] | None = None) -> dict:
@@ -1196,7 +1232,7 @@ async def _orcid_get(path: str, params: dict) -> httpx.Response:
     return r
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def orcid(action: Literal["search", "person", "works"], orcid_id: str | None = None,
                 query: str | None = None,
                 params: dict[str, str | int] | None = None) -> dict:
@@ -1270,7 +1306,7 @@ async def _csl_json(d: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-@mcp.tool()
+@_tool()
 async def format_apa(doi: str) -> dict:
     """APA reference for a DOI from doi.org content negotiation, plus the fields behind it.
 
@@ -1325,7 +1361,7 @@ REF_FORMATS = {"bibtex": "application/x-bibtex", "ris": "application/x-research-
 CSL_STYLE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,80}$")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def format_reference(doi: str, format: str = "bibtex", locale: str = "en-US") -> dict:
     """A DOI's reference in another format, from doi.org content negotiation: 'bibtex', 'ris',
     'csl_json', or the name of any CSL style ('chicago-author-date', 'modern-language-association',
@@ -1361,13 +1397,107 @@ async def format_reference(doi: str, format: str = "bibtex", locale: str = "en-U
             "reference": json.loads(body) if fmt == "csl_json" else body}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def check_retractions(dois: list[str]) -> dict:
-    """Retractions, expressions of concern and corrections for a list of DOIs (up to 1000), from
-    Crossref, which includes Retraction Watch: e.g. a whole Zotero library (Zotero MCP find_dois
-    or search results give the DOIs). A retracted work may still be cited, but the text must
-    say so. Only works with a notice are listed; DataCite DOIs have no retraction source and are
-    reported as 'not_checked'."""
+_CITE_YEAR = r"(?:\d{4}[a-z]?|n\.d\.|in press)"
+_CITE_NAME = r"[A-ZÀ-ÖØ-Þ][\w'’\-]+(?:\s(?:van|von|der|den|de|del|della|di|da|du|le|la|dos|ten|ter)\s[A-ZÀ-ÖØ-Þ][\w'’\-]+)?"
+_PAREN_CITE_RE = re.compile(r"\(([^()]*?\b" + _CITE_YEAR + r"[^()]*)\)")
+_PAREN_ITEM_RE = re.compile(
+    r"(?:(?:see|cf\.|e\.g\.,?|also)\s+)?(" + _CITE_NAME + r"(?:\s*(?:,|&|and)\s*" + _CITE_NAME +
+    r")*(?:\s+et\s+al\.)?)\s*,\s*(" + _CITE_YEAR + r"(?:\s*,\s*" + _CITE_YEAR + r")*)")
+_NARRATIVE_RE = re.compile(
+    r"\b(" + _CITE_NAME + r"(?:\s*(?:,|and|&)\s*" + _CITE_NAME + r")*(?:\s+et\s+al\.)?)\s*\((" +
+    _CITE_YEAR + r"(?:\s*,\s*" + _CITE_YEAR + r")*)(?:,\s*(?:p|pp|chap|para)\.[^)]*)?\)")
+_REF_YEAR_RE = re.compile(r"\((\d{4})[a-z]?(?:,[^)]*)?\)|\((n\.d\.)\)")
+
+
+def _cite_key(names: str, year: str) -> tuple[str, str]:
+    first = re.split(r"\s*(?:,|&|and)\s*|\s+et\s+al\.", names.strip())[0]
+    return _norm(first.split()[-1]) if first else "", year.strip()
+
+
+def _parse_citations(text: str) -> list[dict]:
+    found = []
+    for m in _PAREN_CITE_RE.finditer(text):
+        for item in m.group(1).split(";"):
+            for im in _PAREN_ITEM_RE.finditer(item):
+                for year in im.group(2).split(","):
+                    found.append({"names": im.group(1).strip(), "year": year.strip(),
+                                  "form": "parenthetical", "text": im.group(0).strip()})
+    for m in _NARRATIVE_RE.finditer(text):
+        for year in m.group(2).split(","):
+            found.append({"names": m.group(1).strip(), "year": year.strip(),
+                          "form": "narrative", "text": m.group(0).strip()})
+    return found
+
+
+def _parse_references(references: str) -> list[dict]:
+    out = []
+    for entry in re.split(r"\n\s*\n|\n(?=\S)", references.strip()):
+        entry = " ".join(entry.split())
+        if not entry:
+            continue
+        ym = _REF_YEAR_RE.search(entry)
+        year = (ym.group(1) or ym.group(2)) if ym else None
+        head = entry[:ym.start()] if ym else entry
+        first = head.split(",")[0].strip()
+        surname = first.split()[-1] if first else ""
+        out.append({"entry": entry, "first_author": surname, "year": year,
+                    "suffix": (entry[ym.start() + 5] if ym and ym.group(1)
+                               and entry[ym.start() + 5:ym.start() + 6].isalpha() else "")})
+    return out
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def check_citations(text: str, references: str) -> dict:
+    """Cross-check APA author-date citations in a text against its reference list, offline.
+
+    Parses parenthetical citations ((Norman, 2013), (Gibson, 1979; Gaver, 1991),
+    (Ericsson et al., 1993)) and narrative ones (Norman (2013), Fox and Best (2011)), and
+    reference entries (one per line or paragraph: first author surname before the first
+    comma, year in parentheses). Reports 'cited_not_in_references', 'references_not_cited',
+    'year_mismatches' (same first author, other year: a likely typo) and 'ambiguous'
+    (two entries share author and year without a/b suffixes). Matching is by first-author
+    surname and year only, so a hit is not a verified reference: run find_doi and verify_doi
+    on the entries. Does not parse numeric or footnote citation styles.
+    """
+    if not text.strip() or not references.strip():
+        raise ValueError("text and references must both be non-empty")
+    cites = _parse_citations(text)
+    refs = _parse_references(references)
+    ref_keys: dict[tuple[str, str], list[dict]] = {}
+    for r in refs:
+        ref_keys.setdefault((_norm(r["first_author"]), (r["year"] or "") + r["suffix"]), []).append(r)
+    by_author: dict[str, set[str]] = {}
+    for (a, y), _ in ref_keys.items():
+        by_author.setdefault(a, set()).add(y)
+    missing, used, mismatches = [], set(), []
+    for c in cites:
+        key = _cite_key(c["names"], c["year"])
+        if key in ref_keys:
+            used.add(key)
+        elif key[0] in by_author:
+            mismatches.append({**c, "reference_years": sorted(by_author[key[0]])})
+        else:
+            missing.append(c)
+    uncited = [r["entry"] for (k, rs) in ref_keys.items() if k not in used for r in rs]
+    ambiguous = [[r["entry"] for r in rs] for rs in ref_keys.values() if len(rs) > 1]
+    return {"status": "ok", "citations_found": len(cites), "references_found": len(refs),
+            "cited_not_in_references": missing, "references_not_cited": uncited,
+            "year_mismatches": mismatches, "ambiguous": ambiguous,
+            "note": "matched by first-author surname and year only; verify entries with "
+                    "find_doi/verify_doi"}
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def check_retractions(dois: list[str] | None = None, map: str | None = None) -> dict:
+    """Retractions, expressions of concern and corrections, from Crossref (includes Retraction
+    Watch), for a list of DOIs (up to 1000; e.g. a whole Zotero library) or, with map, for every
+    work with a DOI in a literature map, where retracted works are then flagged. A retracted
+    work may still be cited, but the text must say so. Only works with a notice are listed;
+    DataCite DOIs have no retraction source and are reported as 'not_checked'."""
+    if (dois is None) == (map is None):
+        raise ValueError("pass either dois (a list) or map (a map name), not both")
+    if map is not None:
+        return await _check_map_retractions(map)
     if len(dois) > 1000:
         return {"status": "invalid_input", "detail": "at most 1000 DOIs per call"}
     cleaned = {}
@@ -1408,6 +1538,23 @@ async def check_retractions(dois: list[str]) -> dict:
             "with_notices": flagged, "not_checked": not_checked, "errors": errors, "invalid": invalid}
 
 
+async def _check_map_retractions(map: str) -> dict:
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    by_doi = {n["doi"]: k for k, n in nodes.items() if n.get("doi")}
+    out = await check_retractions(list(by_doi))
+    with db:
+        for f in out.get("with_notices", []):
+            if f["is_retracted"] and f["doi"] in by_doi:
+                db.execute("UPDATE nodes SET is_retracted = 1 WHERE map_id = ? AND work_id = ?",
+                           (m["id"], by_doi[f["doi"]]))
+    return {**out, "map": m["name"]}
+
+
 IA_FIELDS = ["identifier", "title", "creator", "year", "date", "publisher", "language", "isbn",
              "collection", "lending___status", "access-restricted-item", "imagecount"]
 
@@ -1426,7 +1573,7 @@ def _ia_access(doc: dict) -> str:
     return "print_disabled_only" if status == "is_printdisabled" else "borrowable"
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def internet_archive(title: str | None = None, author: str | None = None, year: int | None = None,
                            isbn: str | None = None, query: str | None = None, limit: int = 10,
                            public_only: bool = False) -> dict:
@@ -1657,37 +1804,18 @@ async def _s2_snippets(query: str,
     return await _s2_api("graph/v1/snippet/search", {**(params or {}), "query": query})
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def semantic_scholar_recommendations(
-    action: Literal["single", "multi"], paper_id: str | None = None,
-    positive_paper_ids: list[str] | None = None,
-    negative_paper_ids: list[str] | None = None,
-    params: dict[str, str | int] | None = None,
-) -> dict:
-    """Access both Recommendations API endpoints, preserving recommendedPapers.
-
-    single: GET /recommendations/v1/papers/forpaper/{paper_id}; requires paper_id.
-    params supports from ('recent' or 'all-cs'), limit (max 500), fields.
-    multi: POST /recommendations/v1/papers/; requires positive_paper_ids and accepts
-    optional negative_paper_ids to steer recommendations away from unwanted papers.
-    params supports limit (max 500), fields; 'from' is only supported by single.
-    IDs use the API-supported paper identifier formats, e.g. DOI:10.x/y.
-    One call, no automatic pagination. Recommendations are not verified citations.
-    Shares the Semantic Scholar 1 request/s limit, authentication and retries.
-    """
-    if action == "single":
+async def _s2_recommend(action: str, paper_id, positive_paper_ids, negative_paper_ids, params):
+    if action == "recommend_single":
         if positive_paper_ids is not None or negative_paper_ids is not None:
-            raise ValueError("single uses paper_id, not positive/negative paper lists")
+            raise ValueError("recommend_single takes paper_id, not positive/negative_paper_ids")
         return await _s2_api(
             f"recommendations/v1/papers/forpaper/{_path_segment(paper_id, 'paper_id')}", params)
-    if action != "multi":
-        raise ValueError("Unknown recommendations action")
     if paper_id is not None or not positive_paper_ids:
-        raise ValueError("multi requires positive_paper_ids, not paper_id")
+        raise ValueError("recommend_multi requires positive_paper_ids (and no paper_id)")
     if any(not value.strip() for value in [*positive_paper_ids, *(negative_paper_ids or [])]):
         raise ValueError("Paper identifiers must not be empty")
     if "from" in (params or {}):
-        raise ValueError("params.from is only supported by single")
+        raise ValueError("params.from ('recent' or 'all-cs') is only accepted by recommend_single")
     body = {"positivePaperIds": [value.strip() for value in positive_paper_ids],
             "negativePaperIds": [value.strip() for value in (negative_paper_ids or [])]}
     return await _s2_api("recommendations/v1/papers/", params, body)
@@ -1741,67 +1869,82 @@ _S2_ACTIONS = {
     "author_details": ("author", "details"), "author_papers": ("author", "papers"),
     "author_search": ("author", "search"), "author_batch": ("author", "batch"),
     "snippets": ("snippets", ""),
-    "dataset_releases": ("dataset", "releases"), "dataset_release": ("dataset", "release"),
-    "dataset_files": ("dataset", "dataset"), "dataset_diffs": ("dataset", "diffs"),
+    "recommend_single": ("recommend", "single"), "recommend_multi": ("recommend", "multi"),
 }
 _S2_ARGS = {"paper": {"paper_id", "ids"}, "author": {"author_id", "ids"},
-            "snippets": {"query"}, "dataset": {"release_id", "dataset_name", "start_release_id"}}
+            "snippets": {"query"},
+            "recommend": {"paper_id", "positive_paper_ids", "negative_paper_ids"}}
+# Actions that return lists: a default limit keeps the native response readable
+_S2_LIST_ACTIONS = {"paper_citations", "paper_references", "paper_search", "paper_bulk",
+                    "author_papers", "author_search", "snippets",
+                    "recommend_single", "recommend_multi"}
+S2_DEFAULT_LIMIT = 20
 S2Action = Literal[
     "paper_details", "paper_authors", "paper_citations", "paper_references", "paper_batch",
     "paper_search", "paper_bulk", "paper_match", "paper_autocomplete", "author_details",
-    "author_papers", "author_search", "author_batch", "snippets", "dataset_releases",
-    "dataset_release", "dataset_files", "dataset_diffs"]
+    "author_papers", "author_search", "author_batch", "snippets",
+    "recommend_single", "recommend_multi"]
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
 async def semantic_scholar(
     action: S2Action, paper_id: str | None = None, author_id: str | None = None,
-    ids: list[str] | None = None, query: str | None = None, release_id: str | None = None,
-    dataset_name: str | None = None, start_release_id: str | None = None,
+    ids: list[str] | None = None, query: str | None = None,
+    positive_paper_ids: list[str] | None = None, negative_paper_ids: list[str] | None = None,
     params: dict[str, str | int] | None = None,
 ) -> dict:
-    """Semantic Scholar Academic Graph and Datasets; native JSON, one page per call.
+    """Semantic Scholar Academic Graph and Recommendations; native JSON, one page per call.
 
-    Returns status, http_status and data exactly as the API sent them. Recommendations
-    has its own tool. Actions and the arguments each one needs:
-    - paper_details, paper_authors, paper_citations, paper_references: paper_id (S2 hash,
-      CorpusId:123, DOI:10.x/y, ARXIV:2401.01234, PMID:123...).
-    - paper_batch: ids (1-500); papers not found stay null in the list.
-    - paper_search (plain text, limit up to 100), paper_bulk (Boolean + | - and "phrases",
-      sort such as citationCount:desc, token pagination, up to 1000 per page),
-      paper_match (closest title: a candidate, NOT a verified match; use find_doi and
-      verify_doi), paper_autocomplete: all take params.query.
-    - author_details, author_papers: author_id (a Semantic Scholar author ID, not a name).
-      author_search: params.query. author_batch: ids (1-1000).
-    - snippets: query (plain text); params: paperIds, authors (max 10, AND), year,
-      fields, limit up to 1000. An excerpt is not the full paper.
-    - dataset_releases; dataset_release (release_id, default latest); dataset_files
-      (+ dataset_name); dataset_diffs (start_release_id, release_id, dataset_name).
-      Only metadata and temporary signed links come back: no file is downloaded.
-      Find dataset names with dataset_release.
-    params uses the API's own names: fields (nested allowed, e.g. citations.title), year,
-    publicationDateOrYear, venue, fieldsOfStudy, minCitationCount, openAccessPdf (empty
-    string), offset and limit (up to 1000 on lists). For the next page pass data.next as
-    offset, or data.token as token for paper_bulk. Arguments an action does not use are
-    rejected. Shares the 1 request/s limit, the API key and the 429 retries.
+    paper_*: paper_id (S2 hash, CorpusId:123, DOI:10.x/y, ARXIV:2401.01234, PMID:123),
+    except paper_batch (ids, 1-500) and paper_search/paper_bulk/paper_match/
+    paper_autocomplete (params.query). paper_match returns the closest title: a candidate,
+    not a verified match (use find_doi and verify_doi).
+    author_*: author_id (S2 author ID, not a name), author_batch (ids, 1-1000),
+    author_search (params.query). snippets: query (text excerpts, not full papers).
+    recommend_single: paper_id, params.from 'recent' or 'all-cs'; recommend_multi:
+    positive_paper_ids and optional negative_paper_ids. Not verified citations.
+    params uses the API's names (fields, year, venue, fieldsOfStudy, minCitationCount,
+    openAccessPdf, offset, limit, token). Lists default to limit 20; next page: data.next
+    as offset, or data.token as token (paper_bulk). Arguments an action does not use are
+    rejected. Datasets have their own tool, semantic_scholar_datasets.
     """
     if action not in _S2_ACTIONS:
-        raise ValueError("Unknown Semantic Scholar action")
+        raise ValueError(f"Unknown action '{action}'; use one of {', '.join(_S2_ACTIONS)}")
     family, op = _S2_ACTIONS[action]
     given = {name for name, value in {
         "paper_id": paper_id, "author_id": author_id, "ids": ids, "query": query,
-        "release_id": release_id, "dataset_name": dataset_name,
-        "start_release_id": start_release_id}.items() if value is not None}
+        "positive_paper_ids": positive_paper_ids,
+        "negative_paper_ids": negative_paper_ids}.items() if value is not None}
     if given - _S2_ARGS[family]:
-        raise ValueError(f"{action} does not accept: {', '.join(sorted(given - _S2_ARGS[family]))}")
+        raise ValueError(f"{action} does not accept: {', '.join(sorted(given - _S2_ARGS[family]))}"
+                         f"; it uses {', '.join(sorted(_S2_ARGS[family]))}")
+    if action in _S2_LIST_ACTIONS:
+        params = {"limit": S2_DEFAULT_LIMIT, **(params or {})}
     if family == "paper":
         return await _s2_paper(op, paper_id=paper_id, ids=ids, params=params)
     if family == "author":
         return await _s2_author(op, author_id=author_id, ids=ids, params=params)
     if family == "snippets":
         return await _s2_snippets(query or "", params)
-    if params:
-        raise ValueError("dataset actions take no params")
+    return await _s2_recommend(action, paper_id, positive_paper_ids, negative_paper_ids, params)
+
+
+@_tool(gateway=True, annotations=ToolAnnotations(readOnlyHint=True))
+async def semantic_scholar_datasets(
+    action: Literal["releases", "release", "files", "diffs"], release_id: str = "latest",
+    dataset_name: str | None = None, start_release_id: str | None = None,
+) -> dict:
+    """Semantic Scholar Datasets API: release list, one release (its dataset names),
+    download links of a dataset in a release (files: dataset_name), or incremental diffs
+    (diffs: start_release_id, release_id, dataset_name). Only metadata and temporary
+    signed links come back; nothing is downloaded. Rarely needed: the bulk snapshots are
+    for offline processing, not for answering questions (use semantic_scholar).
+    """
+    if action in {"files", "diffs"} and not dataset_name:
+        raise ValueError(f"action='{action}' requires dataset_name (see action='release')")
+    if action == "diffs" and not start_release_id:
+        raise ValueError("action='diffs' requires start_release_id")
+    op = "dataset" if action == "files" else action
     return await _s2_datasets(op, release_id or "latest", dataset_name, start_release_id)
 
 
@@ -1890,7 +2033,7 @@ async def _search_arxiv(query, year_from, year_to, limit, page, scope) -> dict:
     }
 
 
-def _expand(query: str, fmt) -> str:
+def _expand_terms(query: str, fmt) -> str:
     """Apply fmt to every search term, keeping Boolean operators and parentheses."""
     return " ".join(t if t in ("AND", "OR", "NOT", "(", ")") else fmt(t)
                     for t in re.findall(r'"[^"]+"|[()]|[^\s()]+', query))
@@ -1943,7 +2086,7 @@ async def _get_json(url: str, params: dict) -> tuple[dict | None, dict | None]:
 async def _search_europepmc(query, year_from, year_to, limit, page, scope) -> dict:
     # Life sciences, psychology, cognitive science, health; also indexes many preprints (PPR)
     fmt = (lambda t: f"(TITLE:{t} OR ABSTRACT:{t})") if scope == "title_abstract" else (lambda t: t)
-    q = _expand(query, fmt)
+    q = _expand_terms(query, fmt)
     if year_from or year_to:
         q = f"({q}) AND PUB_YEAR:[{year_from or 1900} TO {year_to or 2100}]"
     d, err = await _get_json("https://www.ebi.ac.uk/europepmc/webservices/rest/search", {
@@ -1969,7 +2112,7 @@ async def _search_doaj(query, year_from, year_to, limit, page, scope) -> dict:
     # Open-access journals across all disciplines, with abstracts and author keywords
     fmt = ((lambda t: f"(bibjson.title:{t} OR bibjson.abstract:{t})") if scope == "title_abstract"
            else (lambda t: t))
-    q = _expand(query, fmt)
+    q = _expand_terms(query, fmt)
     if year_from or year_to:
         q = f"({q}) AND bibjson.year:[{year_from or 1900} TO {year_to or 2100}]"
     d, err = await _get_json("https://doaj.org/api/search/articles/" + quote(q, safe=""),
@@ -1995,7 +2138,7 @@ async def _search_hal(query, year_from, year_to, limit, page, scope) -> dict:
     # French national open archive: humanities, social sciences, HCI; many non-English records
     fmt = ((lambda t: f"(title_t:{t} OR abstract_t:{t})") if scope == "title_abstract"
            else (lambda t: t))
-    q = _expand(query, fmt)
+    q = _expand_terms(query, fmt)
     params = {"q": q, "wt": "json", "rows": limit, "start": (page - 1) * limit,
               "fl": "title_s,abstract_s,keyword_s,doiId_s,producedDateY_i,authFullName_s,"
                     "docType_s,uri_s,journalTitle_s,language_s,openAccess_bool"}
@@ -2015,11 +2158,64 @@ async def _search_hal(query, year_from, year_to, limit, page, scope) -> dict:
                page, limit, d["response"]["numFound"], recs)
 
 
+def _cql(query: str, field: str) -> str:
+    """CQL for SRU: every term indexed on field, Boolean operators kept (NOT is binary in
+    CQL), and an explicit AND between adjacent terms, since CQL has no implicit conjunction."""
+    out: list[str] = []
+    for tok in re.findall(r'"[^"]+"|[()]|[^\s()]+', query):
+        if tok in ("AND", "OR", "NOT", "(", ")"):
+            if tok == "(" and out and out[-1] not in ("AND", "OR", "NOT", "("):
+                out.append("AND")
+            out.append(tok)
+            continue
+        if out and out[-1] not in ("AND", "OR", "NOT", "("):
+            out.append("AND")
+        out.append(f"{field}={tok}")
+    return " ".join(out)
+
+
+async def _search_dnb(query, year_from, year_to, limit, page, scope) -> dict:
+    # Deutsche Nationalbibliothek SRU: German-language monographs, dissertations and
+    # translations, incl. philosophy, which the other indexes cover thinly. No abstracts.
+    field = "tit" if scope == "title_abstract" else "WOE"
+    q = _cql(query, field)
+    params = {"version": "1.1", "operation": "searchRetrieve", "query": q,
+              "recordSchema": "oai_dc", "maximumRecords": min(limit, 100),
+              "startRecord": (page - 1) * limit + 1}
+    r = await _http().get("https://services.dnb.de/sru/dnb", params=params)
+    if r.status_code != 200:
+        return {"status": "error", "http_status": r.status_code, "detail": r.text[:300]}
+    root = ET.fromstring(r.content)
+    ns = {"dc": "http://purl.org/dc/elements/1.1/"}
+    total = int(root.findtext(".//{http://www.loc.gov/zing/srw/}numberOfRecords") or 0)
+    recs, dropped = [], 0
+    for dc in root.iter("{http://www.openarchives.org/OAI/2.0/oai_dc/}dc"):
+        txt = lambda tag: [e.text or "" for e in dc.findall(f"dc:{tag}", ns)]
+        year = next((_year(d) for d in txt("date") if _year(d)), None)
+        if (year_from and year and year < year_from) or (year_to and year and year > year_to):
+            dropped += 1
+            continue
+        ids = txt("identifier")
+        isbn = next((m.group(0) for i in ids if (m := re.search(r"\d[\d-]{8,}[\dXx]", i))), None)
+        url = next((i for i in ids if i.startswith("http")), None)
+        recs.append(_rec("dnb", doi=next((_clean_doi(i) for i in ids if _clean_doi(i)), None),
+                         title=(txt("title") or [None])[0], authors=txt("creator"), year=year,
+                         venue=next((p.split(" : ")[-1].strip() for p in txt("publisher")), None),
+                         venue_type="publisher", type=(txt("type") or [None])[0],
+                         language=(txt("language") or [None])[0], keywords=txt("subject"),
+                         oa_url=url, note=f"ISBN {isbn}" if isbn else None))
+    return _ok("Deutsche Nationalbibliothek", query, scope, q, page, limit, total, recs,
+               year_filter="applied client-side on this page" if year_from or year_to else None,
+               dropped_by_year=dropped,
+               note="library catalogue: no abstracts; Boolean syntax supported; years filtered "
+                    "after retrieval, so a page can return fewer records than requested")
+
+
 async def _search_zenodo(query, year_from, year_to, limit, page, scope) -> dict:
     # Repository for preprints, working papers, conference papers; mixed quality, no peer review
     fmt = ((lambda t: f"(title:{t} OR description:{t})") if scope == "title_abstract"
            else (lambda t: t))
-    q = _expand(query, fmt)
+    q = _expand_terms(query, fmt)
     if year_from or year_to:
         q = (f"({q}) AND publication_date:[{year_from or 1900}-01-01 TO "
              f"{year_to or 2100}-12-31]")
@@ -2098,7 +2294,7 @@ async def _search_s2(query, year_from, year_to, limit, page, scope) -> dict:
                d.get("total"), recs, note="no Boolean syntax; no author keywords")
 
 
-DATABASES = ["openalex", "europepmc", "semanticscholar", "hal", "doaj", "arxiv", "osf", "zenodo"]
+DATABASES = ["openalex", "europepmc", "semanticscholar", "hal", "doaj", "arxiv", "osf", "zenodo", "dnb"]
 
 
 def _surname_set(authors: list[str]) -> set[str]:
@@ -2132,7 +2328,7 @@ def _same_work(a: dict, b: dict) -> str | None:
     return "title+year (authors unavailable)"
 _ADAPTERS = {"europepmc": _search_europepmc, "doaj": _search_doaj, "hal": _search_hal,
              "zenodo": _search_zenodo, "osf": _search_osf, "semanticscholar": _search_s2,
-             "arxiv": _search_arxiv}
+             "arxiv": _search_arxiv, "dnb": _search_dnb}
 
 
 async def _search_openalex(query, year_from, year_to, doc_types, limit, page, scope,
@@ -2176,47 +2372,35 @@ async def _search_openalex(query, year_from, year_to, doc_types, limit, page, sc
     }
 
 
-@mcp.tool()
+@_tool()
 async def search_literature(query: str, year_from: int | None = None, year_to: int | None = None,
                             doc_types: list[str] | None = None, limit: int = 25, page: int = 1,
-                            scope: str = "title_abstract", open_access_only: bool = False,
+                            scope: Literal["title_abstract", "fulltext"] = "title_abstract",
+                            open_access_only: bool = False,
                             exclude_retracted: bool = True, fill_missing_abstracts: bool = True,
                             database: str = "openalex") -> dict:
-    """Search the literature and return records with abstracts and keywords.
+    """Search the literature across open indexes; records with abstracts, keywords and a log.
 
-    database: one name, a comma-separated list, or 'all'. Available:
-    openalex (default; journals, books, chapters, many preprints; best abstracts and
-    keywords), europepmc (life sciences, psychology, health, preprints), semanticscholar
-    (broad, TL;DRs; free-text only; 1 request/s across endpoints, also with API key), hal (French open
-    archive; humanities, social sciences, HCI), doaj (open-access journals, all fields),
-    arxiv (physics, maths, computer science incl. HCI and AI; no author keywords),
-    osf (PsyArXiv, SocArXiv and other OSF preprint servers; title-only search),
-    zenodo (self-deposited papers, not peer-reviewed). Philosophy is thinly covered by
-    all of these; PhilPapers has no accessible API.
-    With several databases, results are merged: records with the same DOI or arXiv id are
-    one work; records with the same normalized title are merged only if first-author
-    surnames overlap (min(2, n) shared) and years are within 1 (3 if either is a preprint),
-    or if one side has no authors ('dedup_basis' says which rule applied, and
-    'log.dedup_summary' counts merges and same-title records kept separate). A preprint and
-    its published version with different DOIs thus collapse into one record, while generic
-    titles by different authors stay apart. 'found_in' lists the databases and
-    'log.databases' holds one log per database. 'independent_sources' counts the evidence
-    behind a record, with OpenAlex and Semantic Scholar counting as one because both derive
-    largely from Crossref. A failing database is reported in
-    source_errors and does not abort the rest.
-
-    query supports Boolean syntax (AND, OR, NOT in capitals, "exact phrases", parentheses)
-    except where noted. scope: 'title_abstract' (default, reproducible) or 'fulltext'
-    (OpenAlex: indexed full text; others: all searchable fields). doc_types, open_access_only,
-    exclude_retracted and fill_missing_abstracts apply to OpenAlex only; doc_types uses
-    OpenAlex types ('article', 'review', 'book', 'book-chapter', 'preprint', 'dissertation');
-    conference papers are typed 'article' with venue_type 'conference'. Missing OpenAlex
-    abstracts are filled from Semantic Scholar when it holds them. Other databases do not
-    apply the OpenAlex-only filters: their log lists them under 'ignored_filters', and their
-    results may include retracted or off-type records. The 'log' records query,
-    filters, source, date and hit counts for reporting; this tool only retrieves, it does
-    not judge relevance. Per-database hit counts cannot be added up as unique papers, and
-    deduplication covers only the current page.
+    database: one name, a comma-separated list, or 'all'. openalex (default; best abstracts
+    and keywords), europepmc (life sciences, psychology, health), semanticscholar (broad,
+    TL;DRs, free text only), hal (French archive; humanities, HCI), doaj (open-access
+    journals), arxiv (physics, maths, CS incl. HCI and AI), osf (PsyArXiv, SocArXiv; title
+    only), zenodo (self-deposited, not peer-reviewed), dnb (Deutsche Nationalbibliothek:
+    German-language books, dissertations and translations, incl. philosophy; no abstracts).
+    Philosophy journals are thinly covered by all; PhilPapers has no search API.
+    query takes Boolean syntax (AND, OR, NOT, "phrases", parentheses) where the database
+    allows it. scope 'fulltext' searches indexed full text on OpenAlex, all fields elsewhere.
+    doc_types (OpenAlex types: 'article', 'review', 'book', 'book-chapter', 'preprint',
+    'dissertation'), open_access_only, exclude_retracted and fill_missing_abstracts apply to
+    OpenAlex only; other databases list them under 'ignored_filters'.
+    With several databases, records are merged by DOI or arXiv id, or by normalized title
+    when first-author surnames overlap and years are close ('dedup_basis' says which rule;
+    a preprint and its published version collapse into one record). 'found_in' lists the
+    databases; 'independent_sources' counts OpenAlex and Semantic Scholar as one, since both
+    derive largely from Crossref. A failing database goes to source_errors without aborting
+    the rest. 'log' records query, filters, date and per-database hit counts, which cannot
+    be summed as unique papers; deduplication covers the current page only. The tool
+    retrieves, it does not judge relevance.
     """
     limit = max(1, min(limit, 50))
     names = DATABASES if database.strip() == "all" else [
@@ -2428,44 +2612,23 @@ async def _s2_coverage(nodes: dict, seed_ids: list[str]) -> tuple[list[dict], st
     return rows, None
 
 
-@mcp.tool()
+@_tool()
 async def citation_graph(seeds: list[str], include_references: bool = True,
                          include_citing: bool = True, citing_per_seed: int = 20,
                          max_nodes: int = 150, min_cocitation: int = 2,
                          min_coupling: int = 3, check_coverage: bool = True) -> dict:
-    """Build a citation graph around seed works (DOIs or OpenAlex ids, max 10) for visualization.
+    """One-off citation graph around seed works (DOIs or OpenAlex ids, max 10), not stored.
 
-    Nodes are the seeds, the works they cite (role 'reference') and the most-cited works
-    citing them (role 'citing'), ranked by how many seeds they connect to, then by citation
-    count, up to max_nodes. Each node has id, doi, title, first_author, year, cited_by
-    (OpenAlex citation count), field (OpenAlex primary field), role, seeds_linked (how
-    many seeds it cites or is cited by), seed_cocited (how often works in the graph cite it
-    together with a seed) and seed_coupling (highest coupling strength with a seed). Rank
-    likely missing readings by these three, in this order; with one seed seeds_linked is 1
-    for every node, so the other two decide.
-    'citation_edges' are [citing_id, cited_id] pairs inside the graph. 'cocitation' lists
-    [id_a, id_b, n] where n works in this graph cite both; computed on this sample, not the
-    whole literature, so n is a lower bound. 'coupling' lists [id_a, id_b, shared, strength]:
-    the two works share 'shared' references in their full reference lists, and strength =
-    shared / sqrt(refs_a * refs_b) in 0-1. Coupling links recent works that nobody has
-    co-cited yet. Use paper_table with node ids for abstracts and keywords.
-
-    To visualize, build a D3 artifact with two views: (1) timeline, x = year, y = cited_by
-    on a log scale, arrows for citation_edges, seeds highlighted, colour by field;
-    (2) similarity network, force layout with a toggle between cocitation (weight n) and
-    coupling (weight strength), node size by seeds_linked, isolated nodes hidden.
-    Enable d3.zoom on both (wheel/pinch to zoom, drag to pan,
-    double-click or a button to reset); on the timeline rescale the axes instead of
-    scaling the marks, and show titles only for seeds or once zoomed in.
-    Tell the reader that distances in a force layout have no metric
-    meaning and that citation counts favour older works. OpenAlex reference lists are
-    incomplete for many humanities and older works: 'log.seeds_without_references' flags them.
-    'coverage_check' (check_coverage=True, one Semantic Scholar batch request, seeds with a
-    DOI only, never blocks the graph) compares each seed's reference and citation counts in
-    OpenAlex and Semantic Scholar: 'both_empty' means two sources agree there is nothing to
-    find; 'openalex_lower' or 'openalex_missing' means the graph under-counts that seed and
-    its absences are coverage gaps, not facts. Counts are definitions that differ per
-    source and both derive partly from Crossref, so 'concordant' is not independent proof.
+    Same nodes, scores (seeds_linked, seed_cocited, seed_coupling), citation_edges,
+    cocitation and coupling as map_get, computed on this sample (lower bounds). For work
+    that continues across chats prefer map_create + map_expand + map_get, which persist the
+    graph and the reading state. Use paper_table with node ids for abstracts.
+    OpenAlex reference lists are incomplete for humanities and older works:
+    'log.seeds_without_references' flags them; 'coverage_check' (check_coverage=True, one
+    Semantic Scholar batch, DOI seeds only) says per seed whether OpenAlex counts are
+    'concordant', 'openalex_lower', 'openalex_missing' or 'both_empty'. The page in the
+    server instructions shows maps, not this output; for a one-off visualization build a
+    D3 artifact (timeline year x citations, and a force network on cocitation/coupling).
     """
     seeds = seeds[:10]
     citing_per_seed = max(0, min(citing_per_seed, 100))
@@ -2543,7 +2706,7 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
     }
 
 
-@mcp.tool()
+@_tool()
 async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -> dict:
     """Detail rows for a list of works: abstract, keywords, topics, TL;DR, venue, OA, retraction.
 
@@ -2621,8 +2784,9 @@ async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -
 # citation_graph fetchers and _graph_links. Links are recomputed from stored reference lists.
 
 MAP_MAX_NODES = 2000
-MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 EXPAND_MODES = ("references", "citing", "similar", "authors")
+ExpandMode = Literal["references", "citing", "similar", "authors"]
+MapState = Literal["new", "to_read", "read", "dismissed"]
 
 
 def _map_db():
@@ -2891,11 +3055,11 @@ def _public_node(n: dict) -> dict:
     return {k: v for k, v in n.items() if k != "refs"}
 
 
-@mcp.tool()
+@_tool()
 async def map_create(name: str, seeds: list[str] | None = None, description: str | None = None) -> dict:
     """Create a persistent literature map, optionally with seed works (DOIs or OpenAlex ids).
-    Maps live on the Pi (SQLite) and keep seeds, candidates and reading state across chats;
-    the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    Maps are stored by the server (SQLite) and keep seeds, candidates and reading state across chats;
+    the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get.
     """
     maps, db = _map_db()
     try:
@@ -2913,12 +3077,12 @@ async def map_create(name: str, seeds: list[str] | None = None, description: str
     return out
 
 
-@mcp.tool()
+@_tool()
 async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collection: str | None = None,
                         zotero_tag: str | None = None, zotero_items: list[str] | None = None) -> dict:
     """Add seed works to a map: DOIs or OpenAlex ids, and/or every item with a DOI in a Zotero
     collection (name or path, subcollections included) or with a Zotero tag (e.g.
-    'cited/designing-resilience'), read from the library snapshot on the Pi. Max 50 seeds per
+    'cited/designing-resilience'), read from the server's Zotero library snapshot. Max 50 seeds per
     call. A candidate already in the map is promoted to seed. When OpenAlex has no reference
     list for a seed (books, humanities), the references come from Semantic Scholar if it has
     them; 'warnings' names seeds that still have none, which make sparse maps: add more seeds
@@ -2929,7 +3093,7 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
     nodes. Their references come from the bibliography in their PDF when the Zotero MCP's
     extract_references has been run on them (also added to OpenAlex's own list); references
     OpenAlex does not have become 'B:' book nodes. 'pdf_references' reports how many were
-    found per seed; 'warnings' names items whose PDF bibliography is not extracted yet. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT ."""
+    found per seed; 'warnings' names items whose PDF bibliography is not extracted yet."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -2939,7 +3103,7 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
     k = _knowledge()
     if zotero_collection or zotero_tag or zotero_items:
         if not k.library():
-            return {"status": "no_snapshot", "detail": "the Zotero library snapshot is missing on the Pi"}
+            return {"status": "no_snapshot", "detail": "the Zotero library snapshot is missing (KNOWLEDGE_DIR/library.json)"}
         items = k.items_where(zotero_collection, zotero_tag) if (zotero_collection or zotero_tag) else []
         items += [it for it in (k.item_by_key(x.strip().upper()) for x in zotero_items or []) if it]
         if not items:
@@ -3015,8 +3179,8 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
             "warnings": warnings, "source_errors": errors}
 
 
-@mcp.tool()
-async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 20,
+@_tool()
+async def map_expand(map: str, modes: list[ExpandMode] | None = None, per_seed: int = 20,
                      seeds: list[str] | None = None, max_new: int = 150) -> dict:
     """Grow a map from its seeds (or from the given seed ids): 'references' (works the seeds
     cite), 'citing' (most-cited works citing each seed), 'similar' (Semantic Scholar
@@ -3026,7 +3190,7 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
     citing/similar/authors per seed (max 100). seeds may name any works in the map (not only
     seeds) to expand from them. At most max_new new works enter per call (default 150; a map
     holds at most 2000): those linked to most starting works first, then the most cited.
-    Duplicate records of one work (preprint and published version) are merged afterwards. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    Duplicate records of one work (preprint and published version) are merged afterwards.
     """
     maps, db = _map_db()
     try:
@@ -3092,8 +3256,8 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
             "source_errors": errors}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def map_suggest(map: str, limit: int = 20, include_states: list[str] | None = None) -> dict:
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def map_suggest(map: str, limit: int = 20, include_states: list[MapState] | None = None) -> dict:
     """Candidates most likely missing from the reading, ranked like citation_graph: by how many
     seeds they cite or are cited by (seeds_linked), then how often works in the map cite them
     together with a seed (seed_cocited), then the strongest coupling with a seed, then citation
@@ -3124,7 +3288,7 @@ async def map_suggest(map: str, limit: int = 20, include_states: list[str] | Non
             "suggestions": [{k: n.get(k) for k in keep} for n in top]}
 
 
-@mcp.tool()
+@_tool()
 async def map_mark(map: str, ids: list[str], state: Literal["new", "to_read", "read", "dismissed"],
                    note: str | None = None) -> dict:
     """Set the reading state of works in a map (OpenAlex ids, or DOIs of works in the map):
@@ -3143,15 +3307,14 @@ async def map_mark(map: str, ids: list[str], state: Literal["new", "to_read", "r
     return {"status": "ok", "map": m["name"], "state": state, "marked": len(wanted) - len(missing), "not_in_map": missing}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def map_get(map: str, states: list[str] | None = None, min_cocitation: int = 2,
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def map_get(map: str, states: list[MapState] | None = None, min_cocitation: int = 2,
                   min_coupling: int = 3) -> dict:
     """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
     and links computed on the whole map: citation_edges, cocitation, coupling (same format and
     caveats as citation_graph). states filters the works returned (links are kept only
-    between returned works). To SHOW a map, give the user the 'Literature maps' page, which
-    reads every map live: https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT (choose the map in its menu). Build a separate artifact only
-    if the user asks for one."""
+    between returned works). To SHOW a map, give the user the 'Literature maps' page (link in
+    the server instructions and map_list), not a new artifact, unless the user asks for one."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -3222,109 +3385,8 @@ def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
     return merged
 
 
-@mcp.tool()
-async def map_refresh(map: str) -> dict:
-    """Fetch fresh metadata from OpenAlex for every work in a map (citation counts, momentum,
-    topic, retraction flag, reference lists), 50 works per request. States, roles and notes are
-    kept. Also merges duplicate records."""
-    maps, db = _map_db()
-    try:
-        m = maps.map_row(db, map)
-    except KeyError as e:
-        return {"status": "not_found", "detail": str(e)}
-    nodes = maps.nodes(db, m["id"])
-    found, errors = await _oa_batch("openalex", list(nodes))
-    with db:
-        for n in found:
-            if n["id"] in nodes:
-                old = nodes[n["id"]]
-                if "zotero_pdf" in (old.get("refs_source") or ""):  # keep the references read from the PDF
-                    n["refs"] = list(dict.fromkeys(n["refs"] + old["refs"]))
-                    n["refs_source"] = old["refs_source"]
-                maps.upsert(db, m["id"], n, old["role"], old["found_by"][0] if old["found_by"] else "refresh")
-        maps.touch(db, m["id"])
-    merged = _merge_duplicates(maps, db, m["id"])
-    return {"status": "ok", "map": m["name"], "refreshed": len(found), "works": len(nodes),
-            "duplicates_merged": len(merged), "source_errors": errors}
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-async def map_prune(map: str, keep: int = 300) -> dict:
-    """Shrink a map: keep the seeds, every work marked to_read, read or dismissed (so a dismissed
-    work stays dismissed), and the `keep` candidates most linked to the seeds; remove the other
-    new candidates. Also merges duplicate records. Ask the user before calling."""
-    maps, db = _map_db()
-    try:
-        m = maps.map_row(db, map)
-    except KeyError as e:
-        return {"status": "not_found", "detail": str(e)}
-    merged = _merge_duplicates(maps, db, m["id"])
-    nodes = maps.nodes(db, m["id"])
-    _map_view(nodes)
-    loose = sorted((n for n in nodes.values() if n["role"] == "candidate" and n["state"] == "new"),
-                   key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cocited_total"],
-                                  n["cited_by"] or 0), reverse=True)
-    drop = [n["id"] for n in loose[max(0, int(keep)):]]
-    removed = maps.remove(db, m["id"], drop) if drop else 0
-    return {"status": "ok", "map": m["name"], "removed": removed, "duplicates_merged": len(merged),
-            "works_in_map": len(nodes) - removed}
-
-
-@mcp.tool()
-async def map_rename(map: str, new_name: str | None = None, description: str | None = None) -> dict:
-    """Rename a map and/or change its description ('' clears it)."""
-    maps, db = _map_db()
-    try:
-        m = maps.map_row(db, map)
-        maps.rename(db, m["id"], new_name, description)
-    except KeyError as e:
-        return {"status": "not_found", "detail": str(e)}
-    except ValueError as e:
-        return {"status": "invalid_input", "detail": str(e)}
-    except Exception as e:
-        if "UNIQUE" in str(e):
-            return {"status": "exists", "detail": f"a map named {new_name!r} already exists"}
-        raise
-    return {"status": "ok", "map": (new_name or m["name"]).strip()}
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-async def map_remove(map: str, ids: list[str]) -> dict:
-    """Remove works from a map (OpenAlex ids or DOIs). Unlike map_mark 'dismissed', the work
-    and its state are gone; a later map_expand may bring it back as new."""
-    maps, db = _map_db()
-    try:
-        m = maps.map_row(db, map)
-    except KeyError as e:
-        return {"status": "not_found", "detail": str(e)}
-    wanted = _resolve_ids(maps.nodes(db, m["id"]), ids)
-    return {"status": "ok", "map": m["name"], "removed": maps.remove(db, m["id"], wanted)}
-
-
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
-async def map_delete(map: str, confirm_name: str) -> dict:
-    """Delete a whole map with its works and reading states. Cannot be undone. confirm_name
-    must repeat the map's name exactly; ask the user to confirm before calling."""
-    maps, db = _map_db()
-    try:
-        m = maps.map_row(db, map)
-    except KeyError as e:
-        return {"status": "not_found", "detail": str(e)}
-    if confirm_name.strip() != m["name"]:
-        return {"status": "not_confirmed", "detail": f"confirm_name must be exactly {m['name']!r}"}
-    return {"status": "ok", "deleted": m["name"], "works": maps.delete(db, m["id"])}
-
-
-@mcp.tool()
-async def map_watch(map: str, per_seed: int = 25) -> dict:
-    """New works citing the map's seeds since the last watch (or since the map was created),
-    added as candidates with state 'new' and found_by 'watch:<date>'. Run it when you come back
-    to a map: it is a check on demand, not a background alert."""
-    maps, db = _map_db()
-    try:
-        m = maps.map_row(db, map)
-    except KeyError as e:
-        return {"status": "not_found", "detail": str(e)}
+async def _map_watch(maps, db, m, per_seed: int) -> dict:
+    """New works citing the seeds since the last check, added as candidates."""
     since = (m["watched"] or m["created"])[:10]
     current = maps.nodes(db, m["id"])
     seeds = [k for k, n in current.items() if n["role"] == "seed" and _is_oa(k)]
@@ -3350,28 +3412,109 @@ async def map_watch(map: str, per_seed: int = 25) -> dict:
     return {"status": "ok", "map": m["name"], "since": since, "new": new, "source_errors": errors}
 
 
-@mcp.tool()
-async def map_check_retractions(map: str) -> dict:
-    """Retractions, expressions of concern and corrections for every work with a DOI in the map
-    (Crossref with Retraction Watch, as check_retractions); retracted works are flagged in the
-    map. OpenAlex's own retraction flag is already set when works enter the map."""
+@_tool()
+async def map_refresh(map: str, new_citing: bool = False, per_seed: int = 25) -> dict:
+    """Fetch fresh metadata from OpenAlex for every work in a map (citation counts, momentum,
+    topic, retraction flag, reference lists), 50 works per request. States, roles and notes are
+    kept. Also merges duplicate records. With new_citing=True it first adds, as candidates with
+    state 'new' and found_by 'watch:<date>', the works citing the seeds since the last such
+    check (or since the map was created), up to per_seed per seed: 'new' and 'since' report
+    them. Run it when you come back to a map; it is a check on demand, not an alert."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
+    watched = await _map_watch(maps, db, m, per_seed) if new_citing else {}
+    if watched.get("status") == "no_seeds":
+        return watched
     nodes = maps.nodes(db, m["id"])
-    by_doi = {n["doi"]: k for k, n in nodes.items() if n.get("doi")}
-    out = await check_retractions(list(by_doi))
+    found, errors = await _oa_batch("openalex", list(nodes))
     with db:
-        for f in out.get("with_notices", []):
-            if f["is_retracted"] and f["doi"] in by_doi:
-                db.execute("UPDATE nodes SET is_retracted = 1 WHERE map_id = ? AND work_id = ?", (m["id"], by_doi[f["doi"]]))
-    return {**out, "map": m["name"]}
+        for n in found:
+            if n["id"] in nodes:
+                old = nodes[n["id"]]
+                if "zotero_pdf" in (old.get("refs_source") or ""):  # keep the references read from the PDF
+                    n["refs"] = list(dict.fromkeys(n["refs"] + old["refs"]))
+                    n["refs_source"] = old["refs_source"]
+                maps.upsert(db, m["id"], n, old["role"], old["found_by"][0] if old["found_by"] else "refresh")
+        maps.touch(db, m["id"])
+    merged = _merge_duplicates(maps, db, m["id"])
+    return {"status": "ok", "map": m["name"], "refreshed": len(found), "works": len(nodes),
+            "duplicates_merged": len(merged),
+            "source_errors": errors + watched.get("source_errors", []),
+            **{k: watched[k] for k in ("since", "new") if k in watched}}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def map_export(map: str, states: list[str] | None = None) -> dict:
+@_tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+async def map_prune(map: str, keep: int = 300) -> dict:
+    """Shrink a map: keep the seeds, every work marked to_read, read or dismissed (so a dismissed
+    work stays dismissed), and the `keep` candidates most linked to the seeds; remove the other
+    new candidates. Also merges duplicate records. Ask the user before calling."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    merged = _merge_duplicates(maps, db, m["id"])
+    nodes = maps.nodes(db, m["id"])
+    _map_view(nodes)
+    loose = sorted((n for n in nodes.values() if n["role"] == "candidate" and n["state"] == "new"),
+                   key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cocited_total"],
+                                  n["cited_by"] or 0), reverse=True)
+    drop = [n["id"] for n in loose[max(0, int(keep)):]]
+    removed = maps.remove(db, m["id"], drop) if drop else 0
+    return {"status": "ok", "map": m["name"], "removed": removed, "duplicates_merged": len(merged),
+            "works_in_map": len(nodes) - removed}
+
+
+@_tool()
+async def map_rename(map: str, new_name: str | None = None, description: str | None = None) -> dict:
+    """Rename a map and/or change its description ('' clears it)."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+        maps.rename(db, m["id"], new_name, description)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    except ValueError as e:
+        return {"status": "invalid_input", "detail": str(e)}
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            return {"status": "exists", "detail": f"a map named {new_name!r} already exists"}
+        raise
+    return {"status": "ok", "map": (new_name or m["name"]).strip()}
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+async def map_remove(map: str, ids: list[str]) -> dict:
+    """Remove works from a map (OpenAlex ids or DOIs). Unlike map_mark 'dismissed', the work
+    and its state are gone; a later map_expand may bring it back as new."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    wanted = _resolve_ids(maps.nodes(db, m["id"]), ids)
+    return {"status": "ok", "map": m["name"], "removed": maps.remove(db, m["id"], wanted)}
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+async def map_delete(map: str, confirm_name: str) -> dict:
+    """Delete a whole map with its works and reading states. Cannot be undone. confirm_name
+    must repeat the map's name exactly; ask the user to confirm before calling."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    if confirm_name.strip() != m["name"]:
+        return {"status": "not_confirmed", "detail": f"confirm_name must be exactly {m['name']!r}"}
+    return {"status": "ok", "deleted": m["name"], "works": maps.delete(db, m["id"])}
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def map_export(map: str, states: list[MapState] | None = None) -> dict:
     """A map as a Markdown reading list (seeds, then works by state, with DOI links and
     whether each is in Zotero or has a note), to save in Obsidian with the Obsidian MCP's
     write_note outside the schema scope, e.g. 'Maps/<map name>.md'. states defaults to
@@ -3408,7 +3551,7 @@ async def map_export(map: str, states: list[str] | None = None) -> dict:
     return {"status": "ok", "map": m["name"], "suggested_path": f"Maps/{m['name']}.md", "markdown": "\n".join(parts) + "\n"}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_list() -> dict:
     """All literature maps with counts: seeds, works, to_read, read, dismissed.
     The user sees and manages maps on the 'Literature maps' page, which reads them live

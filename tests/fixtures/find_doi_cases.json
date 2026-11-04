@@ -1,0 +1,1028 @@
+{
+ "_about": "Offline reference set for find_doi. Sources are canned candidate lists; DOIs are synthetic labels (10.5555/...), not real identifiers. 'known_gap' marks cases the current rules are known to miss: they count against recall on purpose.",
+ "cases": [
+  {
+   "id": "exact_title_author_year",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi",
+       "Bianchi"
+      ],
+      "year": 2019
+     }
+    ],
+    "openalex": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Anna Rossi"
+      ],
+      "year": 2019
+     }
+    ],
+    "semantic_scholar": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "A. Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001",
+    "independent_sources": 1,
+    "sources": 3
+   }
+  },
+  {
+   "id": "subtitle_omitted_in_citation",
+   "cited": {
+    "title": "Affordances and design",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019,
+      "subtitle": "a relational account of perceived action possibilities in interactive systems"
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   }
+  },
+  {
+   "id": "subtitle_in_citation_record_split",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019,
+      "subtitle": "a relational account of perceived action possibilities in interactive systems"
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   }
+  },
+  {
+   "id": "preprint_and_published_year_given",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019,
+      "type": "journal-article"
+     },
+     {
+      "doi": "10.5555/ref.002",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2018,
+      "type": "posted-content"
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001",
+    "competing": [
+     "10.5555/ref.002"
+    ]
+   }
+  },
+  {
+   "id": "short_title_no_author",
+   "cited": {
+    "title": "Design ethics",
+    "year": 2020
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.003",
+      "title": "Design ethics",
+      "authors": [
+       "Verdi"
+      ],
+      "year": 2020
+     }
+    ]
+   },
+   "expected": {
+    "status": "no_confident_match",
+    "note_contains": "Short title"
+   }
+  },
+  {
+   "id": "short_title_with_author",
+   "cited": {
+    "title": "Design ethics",
+    "first_author": "Verdi",
+    "year": 2020
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.003",
+      "title": "Design ethics",
+      "authors": [
+       "Verdi"
+      ],
+      "year": 2020
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.003"
+   }
+  },
+  {
+   "id": "short_title_author_resolves_homonyms",
+   "cited": {
+    "title": "Introduction",
+    "first_author": "Neri"
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.004",
+      "title": "Introduction",
+      "authors": [
+       "Verdi"
+      ],
+      "year": 2001
+     },
+     {
+      "doi": "10.5555/ref.005",
+      "title": "Introduction",
+      "authors": [
+       "Neri"
+      ],
+      "year": 2003
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.005"
+   }
+  },
+  {
+   "id": "wrong_author",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Esposito",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi",
+       "Bianchi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "no_confident_match"
+   }
+  },
+  {
+   "id": "year_off_by_two",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2021
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "no_confident_match"
+   }
+  },
+  {
+   "id": "year_off_by_one",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2020
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   }
+  },
+  {
+   "id": "only_erratum_found",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.006",
+      "title": "Erratum to: Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2020
+     }
+    ]
+   },
+   "expected": {
+    "status": "no_confident_match",
+    "excluded_derivatives": 1
+   }
+  },
+  {
+   "id": "erratum_and_original",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.006",
+      "title": "Correction: Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2020
+     },
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001",
+    "excluded_derivatives": 1
+   }
+  },
+  {
+   "id": "peer_review_type_excluded",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.007",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019,
+      "type": "peer-review"
+     },
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019,
+      "type": "journal-article"
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001",
+    "excluded_derivatives": 1
+   }
+  },
+  {
+   "id": "diacritics_in_citation",
+   "cited": {
+    "title": "Phénoménologie de la perception et design des interfaces",
+    "first_author": "Lefèvre",
+    "year": 2015
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.008",
+      "title": "Phenomenologie de la perception et design des interfaces",
+      "authors": [
+       "Lefevre"
+      ],
+      "year": 2015
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.008"
+   }
+  },
+  {
+   "id": "html_in_record_title",
+   "cited": {
+    "title": "The ethics of autonomous agents in human computer interaction",
+    "first_author": "Conti",
+    "year": 2022
+   },
+   "sources": {
+    "openalex": [
+     {
+      "doi": "10.5555/ref.009",
+      "title": "The ethics of <i>autonomous</i> agents in human computer interaction",
+      "authors": [
+       "Luca Conti"
+      ],
+      "year": 2022
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.009"
+   }
+  },
+  {
+   "id": "retracted_prefix_in_record",
+   "cited": {
+    "title": "The ethics of autonomous agents in human computer interaction",
+    "first_author": "Conti",
+    "year": 2022
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.009",
+      "title": "RETRACTED: The ethics of autonomous agents in human computer interaction",
+      "authors": [
+       "Conti"
+      ],
+      "year": 2022
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.009"
+   }
+  },
+  {
+   "id": "cyrillic_title",
+   "cited": {
+    "title": "Феноменология восприятия и дизайн интерфейсов",
+    "first_author": "Иванов",
+    "year": 2018
+   },
+   "sources": {
+    "openalex": [
+     {
+      "doi": "10.5555/ref.010",
+      "title": "Феноменология восприятия и дизайн интерфейсов",
+      "authors": [
+       "Пётр Иванов"
+      ],
+      "year": 2018
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.010"
+   }
+  },
+  {
+   "id": "different_paper_shared_words",
+   "cited": {
+    "title": "Affordances in interactive systems: a review",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "no_confident_match"
+   }
+  },
+  {
+   "id": "ampersand_vs_and",
+   "cited": {
+    "title": "Design & ethics in human-computer interaction research",
+    "first_author": "Galli",
+    "year": 2017
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.011",
+      "title": "Design and ethics in human-computer interaction research",
+      "authors": [
+       "Galli"
+      ],
+      "year": 2017
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.011"
+   }
+  },
+  {
+   "id": "case_and_trailing_period",
+   "cited": {
+    "title": "design and ethics in human-computer interaction research.",
+    "first_author": "Galli",
+    "year": 2017
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.011",
+      "title": "Design and Ethics in Human-Computer Interaction Research",
+      "authors": [
+       "Galli"
+      ],
+      "year": 2017
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.011"
+   }
+  },
+  {
+   "id": "record_without_year",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "semantic_scholar": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "A. Rossi"
+      ],
+      "year": null
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   }
+  },
+  {
+   "id": "record_without_authors_long_title",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "openalex": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   }
+  },
+  {
+   "id": "record_without_authors_short_title",
+   "cited": {
+    "title": "Design ethics",
+    "first_author": "Verdi",
+    "year": 2020
+   },
+   "sources": {
+    "openalex": [
+     {
+      "doi": "10.5555/ref.003",
+      "title": "Design ethics",
+      "authors": [],
+      "year": 2020
+     }
+    ]
+   },
+   "expected": {
+    "status": "no_confident_match"
+   }
+  },
+  {
+   "id": "one_source_fails",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": "error",
+    "openalex": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001",
+    "source_errors": 1
+   }
+  },
+  {
+   "id": "nothing_found",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {},
+   "expected": {
+    "status": "no_confident_match"
+   }
+  },
+  {
+   "id": "particle_surname",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "van der Berg",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.012",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "van der Berg"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.012"
+   }
+  },
+  {
+   "id": "particle_surname_record_bare",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "van der Berg",
+    "year": 2019
+   },
+   "sources": {
+    "openalex": [
+     {
+      "doi": "10.5555/ref.012",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Maria Berg"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.012"
+   }
+  },
+  {
+   "id": "hyphenated_surname",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Smith-Jones",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.013",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Smith-Jones"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.013"
+   }
+  },
+  {
+   "id": "journal_and_conference_versions_same_year",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019,
+      "venue": "Design Studies"
+     },
+     {
+      "doi": "10.5555/ref.014",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019,
+      "venue": "CHI"
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001",
+    "competing": [
+     "10.5555/ref.014"
+    ]
+   }
+  },
+  {
+   "id": "two_dois_same_title_other_author_excluded",
+   "cited": {
+    "title": "Design ethics",
+    "first_author": "Verdi",
+    "year": 2020
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.003",
+      "title": "Design ethics",
+      "authors": [
+       "Verdi"
+      ],
+      "year": 2020
+     },
+     {
+      "doi": "10.5555/ref.015",
+      "title": "Design ethics",
+      "authors": [
+       "Bruni"
+      ],
+      "year": 2020
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.003",
+    "competing": []
+   }
+  },
+  {
+   "id": "truncated_title",
+   "cited": {
+    "title": "Affordances and design: a relational account",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   },
+   "known_gap": "citation keeps only the first half of a long title; prefix similarity falls under the threshold"
+  },
+  {
+   "id": "transliteration_variant_author",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Dostoevskij",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.016",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Dostoevsky"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.016"
+   },
+   "known_gap": "surname transliteration differs; author check fails"
+  },
+  {
+   "id": "word_order_subtitle_first",
+   "cited": {
+    "title": "A relational account of perceived action possibilities in interactive systems: affordances and design",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   },
+   "known_gap": "title and subtitle swapped in the citation"
+  },
+  {
+   "id": "typo_in_title_two_chars",
+   "cited": {
+    "title": "Affordances and desing: a relational acount of perceived action possibilities in interactive systems",
+    "first_author": "Rossi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   }
+  },
+  {
+   "id": "first_author_given_as_second",
+   "cited": {
+    "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+    "first_author": "Bianchi",
+    "year": 2019
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.001",
+      "title": "Affordances and design: a relational account of perceived action possibilities in interactive systems",
+      "authors": [
+       "Rossi",
+       "Bianchi"
+      ],
+      "year": 2019
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.001"
+   },
+   "note": "any listed author passes the author check; this is deliberate, co-authors are often cited first by mistake"
+  },
+  {
+   "id": "book_edition_year_matches",
+   "cited": {
+    "title": "The Design of Everyday Objects",
+    "first_author": "Normann",
+    "year": 2013,
+    "is_book": true
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.020",
+      "title": "The Design of Everyday Objects",
+      "authors": [
+       "Normann"
+      ],
+      "year": 2013,
+      "type": "book"
+     }
+    ]
+   },
+   "expected": {
+    "status": "match",
+    "doi": "10.5555/ref.020"
+   },
+   "book_types": {
+    "10.5555/ref.020": "book"
+   }
+  },
+  {
+   "id": "book_edition_year_differs",
+   "cited": {
+    "title": "The Design of Everyday Objects",
+    "first_author": "Normann",
+    "year": 2013,
+    "is_book": true
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.021",
+      "title": "The Design of Everyday Objects",
+      "authors": [
+       "Normann"
+      ],
+      "year": 2002,
+      "type": "book"
+     }
+    ]
+   },
+   "expected": {
+    "status": "edition_mismatch"
+   },
+   "book_types": {
+    "10.5555/ref.021": "book"
+   }
+  },
+  {
+   "id": "book_only_chapter_and_review_found",
+   "cited": {
+    "title": "The Design of Everyday Objects",
+    "first_author": "Normann",
+    "year": 2013,
+    "is_book": true
+   },
+   "sources": {
+    "crossref": [
+     {
+      "doi": "10.5555/ref.022",
+      "title": "The Design of Everyday Objects",
+      "authors": [
+       "Normann"
+      ],
+      "year": 2013,
+      "type": "book-chapter"
+     },
+     {
+      "doi": "10.5555/ref.023",
+      "title": "The Design of Everyday Objects",
+      "authors": [
+       "Verdi"
+      ],
+      "year": 2014,
+      "type": "journal-article"
+     }
+    ]
+   },
+   "expected": {
+    "status": "no_confident_match"
+   },
+   "book_types": {
+    "10.5555/ref.022": "book-chapter",
+    "10.5555/ref.023": "journal-article"
+   }
+  },
+  {
+   "id": "book_without_doi_anywhere",
+   "cited": {
+    "title": "Sein und Zeit",
+    "first_author": "Heidegger",
+    "year": 2006,
+    "is_book": true
+   },
+   "sources": {},
+   "expected": {
+    "status": "no_confident_match",
+    "note_contains": "No DOI for the cited edition"
+   }
+  }
+ ]
+}
