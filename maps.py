@@ -13,7 +13,7 @@ import time
 
 DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "maps.sqlite")
 STATES = ("new", "to_read", "read", "dismissed")
-NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted", "subfield", "topic", "momentum")
+NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted", "subfield", "topic", "momentum", "zotero_key")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS maps (
@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS nodes (
   state TEXT NOT NULL DEFAULT 'new' CHECK (state IN ('new', 'to_read', 'read', 'dismissed')),
   found_by TEXT NOT NULL DEFAULT '[]', added TEXT NOT NULL, note TEXT,
   PRIMARY KEY (map_id, work_id));
+-- references read from PDFs (books, humanities) resolved to OpenAlex works; work_id '' = not found
+CREATE TABLE IF NOT EXISTS ref_cache (
+  key TEXT PRIMARY KEY, work_id TEXT NOT NULL, checked TEXT NOT NULL);
+-- works cited in PDFs that OpenAlex does not have: id 'B:...', shown as book nodes
+CREATE TABLE IF NOT EXISTS ref_stubs (
+  id TEXT PRIMARY KEY, title TEXT, first_author TEXT, year INTEGER);
 """
 
 
@@ -45,7 +51,7 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     # columns added after the first release
     for table, column, kind in (("nodes", "is_retracted", "INTEGER"), ("nodes", "refs_source", "TEXT"),
                                 ("maps", "watched", "TEXT"), ("nodes", "subfield", "TEXT"), ("nodes", "topic", "TEXT"),
-                                ("nodes", "momentum", "INTEGER")):
+                                ("nodes", "momentum", "INTEGER"), ("nodes", "zotero_key", "TEXT")):
         if column not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     return db
@@ -167,3 +173,29 @@ def delete(db: sqlite3.Connection, map_id: int) -> int:
 def set_watched(db: sqlite3.Connection, map_id: int, when: str) -> None:
     with db:
         db.execute("UPDATE maps SET watched = ? WHERE id = ?", (when, map_id))
+
+
+def cached_ref(db: sqlite3.Connection, key: str) -> str | None:
+    """OpenAlex id for a reference key, '' when known to be missing, None when never looked up."""
+    row = db.execute("SELECT work_id FROM ref_cache WHERE key = ?", (key,)).fetchone()
+    return None if row is None else row[0]
+
+
+def cache_ref(db: sqlite3.Connection, key: str, work_id: str) -> None:
+    with db:
+        db.execute("INSERT OR REPLACE INTO ref_cache (key, work_id, checked) VALUES (?, ?, ?)", (key, work_id, now()))
+
+
+def save_stub(db: sqlite3.Connection, stub: dict) -> None:
+    with db:
+        db.execute("INSERT OR IGNORE INTO ref_stubs (id, title, first_author, year) VALUES (?, ?, ?, ?)",
+                   (stub["id"], stub.get("title"), stub.get("first_author"), stub.get("year")))
+
+
+def stubs(db: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
+    out = {}
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        for r in db.execute(f"SELECT * FROM ref_stubs WHERE id IN ({','.join('?' * len(part))})", part):
+            out[r["id"]] = dict(r)
+    return out

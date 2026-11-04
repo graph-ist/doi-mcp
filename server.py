@@ -296,6 +296,8 @@ async def _oa_request(c: httpx.AsyncClient, path: str, params: dict,
             wait = max(0.0, float(response.headers.get("Retry-After", "")))
         except ValueError:
             wait = 2.0 ** attempt
+        if wait > 60:  # daily budget used up (Retry-After = hours until reset): retrying is useless
+            return response
         await response.aclose()
         await asyncio.sleep(min(wait, 10.0))
     return response
@@ -2630,7 +2632,8 @@ def _map_db():
 
 async def _oa_batch(filter_key: str, values: list[str]) -> tuple[list[dict], list[str]]:
     """OpenAlex works for many ids or DOIs, 50 per request, as citation_graph nodes."""
-    values = [v for v in dict.fromkeys(values) if v and not re.search(r"[|,]", v)]
+    values = [v for v in dict.fromkeys(values) if v and not re.search(r"[|,]", v)
+              and (filter_key != "openalex" or re.fullmatch(r"W\d+", v))]  # not 'Z:'/'B:' book nodes
     res = await asyncio.gather(*(
         _oa_get("works", filter=f"{filter_key}:" + "|".join(values[i:i + 50]), select=CG_SELECT,
                 **{"per-page": 50}) for i in range(0, len(values), 50)), return_exceptions=True)
@@ -2641,6 +2644,10 @@ async def _oa_batch(filter_key: str, values: list[str]) -> tuple[list[dict], lis
         else:
             found += [_cg_node(it) for it in r.get("results", [])]
     return found, errors
+
+
+def _is_oa(work_id: str) -> bool:
+    return bool(re.fullmatch(r"W\d+", work_id or ""))
 
 
 async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tuple[dict, str]], list[str]]:
@@ -2654,6 +2661,7 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
         found, errors = await _oa_batch("openalex", list(owner))
         out = [(n, f"references:{owner[n['id']]}") for n in found if n["id"] in owner]
     elif mode == "citing":
+        seeds = [sd for sd in seeds if _is_oa(sd["id"])]
         res = await asyncio.gather(*(
             _oa_get("works", filter=f"cites:{sd['id']}", sort="cited_by_count:desc", select=CG_SELECT,
                     **{"per-page": per_seed}) for sd in seeds), return_exceptions=True)
@@ -2681,6 +2689,7 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
         found, errors = await _oa_batch("doi", [d for d in dois if d])
         out = [(n, "similar:semantic_scholar") for n in found]
     elif mode == "authors":
+        seeds = [sd for sd in seeds if _is_oa(sd["id"])]
         res = await asyncio.gather(*(_oa_get(f"works/{sd['id']}", select="id,authorships") for sd in seeds),
                                    return_exceptions=True)
         authors = {}
@@ -2728,6 +2737,151 @@ async def _s2_reference_ids(doi: str) -> list[str]:
     return [n["id"] for n in found]
 
 
+_REF_STOP = {"the", "and", "of", "a", "an", "in", "on", "for", "to", "its", "la", "le", "les", "di", "il",
+             "der", "die", "das", "und", "des", "du", "de", "et", "e"}
+_REF_YEAR = re.compile(r"\b(1[5-9]\d\d|20[0-3]\d)[a-z]?\b")
+
+
+def _ascii(s: str | None) -> str:
+    return re.sub(r"[^a-z0-9 ]", " ", unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower())
+
+
+def _title_words(s: str | None) -> list[str]:
+    return [w for w in _ascii(s).split() if w not in _REF_STOP and len(w) > 1]
+
+
+def _parse_ref(entry: str) -> tuple[str, int | None, str]:
+    """(first author's surname, year, title) of a bibliography entry, author-date
+    ('Surname, First. 1990. Title. Place: Publisher.') or comma style
+    ('Surname, First, Title, Place: Publisher, 1990.')."""
+    surname = re.split(r"[,.(]", entry, maxsplit=1)[0].strip()
+    m = re.match(r"^[^.]*?\.?\s*\(?(1[5-9]\d\d|20[0-3]\d)[a-z]?\)?[.,]\s*(.+)$", entry)
+    if m:
+        year, rest = int(m.group(1)), m.group(2)
+    else:
+        years = _REF_YEAR.findall(entry)
+        year = int(years[-1][:4]) if years else None
+        rest = re.sub(r"^[^,]+,\s*[^,]+?,\s*", "", entry, count=1)
+    rest = rest.strip(' "“”‘’\'')
+    title = re.split(r"(?<!\b[A-Z])\.\s|[“”\"]|, (?:in|In)\b| In: |, [A-Z][a-z]+(?:, [A-Z]{2})?: ", rest)[0]
+    return surname, year, title.strip(' ,."“”')
+
+
+def _ref_key(surname: str, title: str) -> str | None:
+    words, last = _title_words(title), _ascii(surname).split()
+    return f"{last[-1]}|{' '.join(words[:10])}" if words and last else None
+
+
+def _title_match(want: list[str], title: str | None) -> bool:
+    got, w = set(_title_words(title)), set(want)
+    return bool(got) and len(w & got) / len(got) >= 0.8 and len(w & got) / len(w) >= 0.6
+
+
+# OpenAlex title searches cost $0.001 each against a $1/day budget: capped per call, the rest is
+# retried on later calls (results are cached in maps.sqlite)
+OA_SEARCHES_PER_CALL = 200
+
+
+async def _resolve_work(surname: str, title: str, budget: dict | None = None) -> dict | None:
+    """The OpenAlex work with this title and first-author surname. First Crossref, then Semantic
+    Scholar's title match (both free): a matching DOI (or MAG id) is then fetched from OpenAlex
+    by id (free). Else an OpenAlex title search
+    (paid, counted in budget['searches']): among the matches, the most cited one that is not a
+    review, so every citation of a classic lands on the same record. Raises BudgetExhausted when
+    the budget for this call is used up."""
+    words, last = _title_words(title), _ascii(surname).split()
+    if not words or not last:
+        return None
+    try:
+        for c in [x for x in await _crossref(_http(), title, last[-1]) if x]:
+            authors = " ".join(_ascii(a) for a in c.get("authors") or [])
+            full = c["title"] + (" " + c["subtitle"] if c.get("subtitle") else "")
+            if last[-1] in authors.split() and (_title_match(words, c["title"]) or _title_match(words, full)):
+                try:
+                    return _cg_node(await _oa_get(f"works/doi:{_doi_path(c['doi'])}", select=CG_SELECT))
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code != 404:
+                        raise
+                break
+    except httpx.HTTPError:
+        pass  # Crossref unavailable: fall through
+    # Semantic Scholar title match (free): its DOI or MAG id leads to the OpenAlex record (free)
+    m = await _s2_api("graph/v1/paper/search/match", {"query": " ".join(words[:12]), "fields": "title,authors,externalIds"})
+    if m["status"] == "ok":
+        for p in (m["data"].get("data") or [])[:1]:
+            names = " ".join(_ascii(a.get("name")) for a in p.get("authors") or [])
+            ext = p.get("externalIds") or {}
+            if last[-1] in names.split() and _title_match(words, p.get("title")):
+                for path in ([f"works/doi:{_doi_path(_clean_doi(ext['DOI']))}"] if ext.get("DOI") else []) + \
+                            ([f"works/mag:{ext['MAG']}"] if ext.get("MAG") else []):
+                    try:
+                        return _cg_node(await _oa_get(path, select=CG_SELECT))
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code != 404:
+                            raise
+    if budget is not None:
+        if budget.get("searches", 0) >= budget.get("max", OA_SEARCHES_PER_CALL):
+            raise BudgetExhausted()
+        budget["searches"] = budget.get("searches", 0) + 1
+    r = await _oa_get("works", filter=f"title.search:{' '.join(words[:8])},raw_author_name.search:{last[-1]}",
+                      sort="cited_by_count:desc", select=CG_SELECT + ",type", **{"per-page": 8})
+    for it in r.get("results", []):
+        if it.get("type") in ("review", "book-review", "erratum", "paratext", "retraction"):
+            continue
+        if _title_match(words, it.get("title")):
+            return _cg_node(it)
+    return None
+
+
+class BudgetExhausted(Exception):
+    pass
+
+
+def _stub_id(surname: str, year: int | None, title: str) -> str:
+    return "B:" + "-".join([_ascii(surname).split()[-1] if _ascii(surname).split() else "anon", str(year or "nd")]
+                          + _title_words(title)[:4])
+
+
+async def _pdf_reference_ids(maps, db, entries: list[str], budget: dict) -> tuple[list[str], dict]:
+    """Bibliography entries read from a PDF → work ids: OpenAlex ids when found (cached in
+    maps.sqlite), else 'B:' stub ids for works OpenAlex does not have."""
+    parsed = [(e, *_parse_ref(e)) for e in entries]
+    todo = {}
+    for e, sur, year, title in parsed:
+        k = _ref_key(sur, title)
+        if k and maps.cached_ref(db, k) is None:
+            todo[k] = (sur, title)
+    sem = asyncio.Semaphore(2)
+
+    async def one(k, sur, title):
+        async with sem:
+            try:
+                return k, await _resolve_work(sur, title, budget)
+            except Exception:
+                return k, False  # source error or budget used up: not cached, retried next time
+    for k, node in await asyncio.gather(*(one(k, *v) for k, v in todo.items())):
+        if node is not False:
+            maps.cache_ref(db, k, node["id"] if node else "")
+    ids, stats = [], {"entries": len(entries), "openalex": 0, "book_nodes": 0, "unparsed": 0, "pending": 0}
+    for e, sur, year, title in parsed:
+        k = _ref_key(sur, title)
+        wid = maps.cached_ref(db, k) if k else None
+        if k and wid is None:
+            stats["pending"] += 1  # not looked up yet (budget or source error): next call
+            continue
+        if wid:
+            ids.append(wid)
+            stats["openalex"] += 1
+        elif k and len(_title_words(title)) >= 2:
+            stub = {"id": _stub_id(sur, year, title), "title": title[:300], "first_author": sur, "year": year}
+            maps.save_stub(db, stub)
+            ids.append(stub["id"])
+            stats["book_nodes"] += 1
+        else:
+            stats["unparsed"] += 1
+    return list(dict.fromkeys(ids)), stats
+
+
 def _knowledge():
     import knowledge
     return knowledge
@@ -2761,33 +2915,45 @@ async def map_create(name: str, seeds: list[str] | None = None, description: str
 
 @mcp.tool()
 async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collection: str | None = None,
-                        zotero_tag: str | None = None) -> dict:
+                        zotero_tag: str | None = None, zotero_items: list[str] | None = None) -> dict:
     """Add seed works to a map: DOIs or OpenAlex ids, and/or every item with a DOI in a Zotero
     collection (name or path, subcollections included) or with a Zotero tag (e.g.
     'cited/designing-resilience'), read from the library snapshot on the Pi. Max 50 seeds per
     call. A candidate already in the map is promoted to seed. When OpenAlex has no reference
     list for a seed (books, humanities), the references come from Semantic Scholar if it has
     them; 'warnings' names seeds that still have none, which make sparse maps: add more seeds
-    from the same field. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT ."""
+    from the same field.
+
+    Books and other items without a DOI (from zotero_collection, zotero_tag or zotero_items =
+    item keys) are looked up in OpenAlex by title and author; if absent they enter as 'Z:KEY'
+    nodes. Their references come from the bibliography in their PDF when the Zotero MCP's
+    extract_references has been run on them (also added to OpenAlex's own list); references
+    OpenAlex does not have become 'B:' book nodes. 'pdf_references' reports how many were
+    found per seed; 'warnings' names items whose PDF bibliography is not extracted yet. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT ."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
-    wanted, warnings = list(seeds or []), []
-    if zotero_collection or zotero_tag:
-        k = _knowledge()
+    wanted, warnings, books = list(seeds or []), [], []
+    k = _knowledge()
+    if zotero_collection or zotero_tag or zotero_items:
         if not k.library():
             return {"status": "no_snapshot", "detail": "the Zotero library snapshot is missing on the Pi"}
-        items = k.items_where(zotero_collection, zotero_tag)
+        items = k.items_where(zotero_collection, zotero_tag) if (zotero_collection or zotero_tag) else []
+        items += [it for it in (k.item_by_key(x.strip().upper()) for x in zotero_items or []) if it]
         if not items:
-            return {"status": "not_found", "detail": "no library items match that collection/tag"}
+            return {"status": "not_found", "detail": "no library items match that collection/tag/keys"}
         wanted += [it["doi"] for it in items if it.get("doi")]
-        if without := [it["title"] for it in items if not it.get("doi")]:
-            warnings.append(f"{len(without)} items have no DOI and were skipped: " + "; ".join(t[:60] for t in without[:5]))
-    wanted = [x for x in dict.fromkeys(w.strip() for w in wanted) if x][:50]
-    if not wanted:
-        return {"status": "invalid_input", "detail": "give seeds, zotero_collection or zotero_tag"}
+        books = [it for it in items if not it.get("doi")]
+    wanted = [x for x in dict.fromkeys(w.strip() for w in wanted) if x]
+    books = list({it["key"]: it for it in books}.values())
+    if len(wanted) + len(books) > 50:
+        warnings.append(f"{len(wanted) + len(books) - 50} seeds over the limit of 50 were skipped: call again")
+        wanted = wanted[:50]
+        books = books[:50 - len(wanted)]
+    if not wanted and not books:
+        return {"status": "invalid_input", "detail": "give seeds, zotero_collection, zotero_tag or zotero_items"}
     res = await asyncio.gather(*(_cg_seed(x) for x in wanted), return_exceptions=True)
     found, errors = [], []
     for x, r in zip(wanted, res):
@@ -2795,11 +2961,46 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
             errors.append(_err(x, r))
         else:
             found.append(r)
+    lib_by_doi = k.by_doi()
+    for r in found:
+        it = lib_by_doi.get(_clean_doi(r.get("doi")) or "")
+        r["zotero_key"] = it["key"] if it else None
+    budget = {"searches": 0}
+    for it in books:  # no DOI: look the work up in OpenAlex, else a Zotero-only node
+        node, rk = None, _ref_key((it.get("creators") or [""])[0], it.get("title") or "")
+        cached = maps.cached_ref(db, rk) if rk else None
+        try:
+            if cached:
+                node = (await _oa_batch("openalex", [cached]))[0][0]
+            elif cached is None:
+                node = await _resolve_work((it.get("creators") or [""])[0], it.get("title") or "", budget)
+                if rk:
+                    maps.cache_ref(db, rk, node["id"] if node else "")
+        except Exception as e:
+            errors.append(_err(it["key"], e))
+        node = node or {"id": f"Z:{it['key']}", "doi": None, "title": it.get("title"),
+                        "first_author": (it.get("creators") or [None])[0], "year": it.get("year"),
+                        "cited_by": None, "refs": []}
+        node["zotero_key"] = it["key"]
+        found.append(node)
+    pdf_counts = {}
     for r in found:
         r["refs_source"] = "openalex" if r["refs"] else None
         if not r["refs"] and r.get("doi"):
             r["refs"] = await _s2_reference_ids(r["doi"])
             r["refs_source"] = "semantic_scholar" if r["refs"] else None
+        entries = k.references(r["zotero_key"]) if r.get("zotero_key") else None
+        if entries:
+            ids, stats = await _pdf_reference_ids(maps, db, entries, budget)
+            if stats["pending"]:
+                warnings.append(f"{r['id']}: {stats['pending']} references not looked up yet (OpenAlex daily budget): "
+                                "call map_add_seeds again with the same items later; the rest is cached")
+            r["refs"] = list(dict.fromkeys(r["refs"] + ids))
+            r["refs_source"] = "zotero_pdf" if not r["refs_source"] else r["refs_source"] + "+zotero_pdf"
+            pdf_counts[r["id"]] = stats
+        elif entries is None and r.get("zotero_key") and not r.get("doi"):
+            warnings.append(f"{r['zotero_key']} ({(r.get('title') or '')[:50]}): bibliography not extracted yet, "
+                            "run the Zotero MCP's extract_references, then map_add_seeds again")
         if not r["refs"]:
             warnings.append(f"no reference list for {r['id']} ({(r.get('title') or '')[:60]}): expect a sparse map")
     added = {}
@@ -2810,6 +3011,7 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
     merged = _merge_duplicates(maps, db, m["id"])
     return {"status": "ok" if added else "not_found", "map": m["name"], "seeds": added, "duplicates_merged": merged,
             "references_from_semantic_scholar": [r["id"] for r in found if r.get("refs_source") == "semantic_scholar"],
+            "pdf_references": pdf_counts,
             "warnings": warnings, "source_errors": errors}
 
 
@@ -2847,6 +3049,21 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
     for mode, (pairs, errs) in zip(modes, await asyncio.gather(*(_expand(x, chosen, per_seed) for x in modes))):
         found += pairs
         errors += errs
+    if "references" in modes:
+        # works OpenAlex lacks ('B:' ids, from PDF bibliographies) enter only when at least two
+        # works in the map cite them: one citation alone is noise on a map
+        citers: dict[str, list[str]] = {}
+        for n in current.values():
+            for r in set(n["refs"]):
+                if r.startswith("B:"):
+                    citers.setdefault(r, []).append(n["id"])
+        chosen_ids = {n["id"] for n in chosen}
+        wanted_b = [b for b, who in citers.items() if len(who) >= 2 and chosen_ids & set(who)]
+        for b, st in maps.stubs(db, wanted_b).items():
+            owner = next(w for w in citers[b] if w in chosen_ids)
+            found.append(({"id": b, "doi": None, "title": st["title"], "first_author": st["first_author"],
+                           "year": st["year"], "cited_by": None, "refs": [], "refs_source": None},
+                          f"references:{owner}"))
     # When the map would overflow, the works linked to most seeds enter first, then the most cited:
     # never an arbitrary cut by arrival order.
     links: dict[str, set] = {}
@@ -2979,7 +3196,9 @@ def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
             if len(group) < 2:
                 continue
             years = [g["year"] for g in group if g.get("year")]
-            if years and max(years) - min(years) > 2:
+            # editions of a book can be decades apart; a short title + same surname could be two works
+            long_title = len((_dup_key(group[0]) or "").split("|")[0]) >= 25
+            if years and max(years) - min(years) > 2 and not long_title:
                 continue
             keep = max(group, key=lambda g: (g["role"] == "seed", g.get("cited_by") or 0))
             drop = [g for g in group if g is not keep]
@@ -2992,6 +3211,13 @@ def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
                        (json.dumps(refs), json.dumps(found), state, role, note, map_id, keep["id"]))
             for g in drop:
                 db.execute("DELETE FROM nodes WHERE map_id = ? AND work_id = ?", (map_id, g["id"]))
+            # references to a removed record now point to the kept one, so citations are not lost
+            gone = {g["id"] for g in drop}
+            for other in nodes.values():
+                if other["id"] not in gone and other["id"] != keep["id"] and gone & set(other["refs"]):
+                    other["refs"] = list(dict.fromkeys(keep["id"] if r in gone else r for r in other["refs"]))
+                    db.execute("UPDATE nodes SET refs = ? WHERE map_id = ? AND work_id = ?",
+                               (json.dumps(other["refs"]), map_id, other["id"]))
             merged.append({"kept": keep["id"], "removed": [g["id"] for g in drop], "title": (keep.get("title") or "")[:80]})
     return merged
 
@@ -3012,6 +3238,9 @@ async def map_refresh(map: str) -> dict:
         for n in found:
             if n["id"] in nodes:
                 old = nodes[n["id"]]
+                if "zotero_pdf" in (old.get("refs_source") or ""):  # keep the references read from the PDF
+                    n["refs"] = list(dict.fromkeys(n["refs"] + old["refs"]))
+                    n["refs_source"] = old["refs_source"]
                 maps.upsert(db, m["id"], n, old["role"], old["found_by"][0] if old["found_by"] else "refresh")
         maps.touch(db, m["id"])
     merged = _merge_duplicates(maps, db, m["id"])
@@ -3098,7 +3327,7 @@ async def map_watch(map: str, per_seed: int = 25) -> dict:
         return {"status": "not_found", "detail": str(e)}
     since = (m["watched"] or m["created"])[:10]
     current = maps.nodes(db, m["id"])
-    seeds = [k for k, n in current.items() if n["role"] == "seed"]
+    seeds = [k for k, n in current.items() if n["role"] == "seed" and _is_oa(k)]
     if not seeds:
         return {"status": "no_seeds"}
     res = await asyncio.gather(*(
