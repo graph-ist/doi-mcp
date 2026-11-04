@@ -2,6 +2,10 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.8.2
+
+- Pagina *Literature maps* ripubblicata: brevetti (esagoni, archi punteggiati) e libri (triangoli), chip `verified` e criterio di abbinamento con Zotero, conteggio OpenCitations e `coverage_gaps` dopo il refresh, pulsanti e marcature degli intenti di citazione (`map_intents`, voce Debate); `map_watch` tolto dal manifest.
+
 ## 0.8.1
 
 - Skill `concept-card` (schede di concetto con relazioni tipizzate, MCP Obsidian 0.5.0); fixture di contratto di Obsidian aggiornate con `relations`.

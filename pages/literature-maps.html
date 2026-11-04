@@ -73,6 +73,9 @@ th.sort{cursor:pointer;user-select:none}th.sort:hover{color:var(--fg)}th.sort[ar
 .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.acts button{font-size:12.5px;padding:4px 9px}
 .abs{font-size:13.5px;line-height:1.55;max-width:75ch;background:var(--bg);border-radius:6px;padding:8px 10px}
 .chip.off{color:var(--warn);border-style:dashed}
+.chip.ok{color:var(--read)}.chip.pat{color:var(--muted)}
+.inl sup{font-size:10px;color:var(--warn);margin-left:1px}.inl sup.inf{color:var(--core)}
+.ctx{font-size:12.5px;color:var(--muted);margin:2px 0 0 0;padding-left:12px;border-left:2px solid var(--line)}
 .chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
 .fresh{color:var(--muted);font:12px var(--mono)}
 a{color:var(--link)}
@@ -88,6 +91,7 @@ text{fill:var(--muted);font:11px var(--mono)}
 <div class="bar">
 <label for="pick" class="lab">Map</label><select id="pick"><option>Loading maps…</option></select>
 <button id="watch" disabled>Check new citations</button>
+<button id="intents" disabled title="Why the works cite the seeds, from Semantic Scholar: intent, influence and the citing sentences; sentences with markers of critique are flagged">Citation intents</button>
 <button id="snap" title="Update which works are in Zotero, which notes cite them, and citation counts">Refresh library and notes</button>
 <button id="rename" disabled>Rename</button>
 <button id="del" disabled>Delete map</button>
@@ -159,7 +163,7 @@ function explain(e){
 
 /* ---------- encodings ---------- */
 const isCore = w => w.role === 'seed' || (w.zotero_tags || []).includes('core/seminal') || (!w.in_library && rank.has(w.id) && rank.get(w.id) <= TOP_CORE);
-const roleOf = w => w.role === 'seed' ? 'seed' : (w.found_by || []).some(f => f.startsWith('references:')) ? 'reference'
+const roleOf = w => w.role === 'seed' ? 'seed' : (w.found_by || []).some(f => f.startsWith('references:') || f.startsWith('patent:')) ? 'reference'
   : (w.found_by || []).some(f => f.startsWith('citing:') || f.startsWith('watch:')) ? 'citing' : 'related';
 function colour(w){
   const m = $('colour').value;
@@ -170,7 +174,9 @@ function colour(w){
   return isCore(w) ? css('--core') : css('--other');
 }
 const size = w => w.role === 'seed' ? 8 : 4 + 2 * Math.min(w.seeds_linked || 0, 4);
-const shape = w => ({seed: d3.symbolCircle, reference: d3.symbolCircle, citing: d3.symbolSquare, related: d3.symbolDiamond})[roleOf(w)];
+// a hexagon for patents (examiner citations, not scholarly ones), a triangle for books OpenAlex does not have
+const hexagon = { draw(ctx, size){ const r = Math.sqrt(size / 2.598); ctx.moveTo(r, 0); for (let i = 1; i < 6; i++) ctx.lineTo(r * Math.cos(i * Math.PI / 3), r * Math.sin(i * Math.PI / 3)); ctx.closePath() } };
+const shape = w => w.kind === 'patent' ? hexagon : w.kind === 'book' ? d3.symbolTriangle : ({seed: d3.symbolCircle, reference: d3.symbolCircle, citing: d3.symbolSquare, related: d3.symbolDiamond})[roleOf(w)];
 const sym = w => d3.symbol().type(shape(w)).size(Math.PI * size(w) ** 2 * (roleOf(w) === 'citing' ? .8 : 1))();
 function paint(sel){
   sel.attr('d', sym)
@@ -181,7 +187,7 @@ const label = w => `${(w.first_author || '').split(' ').slice(-1)[0] || '?'} ${w
 
 function legend(){
   const m = $('colour').value, dot = (fill, stroke, shp = 'circle') =>
-    `<svg width="14" height="14"><path transform="translate(7,7)" d="${d3.symbol().type(shp === 'square' ? d3.symbolSquare : shp === 'diamond' ? d3.symbolDiamond : d3.symbolCircle).size(70)()}" style="fill:${fill};stroke:${stroke};stroke-width:1.6"/></svg>`;
+    `<svg width="14" height="14"><path transform="translate(7,7)" d="${d3.symbol().type(shp === 'square' ? d3.symbolSquare : shp === 'diamond' ? d3.symbolDiamond : shp === 'hexagon' ? hexagon : shp === 'triangle' ? d3.symbolTriangle : d3.symbolCircle).size(70)()}" style="fill:${fill};stroke:${stroke};stroke-width:1.6"/></svg>`;
   let items;
   if (m === 'core') items = [[css('--core'), 'Core: seed, Zotero core/seminal, or a top-' + TOP_CORE + ' suggestion not in Zotero'], [css('--other'), 'Not core']];
   else if (m === 'recency') items = [[css('--gone'), 'Older'], [css('--link'), 'More recent']];
@@ -190,7 +196,9 @@ function legend(){
   else items = [...fieldIdx.keys()].slice(0, 6).map((f, i) => [css(fieldVars[i]), f]).concat(fieldIdx.size > 6 ? [[css('--f6'), 'Other fields']] : []);
   $('legend').innerHTML = items.map(([c, t]) => `<span>${dot(c, c)}${esc(t)}</span>`).join('')
     + `<span>${dot(css('--other'), css('--other'))}filled: in Zotero</span><span>${dot(css('--panel'), css('--other'))}outline: not in Zotero</span>`
-    + `<span>${dot(css('--panel'), css('--muted'))}reference</span><span>${dot(css('--panel'), css('--muted'), 'square')}citing</span><span>${dot(css('--panel'), css('--muted'), 'diamond')}similar or same author</span>`;
+    + `<span>${dot(css('--panel'), css('--muted'))}reference</span><span>${dot(css('--panel'), css('--muted'), 'square')}citing</span><span>${dot(css('--panel'), css('--muted'), 'diamond')}similar or same author</span>`
+    + (data && data.works.some(w => w.kind === 'patent') ? `<span>${dot(css('--panel'), css('--muted'), 'hexagon')}patent (dotted lines: examiner citations)</span>` : '')
+    + (data && data.works.some(w => w.kind === 'book') ? `<span>${dot(css('--panel'), css('--muted'), 'triangle')}book not in OpenAlex</span>` : '');
 }
 
 /* ---------- data helpers ---------- */
@@ -220,7 +228,7 @@ function setupTopN(){
 }
 function indexLinks(){
   out = new Map(); inn = new Map();
-  for (const [a, b] of data.citation_edges){ (out.get(a) || out.set(a, []).get(a)).push(b); (inn.get(b) || inn.set(b, []).get(b)).push(a) }
+  for (const [a, b] of [...data.citation_edges, ...(data.patent_edges || [])]){ (out.get(a) || out.set(a, []).get(a)).push(b); (inn.get(b) || inn.set(b, []).get(b)).push(a) }
 }
 function neighbours(id){
   const s = new Set([id, ...(out.get(id) || []), ...(inn.get(id) || [])]);
@@ -241,7 +249,7 @@ function pairs(){ return pairCache }
 /* ---------- drawing ---------- */
 const svg = d3.select('#svg'), tip = $('tip');
 let root = svg.append('g'), dots, lines, labels, place = () => {};
-function showTip(e, w){ tip.hidden = false; tip.innerHTML = `<b>${esc(w.title || w.id)}</b><br>${esc(w.first_author)} · ${w.year || 'n.d.'} · cited by ${w.cited_by ?? '?'}<br><span class="fresh">${roleOf(w)}${w.in_library ? ' · in Zotero' : ''}${isCore(w) ? ' · core' : ''}</span>`; tip.style.left = Math.min(e.clientX + 12, innerWidth - 330) + 'px'; tip.style.top = (e.clientY + 12) + 'px' }
+function showTip(e, w){ tip.hidden = false; tip.innerHTML = `<b>${esc(w.title || w.id)}</b><br>${esc(w.first_author)} · ${w.year || 'n.d.'} · cited by ${w.cited_by ?? '?'}<br><span class="fresh">${w.kind && w.kind !== 'work' ? w.kind + ' · ' : ''}${roleOf(w)}${w.in_library ? ' · in Zotero' + (w.library_match && w.library_match !== 'doi' ? ' (by ' + w.library_match + ')' : '') : ''}${w.verified?.status === 'match' ? ' · verified' : ''}${isCore(w) ? ' · core' : ''}</span>`; tip.style.left = Math.min(e.clientX + 12, innerWidth - 330) + 'px'; tip.style.top = (e.clientY + 12) + 'px' }
 const hideTip = () => { tip.hidden = true };
 
 function labelVisible(w){ return w.role === 'seed' && visibleWorks().length < 60 || w.id === selected || (rank.get(w.id) || 99) <= 5 || k >= 2.2 }
@@ -252,7 +260,7 @@ function emphasis(){
     .style('stroke-width', w => w.id === selected ? 4 : w.role === 'seed' ? 3 : 1.8);
   if (lines) lines.style('stroke', l => nb && (l.a === selected || l.b === selected) ? css('--hi') : css('--edge'))
     .style('stroke-opacity', l => !nb ? .35 : (l.a === selected || l.b === selected) ? .9 : .04)
-    .attr('stroke-dasharray', l => nb && l.b === selected && view === 'time' ? '3 3' : null)
+    .attr('stroke-dasharray', l => l.p ? '2 4' : nb && l.b === selected && view === 'time' ? '3 3' : null)
     .attr('marker-end', l => view !== 'time' || !$('arrows').checked ? null : nb && (l.a === selected || l.b === selected) ? 'url(#ahh)' : 'url(#ah)');
   if (labels) labels.style('display', w => labelVisible(w) ? null : 'none');
 }
@@ -288,7 +296,8 @@ function drawTime(W, vis, w, h){
   const plot = root.append('g').attr('clip-path', 'url(#clip)');
   const cy = val;
   const jit = new Map(); for (const d of pts){ const key = d.year + '|' + Math.round(Math.log(cy(d)) * 4); const c = jit.get(key) || 0; jit.set(key, c + 1); d._jx = (c % 2 ? 1 : -1) * Math.ceil(c / 2) * .16 }
-  const E = data.citation_edges.filter(([a, b]) => vis.has(a) && vis.has(b) && byId.get(a).year && byId.get(b).year).map(([a, b]) => ({ a, b }));
+  const E = [...data.citation_edges.map(([a, b]) => ({ a, b })), ...(data.patent_edges || []).map(([a, b]) => ({ a, b, p: true }))]
+    .filter(({ a, b }) => vis.has(a) && vis.has(b) && byId.get(a).year && byId.get(b).year);
   lines = plot.append('g').selectAll('line').data(E).join('line').style('stroke-width', 1);
   dots = plot.append('g').selectAll('path').data(pts).join('path').style('cursor', 'pointer').call(paint);
   labels = plot.append('g').selectAll('text').data(pts).join('text').attr('class', d => 'lbl' + (d.role === 'seed' ? ' seed' : '')).text(label);
@@ -408,15 +417,25 @@ $('clist').addEventListener('click', e => { const go = e.target.closest('button[
 
 /* ---------- detail panel ---------- */
 function select(id){ selected = id; emphasis(); renderDetail(); document.querySelectorAll('#rows tr').forEach(tr => tr.classList.toggle('on', tr.dataset.id === id)) }
-function links(ids){
+const intentOf = (citing, cited) => (data && data.edge_intents || {})[`${citing}->${cited}`];
+function links(ids, dir){
   if (!ids.length) return '<span class="m">none in this map</span>';
-  // compact: "Olsen 1992, Cross 2011, …", oldest first; the full title shows on hover
+  // compact: "Olsen 1992, Cross 2011, …", oldest first; the full title shows on hover; marks from map_intents
   const ws = ids.map(i => byId.get(i)).filter(Boolean).sort((a, b) => (a.year || 9999) - (b.year || 9999));
-  return '<span class="inl">' + ws.slice(0, 40).map(w => `<button data-go="${esc(w.id)}" title="${esc(w.title || '')}">${esc(label(w))}</button>`).join(', ') + (ws.length > 40 ? `<span class="m">, and ${ws.length - 40} more</span>` : '') + '</span>';
+  const mark = w => { const it = dir === 'cites' ? intentOf(selected, w.id) : dir === 'cited' ? intentOf(w.id, selected) : null; if (!it) return '';
+    return (it.contrasting ? '<sup title="citing sentences carry markers of critique (heuristic)">!</sup>' : '') + (it.influential ? '<sup class="inf" title="influential citation (Semantic Scholar)">★</sup>' : '') };
+  return '<span class="inl">' + ws.slice(0, 40).map(w => `<button data-go="${esc(w.id)}" title="${esc(w.title || '')}">${esc(label(w))}</button>${mark(w)}`).join(', ') + (ws.length > 40 ? `<span class="m">, and ${ws.length - 40} more</span>` : '') + '</span>';
+}
+function debate(w){
+  const rows = (inn.get(w.id) || []).map(c => [c, intentOf(c, w.id)]).filter(([, it]) => it && it.contrasting);
+  if (!rows.length) return '';
+  return `<dt>Debate</dt><dd>${rows.slice(0, 8).map(([c, it]) => { const x = byId.get(c); return `<span class="inl"><button data-go="${esc(c)}">${esc(x ? label(x) : c)}</button></span>${it.contexts && it.contexts[0] ? `<p class="ctx">${esc(it.contexts[0].slice(0, 240))}</p>` : ''}` }).join('')}<span class="fresh">citing sentences with markers of critique, from Semantic Scholar: read them in the text before use</span></dd>`;
 }
 function chips(w){
   return (relevanceOf(w.id) === 'off' ? '<span class="chip off">off-topic?</span>' : '') + (w.is_retracted ? '<span class="chip ret">retracted</span>' : '') + (isCore(w) ? '<span class="chip core">core</span>' : '')
-    + (w.zotero_key ? `<a class="chip lib" href="zotero://select/library/items/${esc(w.zotero_key)}">in Zotero</a>` : '')
+    + (w.zotero_key ? `<a class="chip lib" href="zotero://select/library/items/${esc(w.zotero_key)}" title="${w.library_match && w.library_match !== 'doi' ? 'matched by ' + esc(w.library_match) : 'matched by DOI'}">in Zotero</a>` : '')
+    + (w.verified?.status === 'match' ? `<span class="chip ok" title="${esc(w.verified.detail || '')} (${esc(w.verified.date || '')})">verified</span>` : '')
+    + (w.kind === 'patent' ? '<span class="chip pat">patent</span>' : '')
     + (w.notes || []).map(n => `<a class="chip note" href="obsidian://open?vault=${encodeURIComponent('Knowledge Graph')}&file=${encodeURIComponent(n.path.replace(/\.md$/, ''))}">note: ${esc(n.title)}</a>`).join('');
 }
 function stateButtons(w){
@@ -427,19 +446,20 @@ function renderDetail(){
   const d = $('detail'), w = selected && byId.get(selected);
   if (!w){ d.innerHTML = '<h2>Selected work</h2><p class="m">Tap a work in the chart or in the list to see its links in the map.</p>'; return }
   const cites = out.get(w.id) || [], cited = inn.get(w.id) || [];
-  d.innerHTML = `<h2>Selected work</h2><div><div class="t">${w.doi ? `<a href="https://doi.org/${encodeURI(w.doi)}" target="_blank" rel="noopener">${esc(w.title || w.id)}</a>` : esc(w.title || w.id)}</div>
-    <div class="m">${esc(w.first_author)} · ${w.year || 'n.d.'} · cited by ${w.cited_by ?? '?'}${w.field ? ' · ' + esc(w.field) : ''}</div><div class="chips">${chips(w)}</div></div>
+  const href = w.doi ? `https://doi.org/${encodeURI(w.doi)}` : w.kind === 'patent' ? `https://worldwide.espacenet.com/patent/search?q=pn%3D${encodeURIComponent(w.id.slice(2))}` : null;
+  d.innerHTML = `<h2>Selected work</h2><div><div class="t">${href ? `<a href="${href}" target="_blank" rel="noopener">${esc(w.title || w.id)}</a>` : esc(w.title || w.id)}</div>
+    <div class="m">${esc(w.first_author)} · ${w.year || 'n.d.'} · cited by ${w.cited_by ?? '?'}${w.cited_by_oc != null ? ' (OpenCitations ' + w.cited_by_oc + ')' : ''}${w.field ? ' · ' + esc(w.field) : ''}</div><div class="chips">${chips(w)}</div></div>
     ${stateButtons(w)}
-    <div class="acts" data-id="${esc(w.id)}"><button data-a="abstract">Abstract</button>${w.role !== 'seed' ? '<button data-a="seed">Make seed</button>' : ''}<button data-a="expand" title="Add up to 50 works it cites or that cite it">Expand from here</button>${!w.in_library && w.doi ? '<button data-a="zotero" title="Create the item from the DOI and attach an open access PDF if there is one">Add to Zotero</button>' : ''}<span class="fresh" id="actMsg"></span></div>
+    <div class="acts" data-id="${esc(w.id)}"><button data-a="abstract">Abstract</button>${w.role !== 'seed' ? '<button data-a="seed">Make seed</button>' : ''}<button data-a="expand" title="Add up to 50 works it cites or that cite it">Expand from here</button>${w.doi ? '<button data-a="intents" title="Why works cite this one and why it cites others, from Semantic Scholar">Citation intents</button>' : ''}${!w.in_library && w.doi ? '<button data-a="zotero" title="Create the item from the DOI and attach an open access PDF if there is one">Add to Zotero</button>' : ''}<span class="fresh" id="actMsg"></span></div>
     <div id="abs" class="abs" hidden></div>
-    <div class="cols"><dl><dt>Role</dt><dd>${roleOf(w)}${rank.has(w.id) ? ` · suggestion #${rank.get(w.id)}` : ''}</dd>
+    <div class="cols"><dl><dt>Role</dt><dd>${w.kind && w.kind !== 'work' ? w.kind + ' · ' : ''}${roleOf(w)}${rank.has(w.id) ? ` · suggestion #${rank.get(w.id)}` : ''}</dd>
     ${view === 'net' ? `<dt>Cluster</dt><dd>${clusterOf.has(w.id) ? (() => { const i = clusterOf.get(w.id), g = lastGroups[i] || [], nm = clusterNames.get(sigOf(g)); return `<svg width="10" height="10"><circle cx="5" cy="5" r="5" style="fill:${css(fieldVars[i % fieldVars.length])}"/></svg> ${nm ? esc(nm) + ' <span class="fresh">(proposed)</span>' : 'Cluster ' + (i + 1)} · ${g.length} works` })() : '<span class="m">not in a cluster at this threshold</span>'}</dd>` : ''}
     <dt>Found by</dt><dd>${esc((w.found_by || []).map(f => f.split(':')[0]).filter((v, i, a) => a.indexOf(v) === i).join(', '))}</dd>
     <dt>Scores</dt><dd class="fresh">seeds ${w.seeds_linked} · co-cited with a seed ${w.seed_cocited} · coupling ${w.seed_coupling}${w.momentum != null ? ' · momentum ' + w.momentum : ''}</dd>
     ${w.subfield ? `<dt>Topic</dt><dd>${esc(w.subfield)}${w.topic ? ' · ' + esc(w.topic) : ''}</dd>` : ''}
     ${relevanceOf(w.id) ? `<dt>Relevance</dt><dd>${{on: 'on topic', maybe: 'maybe', off: 'off-topic?'}[relevanceOf(w.id)]} <span class="fresh">(Claude, from the abstract)</span></dd>` : ''}
     ${w.note ? `<dt>Note</dt><dd>${esc(w.note)}</dd>` : ''}</dl>
-    <dl><dt>Cites</dt><dd>${links(cites)}</dd><dt>Cited by</dt><dd>${links(cited)}</dd></dl></div>`;
+    <dl><dt>Cites</dt><dd>${links(cites, 'cites')}</dd><dt>Cited by</dt><dd>${links(cited, 'cited')}</dd>${debate(w)}</dl></div>`;
 }
 $('detail').addEventListener('click', async e => {
   const go = e.target.closest('button[data-go]'); if (go) return select(go.dataset.go);
@@ -455,6 +475,7 @@ $('detail').addEventListener('click', async e => {
     }
     if (a.dataset.a === 'seed'){ msg('Adding as seed…'); await mcp.callTool(SERVER, 'map_add_seeds', { map: current, seeds: [w.doi || w.id] }) }
     if (a.dataset.a === 'expand'){ msg('Expanding…'); const r = await mcp.callTool(SERVER, 'map_expand', { map: current, modes: ['references', 'citing'], per_seed: 10, seeds: [w.id], max_new: 50 }); msg(`${r.payload?.added ?? 0} works added`) }
+    if (a.dataset.a === 'intents'){ msg('Asking Semantic Scholar…'); const r = await mcp.callTool(SERVER, 'map_intents', { map: current, works: [w.id] }); msg(r.payload?.status === 'ok' ? `${r.payload.edges_annotated} citation(s) annotated, ${r.payload.contrasting.length} with markers of critique` : (r.payload?.detail || 'no intents')) }
     if (a.dataset.a === 'zotero'){
       msg('Adding to Zotero…');
       const r = await mcp.callTool('Zotero', 'create_item_from_doi', { doi: w.doi });
@@ -472,7 +493,8 @@ $('detail').addEventListener('click', async e => {
 function renderStats(){
   if (!data){ $('stats').innerHTML = ''; return }
   const W = data.works, c = s => W.filter(w => w.state === s && w.role !== 'seed').length;
-  $('stats').innerHTML = `<span><b>${W.filter(w => w.role === 'seed').length}</b> seeds</span><span><b>${W.length}</b> works</span><span><b>${W.filter(w => w.in_library).length}</b> in Zotero</span><span><b>${c('to_read')}</b> to read</span><span><b>${c('read')}</b> read</span><span><b>${c('dismissed')}</b> dismissed</span>`;
+  const patents = W.filter(w => w.kind === 'patent').length, verified = W.filter(w => w.verified?.status === 'match').length, intents = Object.keys(data.edge_intents || {}).length;
+  $('stats').innerHTML = `<span><b>${W.filter(w => w.role === 'seed').length}</b> seeds</span><span><b>${W.length}</b> works</span>${patents ? `<span><b>${patents}</b> patents</span>` : ''}<span><b>${W.filter(w => w.in_library).length}</b> in Zotero</span><span><b>${verified}</b> verified</span><span><b>${c('to_read')}</b> to read</span><span><b>${c('read')}</b> read</span><span><b>${c('dismissed')}</b> dismissed</span>${intents ? `<span><b>${intents}</b> citation intents</span>` : ''}`;
 }
 let sortKey = 'rank', sortDir = 1;
 document.querySelector('thead').addEventListener('click', e => {
@@ -523,11 +545,12 @@ async function loadMap(name, fresh){
 $('snap').onclick = async () => {
   if (!mcp) return; $('snap').disabled = true; $('snap').textContent = 'Refreshing…';
   const res = await Promise.allSettled([mcp.callTool('Zotero', 'refresh_library_snapshot', {}), mcp.callTool('Obsidian', 'refresh_notes_snapshot', {})]);
-  if (current) await mcp.callTool(SERVER, 'map_refresh', { map: current }).catch(() => {});
+  let gaps = 0;
+  if (current){ const r = await mcp.callTool(SERVER, 'map_refresh', { map: current }).catch(() => null); gaps = r?.payload?.coverage_gaps?.length || 0 }
   const bad = res.map((r, i) => r.status === 'rejected' ? `${i ? 'Obsidian' : 'Zotero'}: ${explain(r.reason).replace(/the DOI|DOI/g, i ? 'Obsidian' : 'Zotero')}` : null).filter(Boolean);
   say(bad.join(' '));
   if (bad.length < 2 && current){ await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) }
-  $('fresh').textContent = bad.length ? 'refresh incomplete' : 'library and notes refreshed';
+  $('fresh').textContent = bad.length ? 'refresh incomplete' : 'library and notes refreshed' + (gaps ? `; ${gaps} seed(s) have many more citations in OpenCitations than in OpenAlex` : '');
   $('snap').textContent = 'Refresh library and notes'; $('snap').disabled = false;
 };
 /* relevance checked by Claude from abstracts; kept per map in this browser */
@@ -560,7 +583,15 @@ $('pruneForm').addEventListener('submit', async e => { e.preventDefault(); $('pr
     await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) } catch (err) { say(explain(err)) } });
 ['yfrom', 'yto', 'sub', 'hideoff'].forEach(id => $(id).addEventListener('change', draw));
 $('yaxis').addEventListener('change', draw);
-function controls(on){ ['watch', 'rename', 'del'].forEach(id => $(id).disabled = !on) }
+function controls(on){ ['watch', 'intents', 'rename', 'del'].forEach(id => $(id).disabled = !on) }
+$('intents').onclick = async () => {
+  controls(false); $('intents').textContent = 'Asking Semantic Scholar…';
+  try { const r = await mcp.callTool(SERVER, 'map_intents', { map: current }); say('');
+    $('fresh').textContent = r.payload?.status === 'ok' ? `${r.payload.edges_annotated} citations of the seeds annotated; ${r.payload.contrasting.length} with markers of critique` : (r.payload?.detail || 'no intents');
+    await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) }
+  catch (err) { say(explain(err)) }
+  $('intents').textContent = 'Citation intents'; controls(true);
+};
 function renderPicker(){
   const pick = $('pick'); controls(maps.length > 0);
   if (!maps.length){ pick.innerHTML = '<option>No maps yet</option>'; pick.disabled = true; say('No maps yet. In a chat, ask Claude to create one (map_create) from a few DOIs or a Zotero tag.'); return }
