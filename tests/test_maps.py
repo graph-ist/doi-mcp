@@ -218,9 +218,17 @@ def test_refresh_keeps_state(db, monkeypatch):
     async def batch(key, ids):
         return [{**db[i], "cited_by": 999, "momentum": 42} for i in ids if i in db], []
     monkeypatch.setattr(s, "_oa_batch", batch)
+
+    async def oc(doi, kind):
+        return 2000 if doi == "10.1234/one" else None
+    monkeypatch.setattr(s, "_oc_count", oc)
     out = run(s.map_refresh("R"))
-    w3 = next(w for w in run(s.map_get("R"))["works"] if w["id"] == "W3")
+    works = {w["id"]: w for w in run(s.map_get("R"))["works"]}
+    w3 = works["W3"]
     assert out["refreshed"] == 3 and w3["cited_by"] == 999 and w3["momentum"] == 42 and w3["state"] == "read"
+    # the seed has far more citations in OpenCitations than in OpenAlex: a coverage gap
+    assert works["W1"]["cited_by_oc"] == 2000 and out["coverage_gaps"] == [
+        {"id": "W1", "title": "TW1", "openalex_cited_by": 999, "opencitations_cited_by": 2000}]
 
 
 def test_pdf_references_book_nodes_and_editions(db, snapshot, monkeypatch):

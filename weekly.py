@@ -37,7 +37,7 @@ async def refresh_maps(server) -> dict:
     out = {}
     for m in (await server.map_list()).get("maps", []):
         r = await server.map_refresh(m["name"], new_citing=True)
-        out[m["name"]] = {k: r.get(k) for k in ("status", "new_citing", "added", "updated", "retracted") if k in r}
+        out[m["name"]] = {k: r.get(k) for k in ("status", "new_citing", "added", "updated", "retracted", "coverage_gaps") if k in r}
     return out
 
 
@@ -119,6 +119,8 @@ def render(results: dict) -> str:
         for name, r in maps.items():
             new = r.get("new_citing") or r.get("added") or 0
             lines.append(f"- **{name}**: {new} new citing work(s) since last check" + (f", {r['retracted']} retracted" if r.get("retracted") else ""))
+            for g in r.get("coverage_gaps") or []:
+                lines.append(f"  - coverage gap: {g.get('title')} has {g['opencitations_cited_by']} citations in OpenCitations, {g['openalex_cited_by']} in OpenAlex")
     else:
         lines.append(f"- {maps.get('error') if isinstance(maps, dict) else 'no maps'}")
     lines += ["", "## Retractions in the library"]

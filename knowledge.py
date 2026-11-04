@@ -251,7 +251,22 @@ def coverage(project: str | None = None, collection: str | None = None) -> dict:
         for k in zk:
             if k not in keys:
                 dangling.append({"note": n["path"], "zotero_key": k})
+    all_items = lib.get("items", [])
+    projects: dict[str, int] = {}
+    anzsrc: dict[str, int] = {}
+    years: dict[str, int] = {}
+    for it in all_items if not (project or collection) else items:
+        for t in it.get("tags", []):
+            if t.startswith("cited/") and len(t) > 6:
+                projects[t[6:]] = projects.get(t[6:], 0) + 1
+            elif t.startswith("sub/") and len(t) > 4:
+                anzsrc[t[4:]] = anzsrc.get(t[4:], 0) + 1
+        if it.get("year"):
+            years[str(it["year"])] = years.get(str(it["year"]), 0) + 1
     return {"status": "ok", "project": project, "collection": collection, "items": len(rows),
+            "projects": dict(sorted(projects.items())), "anzsrc": dict(sorted(anzsrc.items(), key=lambda kv: -kv[1])),
+            "years": dict(sorted(years.items())), "notes_total": len((nts or {}).get("notes", [])),
+            "items_total": len(all_items),
             "without_note": [r for r in rows if not r["notes"]],
             "without_pdf": [{"key": r["key"], "title": r["title"]} for r in rows if not r["pdf"]],
             "unverified": [{"key": r["key"], "title": r["title"]} for r in rows if r["verified"] != "match"],

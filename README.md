@@ -255,7 +255,7 @@ I prompt qui sopra riguardano un solo server. Il ciclo intero (trovare, verifica
 - Google Books e Open Library possono derivare i dati dagli stessi feed degli editori: l'accordo tra i cataloghi è una corroborazione, non una prova. Senza chiave la quota di Google Books è condivisa e può dare 429.
 - ORCID: solo i dati resi pubblici dal ricercatore; i nomi non identificano da soli una persona.
 - `verify_doi` non ha una fonte di ritrattazioni per i DOI DataCite: `is_retracted` è `null` (sconosciuto), mai `false`. I DOI di altre agenzie (mEDRA, JaLC...) risultano registrati ma non verificabili nei metadati.
-- Il controllo di copertura di `citation_graph` confronta solo i conteggi dei seed, non le liste: OpenAlex e Semantic Scholar derivano in parte da Crossref, quindi la concordanza non è una prova indipendente.
+- Il controllo di copertura di `citation_graph` confronta solo i conteggi dei seed, non le liste. OpenAlex e Semantic Scholar derivano in parte da Crossref; per questo il confronto include l'OpenCitations Index (CC0, pipeline indipendente), e `map_refresh` conserva per ogni seed `cited_by_oc` e segnala in `coverage_gaps` i seed che OpenCitations conta molto più di OpenAlex. Il report settimanale li elenca.
 - DBLP risponde con una sfida proof-of-work (Anubis) e non è integrato.
 - EPO OPS applica un fair use oltre alla quota settimanale: un 403 può essere un rallentamento temporaneo. Il trasporto limita OPS a una richiesta al secondo. La sintassi CQL (`ta all "…"`, `pa=`, `ic=`, `ct=`) è passata al servizio così com'è; la ricerca a parole libere copre solo titolo e abstract.
 - `format_apa` riproduce i metadati come li ha depositati l'editore e non li verifica: con un `mismatch` di `verify_doi` il riferimento va composto dai valori verificati. `title_case_suspected` è un'euristica sul numero di parole capitalizzate (i nomi propri la falsano e sotto tre parole utili non giudica); nessuna conversione automatica del titolo.
@@ -372,6 +372,7 @@ Per aggiornare: copiare `server.py`, `maps.py`, `knowledge.py`, `patents.py`, `m
 | `ENABLE_GATEWAY` | Registra lo strato gateway (OpenAlex, Semantic Scholar, Google Books, ORCID) solo se impostata a `true`; default disattivato |
 | `KNOWLEDGE_DIR` | Cartella delle istantanee `library.json`, `notes.json`, `notes_text.json`, `fulltext/`, `references/` e dei report (`reports/`) (default `/var/lib/knowledge`) |
 | `SEMANTIC_MODEL_DIR` | Cartella del modello di embedding (default `STATE_DIRECTORY/models/multilingual-e5-small`) |
+| `OPENCITATIONS_TOKEN` | Facoltativo: token di accesso dell'OpenCitations Index (gratuito), inviato nell'header `authorization` |
 | `PHILARCHIVE_OAI_URL` | Endpoint OAI-PMH di PhilArchive (default `https://philarchive.org/oai.pl`) |
 | `NTFY_URL`, `NTFY_TOKEN` | Facoltative: il lavoro settimanale manda un riassunto (nuovi lavori citanti, ritrattazioni, passi falliti) a un topic ntfy quando il report è pronto |
 | `BACKUP_DIR`, `BACKUP_KEEP` | Cartella e numero delle copie di `maps.sqlite`, `philarchive.sqlite`, `corpus.sqlite` e di `KNOWLEDGE_DIR` fatte dal lavoro settimanale (default `STATE_DIRECTORY/backups`, 8) |
@@ -386,7 +387,9 @@ Il DOI MCP non chiama Zotero e non legge il vault. Legge due istantanee in `KNOW
 
 Un lavoro della mappa viene abbinato a un item della libreria per DOI, poi per chiave Zotero (nodi `Z:` e seed presi da Zotero), poi per numero di pubblicazione (nodi `P:`), infine per titolo, cognome del primo autore e anno con le regole di `matching.py`: così un libro che OpenAlex ha con DOI e Zotero senza, o viceversa, risulta `in_library`. `library_match` dice quale criterio ha deciso; `verified` riporta la riga `Verified:` dell'item (scritta da `create_item_from_doi` e `set_verification` dell'MCP Zotero), e `map_export` la mostra. Gli altri due server rigenerano le istantanee da soli pochi secondi dopo ogni scrittura, quindi il pulsante serve solo per forzare.
 
-La pagina *Literature maps* non mostra ancora `kind`, `library_match`, `verified` e `patent_edges`: i nodi brevetto compaiono come lavori senza DOI finché il sorgente non viene aggiornato e ripubblicato.
+La pagina *Knowledge views* (sorgente `pages/knowledge-views.html`, capability `mcp` sul connettore DOI con `coverage_report`, `search_log`, `weekly_report`, `map_list`, `search_everything`) legge dal vivo lo stato dei tre archivi: lavori e note, quota con nota, senza PDF e non verificati; copertura per progetto con i lavori senza nota e le note da riparare; treemap dei codici ANZSRC e istogramma degli anni; ricerca nel corpus per parole o per significato; registro delle ricerche; ultimo report settimanale; elenco delle mappe. Non ha un server proprio: i dati sono quelli dei tool.
+
+La pagina *Literature maps* non mostra ancora `kind`, `library_match`, `verified`, `patent_edges` e `edge_intents`: i nodi brevetto compaiono come lavori senza DOI finché il sorgente non viene aggiornato e ripubblicato.
 
 ### Lavoro settimanale e corpus
 

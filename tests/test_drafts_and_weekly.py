@@ -55,7 +55,9 @@ def test_coverage_report(snap):
     assert {r["key"] for r in out["unverified"]} == {"ZKEY0002", "ZKEY0004"}
     assert out["notes_without_item"] == ["Zettelkasten/Reading Notes/Orphan.md"]
     assert out["notes_with_missing_item"] == [{"note": "Zettelkasten/Reading Notes/Gone.md", "zotero_key": "DEADBEEF"}]
-    assert asyncio.run(s.coverage_report())["items"] == 4
+    whole = asyncio.run(s.coverage_report())
+    assert whole["items"] == 4 and whole["projects"] == {"thesis": 3} and whole["anzsrc"] == {"330304-design-theory": 1}
+    assert whole["years"] == {"1982": 1, "1983": 2, "1988": 1} and whole["notes_total"] == 4 and whole["items_total"] == 4
 
 
 def test_weekly_job_writes_a_report_and_survives_a_failing_step(snap, tmp_path, monkeypatch):

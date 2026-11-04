@@ -13,7 +13,7 @@ import time
 
 DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "maps.sqlite")
 STATES = ("new", "to_read", "read", "dismissed")
-NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted", "subfield", "topic", "momentum", "zotero_key")
+NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted", "subfield", "topic", "momentum", "zotero_key", "cited_by_oc")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS maps (
@@ -57,7 +57,8 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     # columns added after the first release
     for table, column, kind in (("nodes", "is_retracted", "INTEGER"), ("nodes", "refs_source", "TEXT"),
                                 ("maps", "watched", "TEXT"), ("nodes", "subfield", "TEXT"), ("nodes", "topic", "TEXT"),
-                                ("nodes", "momentum", "INTEGER"), ("nodes", "zotero_key", "TEXT")):
+                                ("nodes", "momentum", "INTEGER"), ("nodes", "zotero_key", "TEXT"),
+                                ("nodes", "cited_by_oc", "INTEGER")):
         if column not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     return db

@@ -2,6 +2,12 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.8.0
+
+- OpenCitations Index come terzo conteggio nel `coverage_check` di `citation_graph` (`opencitations_cited_by`, `opencitations_references` e verdetti) e in `map_refresh`, che salva `cited_by_oc` per ogni seed e segnala in `coverage_gaps` i seed che OpenCitations conta molto più di OpenAlex; il report settimanale li elenca. `OPENCITATIONS_TOKEN` facoltativo.
+- `coverage_report` restituisce anche `projects`, `anzsrc`, `years`, `notes_total`, `items_total`.
+- Pagina *Knowledge views* (`pages/knowledge-views.html`): lo stato dei tre archivi, copertura per progetto, campi e anni, ricerca nel corpus, registro delle ricerche, report settimanale, mappe.
+
 ## 0.7.0
 
 - `search_everything(semantic=true)`: ricerca per significato con embedding locali multilingue (multilingual-e5-small in ONNX, `semantic.py`, extra `semantic`); vettori in `corpus.sqlite`, indicizzazione incrementale a ogni chiamata, nel lavoro settimanale e con `semantic.py embed`; `semantic_unavailable` senza modello.

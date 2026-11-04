@@ -48,7 +48,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 INSTRUCTIONS = (
@@ -2826,17 +2826,56 @@ def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: in
     return edges, cocitation, coupling
 
 
-def _coverage_verdict(openalex: int, other: int) -> str:
+def _coverage_verdict(openalex: int, other: int, other_name: str = "semantic_scholar") -> str:
     """Compare two counts of the same thing; 0.8 is a heuristic, definitions differ per source."""
     if not openalex and not other:
         return "both_empty"
     if not openalex:
         return "openalex_missing"
     if not other:
-        return "semantic_scholar_missing"
+        return f"{other_name}_missing"
     if min(openalex, other) / max(openalex, other) >= 0.8:
         return "concordant"
-    return "openalex_lower" if openalex < other else "semantic_scholar_lower"
+    return "openalex_lower" if openalex < other else f"{other_name}_lower"
+
+
+# OpenCitations Index: citation data released CC0, built from Crossref deposits, DataCite, PubMed
+# and more, independent of OpenAlex's own processing: the one count that is not derived from
+# the same pipeline. A free token (opencitations.net/accesstoken) is polite, not required.
+OC_TOKEN = os.environ.get("OPENCITATIONS_TOKEN", "")
+
+
+async def _oc_count(doi: str, kind: str) -> int | None:
+    """Citation or reference count of a DOI in the OpenCitations Index; None when unknown."""
+    path = "citation-count" if kind == "citations" else "reference-count"
+    headers = {"authorization": OC_TOKEN} if OC_TOKEN else {}
+    r = await _http().get(f"https://api.opencitations.net/index/v2/{path}/doi:{_doi_path(doi)}", headers=headers)
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+        return int(data[0]["count"]) if data else None
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+async def _oc_coverage(nodes: dict, seed_ids: list[str]) -> tuple[dict[str, dict], list[str]]:
+    """Seed counts in the OpenCitations Index, two requests per seed, at most 25 seeds."""
+    with_doi = [sid for sid in seed_ids if nodes[sid].get("doi")][:25]
+    errors: list[str] = []
+
+    async def one(sid):
+        try:
+            cites = await _oc_count(nodes[sid]["doi"], "citations")
+            refs = await _oc_count(nodes[sid]["doi"], "references")
+        except httpx.HTTPError as e:
+            errors.append(_err("opencitations", e))
+            return sid, None
+        return sid, {"opencitations_cited_by": cites, "opencitations_references": refs,
+                     "opencitations_citations_verdict": _coverage_verdict(nodes[sid]["cited_by"] or 0, cites or 0, "opencitations"),
+                     "opencitations_references_verdict": _coverage_verdict(len(nodes[sid]["refs"]), refs or 0, "opencitations")}
+    pairs = await asyncio.gather(*(one(s) for s in with_doi))
+    return {sid: row for sid, row in pairs if row}, errors
 
 
 async def _s2_coverage(nodes: dict, seed_ids: list[str]) -> tuple[list[dict], str | None]:
@@ -2877,6 +2916,8 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
     graph and the reading state. Use paper_table with node ids for abstracts.
     OpenAlex reference lists are incomplete for humanities and older works:
     'log.seeds_without_references' flags them; 'coverage_check' (check_coverage=True, one
+    Semantic Scholar batch plus the OpenCitations Index, the one count independent of
+    OpenAlex,
     Semantic Scholar batch, DOI seeds only) says per seed whether OpenAlex counts are
     'concordant', 'openalex_lower', 'openalex_missing' or 'both_empty'. The page in the
     server instructions shows maps, not this output; for a one-off visualization build a
@@ -2942,6 +2983,18 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
                 errors.append(err)
         except (httpx.HTTPError, asyncio.TimeoutError, ValueError) as e:
             errors.append(_err("semantic_scholar coverage", e))
+        try:
+            oc, oc_errors = await asyncio.wait_for(_oc_coverage(nodes, seed_ids), timeout=30)
+            errors += oc_errors
+            by_id = {row["id"]: row for row in coverage}
+            for sid, extra in oc.items():
+                if sid in by_id:
+                    by_id[sid].update(extra)
+                else:
+                    coverage.append({"id": sid, "doi": nodes[sid]["doi"], "openalex_references": len(nodes[sid]["refs"]),
+                                     "openalex_cited_by": nodes[sid]["cited_by"], **extra})
+        except (httpx.HTTPError, asyncio.TimeoutError) as e:
+            errors.append(_err("opencitations coverage", e))
     return {
         "status": "ok",
         "nodes": [{k: v for k, v in n.items() if k != "refs"} for n in nodes.values()],
@@ -3644,7 +3697,9 @@ async def _map_watch(maps, db, m, per_seed: int) -> dict:
 async def map_refresh(map: str, new_citing: bool = False, per_seed: int = 25) -> dict:
     """Fetch fresh metadata from OpenAlex for every work in a map (citation counts, momentum,
     topic, retraction flag, reference lists), 50 works per request. States, roles and notes are
-    kept. Also merges duplicate records. With new_citing=True it first adds, as candidates with
+    kept. Also merges duplicate records, and for each seed stores the OpenCitations citation
+    count (cited_by_oc); 'coverage_gaps' lists seeds OpenAlex counts much lower than
+    OpenCitations does, where citing works may be missing from the map. With new_citing=True it first adds, as candidates with
     state 'new' and found_by 'watch:<date>', the works citing the seeds since the last such
     check (or since the map was created), up to per_seed per seed: 'new' and 'since' report
     them. Run it when you come back to a map; it is a check on demand, not an alert."""
@@ -3668,8 +3723,23 @@ async def map_refresh(map: str, new_citing: bool = False, per_seed: int = 25) ->
                 maps.upsert(db, m["id"], n, old["role"], old["found_by"][0] if old["found_by"] else "refresh")
         maps.touch(db, m["id"])
     merged = _merge_duplicates(maps, db, m["id"])
+    # the OpenCitations count for every seed with a DOI: a gap shows where OpenAlex misses citations
+    gaps, seeds = [], [k for k, n in nodes.items() if n["role"] == "seed" and n.get("doi")][:25]
+    for sid in seeds:
+        try:
+            oc = await _oc_count(nodes[sid]["doi"], "citations")
+        except httpx.HTTPError as e:
+            errors.append(_err("opencitations", e))
+            continue
+        if oc is None:
+            continue
+        with db:
+            db.execute("UPDATE nodes SET cited_by_oc = ? WHERE map_id = ? AND work_id = ?", (oc, m["id"], sid))
+        oa = next((n["cited_by"] for n in found if n["id"] == sid), nodes[sid].get("cited_by")) or 0
+        if oc >= 10 and oc >= 1.25 * oa:
+            gaps.append({"id": sid, "title": nodes[sid].get("title"), "openalex_cited_by": oa, "opencitations_cited_by": oc})
     return {"status": "ok", "map": m["name"], "refreshed": len(found), "works": len(nodes),
-            "duplicates_merged": len(merged),
+            "duplicates_merged": len(merged), "coverage_gaps": gaps,
             "source_errors": errors + watched.get("source_errors", []),
             **{k: watched[k] for k in ("since", "new") if k in watched}}
 

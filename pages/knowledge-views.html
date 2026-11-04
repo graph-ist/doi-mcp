@@ -1,0 +1,301 @@
+<title>Knowledge views</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+/* Layout: a research ledger. Header with the state of the three archives, a row of figures, then panels
+   two abreast (one column on phones): projects, fields and years, the corpus search, searches, the weekly
+   report, the maps. Same tokens as the Literature maps page, so the two read as one instrument. */
+:root{--bg:#f6f7f4;--panel:#ffffff;--fg:#1d2420;--muted:#5d6a63;--line:#d9ded9;--grid:#eceeea;
+--accent:#2f6f73;--core:#a8431f;--warn:#a5402a;--good:#5f7a2a;--amber:#b07d12;
+--d30:#2f6f9f;--d33:#3d8a5a;--d35:#8a5aa6;--d46:#b4441c;--d47:#8c7a14;--d50:#c25c98;--dxx:#5e6a66;
+--display:"Fraunces",Georgia,serif;--body:"IBM Plex Sans",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141816;--panel:#1c211e;--fg:#e4e9e5;--muted:#9aa8a0;--line:#2e3632;--grid:#232926;
+--accent:#6fb5b8;--core:#ec8a5f;--warn:#e88a70;--good:#a9c46a;--amber:#e0b04a;
+--d30:#6fa9d6;--d33:#76c08f;--d35:#bb93d6;--d46:#f0875a;--d47:#c4b04a;--d50:#e083b9;--dxx:#9aa6a1;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#141816;--panel:#1c211e;--fg:#e4e9e5;--muted:#9aa8a0;--line:#2e3632;--grid:#232926;
+--accent:#6fb5b8;--core:#ec8a5f;--warn:#e88a70;--good:#a9c46a;--amber:#e0b04a;
+--d30:#6fa9d6;--d33:#76c08f;--d35:#bb93d6;--d46:#f0875a;--d47:#c4b04a;--d50:#e083b9;--dxx:#9aa6a1;color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.5}
+.wrap{max-width:1200px;margin:0 auto;padding-block:24px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:16px}
+h1{font-family:var(--display);font-weight:650;font-size:2rem;margin:0;text-wrap:balance}
+h2{font-family:var(--display);font-weight:500;font-size:1.25rem;margin:0}
+.sub{color:var(--muted);margin:4px 0 0;font-size:.95rem}
+.msg{background:var(--panel);border:1px solid var(--warn);border-radius:6px;padding:10px 14px;color:var(--warn)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;min-width:0}
+.tile .n{font-family:var(--display);font-size:1.9rem;font-weight:500;line-height:1.1;font-variant-numeric:tabular-nums}
+.tile .l{color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;margin-top:4px}
+.tile.warn .n{color:var(--warn)}.tile.good .n{color:var(--good)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;display:grid;gap:10px;min-width:0;align-content:start}
+.panel header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px}
+.fresh{color:var(--muted);font-size:.8rem;font-family:var(--mono)}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.tablebox{overflow-x:auto}
+select,input[type=search],button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+button{cursor:pointer}button:disabled{opacity:.5;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+input[type=search]{flex:1;min-width:160px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.pill{display:inline-block;border-radius:999px;padding:1px 8px;font-size:.75rem;background:var(--grid);color:var(--muted)}
+.pill.warn{color:var(--warn)}.pill.good{color:var(--good)}.pill.amber{color:var(--amber)}
+ul.plain{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+ul.plain li{border-bottom:1px solid var(--grid);padding-bottom:6px}
+.t{font-weight:500}.m{color:var(--muted);font-size:.85rem}
+a{color:var(--accent)}
+svg.chart{width:100%;height:auto;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:.8rem;color:var(--muted)}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:middle}
+.report{font-size:.92rem;display:grid;gap:4px}
+.report h3{font-family:var(--display);font-weight:500;font-size:1.05rem;margin:10px 0 2px}
+.report ul{margin:0;padding-left:18px}
+.snip{font-size:.88rem}.snip mark{background:transparent;color:var(--core);font-weight:600}
+.empty{color:var(--muted);font-style:italic}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+<div class="wrap">
+  <div>
+    <h1>Knowledge views</h1>
+    <p class="sub" id="state">Reading the three archives through the DOI connector…</p>
+  </div>
+  <div class="msg" id="msg" hidden></div>
+
+  <section class="tiles" id="tiles" aria-label="Library and vault at a glance"></section>
+
+  <div class="grid2">
+    <section class="panel" aria-labelledby="h-proj">
+      <header><h2 id="h-proj">Projects</h2><span class="fresh" id="f-proj"></span></header>
+      <div class="row"><label for="proj">Project</label><select id="proj"><option value="">whole library</option></select></div>
+      <div class="tiles" id="projTiles"></div>
+      <div><div class="m" id="projTitle">Works without a reading note</div><ul class="plain" id="projList"></ul></div>
+      <div id="projNotes"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="h-fields">
+      <header><h2 id="h-fields">Fields and years</h2><span class="fresh" id="f-fields"></span></header>
+      <div class="m">ANZSRC codes from the <code>sub/</code> tags in Zotero; area is the number of works. Colour by division.</div>
+      <svg class="chart" id="treemap" viewBox="0 0 600 300" role="img" aria-label="Treemap of ANZSRC fields"></svg>
+      <div class="legend" id="legend"></div>
+      <div class="m">Works per year of publication.</div>
+      <svg class="chart" id="years" viewBox="0 0 600 160" role="img" aria-label="Works per year"></svg>
+    </section>
+
+    <section class="panel" aria-labelledby="h-corpus">
+      <header><h2 id="h-corpus">Search the corpus</h2><span class="fresh" id="f-corpus"></span></header>
+      <form class="row" id="qform">
+        <input type="search" id="q" placeholder="words, &quot;phrases&quot;, AND, OR, NOT" aria-label="Query">
+        <select id="scope" aria-label="Scope"><option value="all">everything</option><option value="notes">notes</option><option value="library">PDF pages</option><option value="annotations">highlights</option></select>
+        <label><input type="checkbox" id="semantic"> by meaning</label>
+        <button class="primary" type="submit" id="go">Search</button>
+      </form>
+      <div class="m" id="qmeta">Notes by section, PDF pages and highlights indexed from the snapshots. Nothing from the web.</div>
+      <ul class="plain" id="hits"></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="h-searches">
+      <header><h2 id="h-searches">Searches made</h2><span class="fresh" id="f-searches"></span></header>
+      <div class="m">Every <code>search_literature</code> and every map created, newest first, so a search is not repeated.</div>
+      <ul class="plain" id="searches"></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="h-weekly">
+      <header><h2 id="h-weekly">Weekly report</h2><span class="fresh" id="f-weekly"></span></header>
+      <div class="report" id="weekly"><span class="empty">Loading…</span></div>
+    </section>
+
+    <section class="panel" aria-labelledby="h-maps">
+      <header><h2 id="h-maps">Literature maps</h2><span class="fresh" id="f-maps"></span></header>
+      <div class="tablebox"><table><thead><tr><th>Map</th><th class="num">Seeds</th><th class="num">Works</th><th class="num">To read</th><th class="num">Read</th><th>Updated</th></tr></thead><tbody id="maps"></tbody></table></div>
+      <div class="m">Open a map on the <a href="https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT">Literature maps</a> page.</div>
+    </section>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script>
+const SERVER = "DOI";
+const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const store = { get(k){ try { return localStorage.getItem(k) } catch { return null } }, set(k,v){ try { localStorage.setItem(k,v) } catch {} } };
+let mcp = null, whole = null;
+
+function say(text){ const m = $('msg'); m.hidden = !text; m.textContent = text || '' }
+function explain(e){
+  const c = e && e.code;
+  if (c === 'server_not_connected' || c === 'selection_required') return `The ${SERVER} connector is not available in this view. Add or choose it in claude.ai Settings → Connectors.`;
+  if (c === 'needs_reauth') return `Reconnect the ${SERVER} connector in claude.ai Settings → Connectors.`;
+  if (c === 'not_in_manifest' || c === 'approval_required' || c === 'consent_required') return `This page needs your permission to use the ${SERVER} connector. Allow it from the page's permissions, then reload.`;
+  if (c === 'server_unavailable') return `The DOI server did not answer. Check that it is running, then reload.`;
+  if (c === 'tool_error') return `The DOI server reported an error: ${e.message}. If it says the tool is unknown, reload the ${SERVER} connector so it sees the new tools.`;
+  return `Could not reach the ${SERVER} connector (${c || 'unknown error'}).`;
+}
+function when(result, el){ const t = result?.cache?.storedAt; if (el) el.textContent = t ? `as of ${new Date(t).toLocaleString()}` : 'live' }
+const zlink = key => `zotero://select/library/items/${encodeURIComponent(key)}`;
+const authz = c => ['needs_reauth', 'server_not_connected', 'blocked_by_policy', 'approval_required', 'not_in_manifest'].includes(c);
+
+/* ---------- overview tiles ---------- */
+function tile(n, label, cls){ return `<div class="tile ${cls || ''}"><div class="n">${esc(n)}</div><div class="l">${esc(label)}</div></div>` }
+function renderOverview(c){
+  const items = c.items_total ?? c.items, withNote = c.with_note || 0;
+  const pct = items ? Math.round(100 * withNote / items) : 0;
+  $('tiles').innerHTML = [
+    tile(items, 'works in Zotero'), tile(c.notes_total ?? '–', 'notes in the vault'),
+    tile(`${pct}%`, 'works with a note', pct >= 50 ? 'good' : ''),
+    tile(c.without_pdf.length, 'without a PDF', c.without_pdf.length ? 'warn' : 'good'),
+    tile(c.unverified.length, 'not yet verified', c.unverified.length ? 'warn' : 'good'),
+    tile(c.notes_without_item.length + c.notes_with_missing_item.length, 'notes with no item', (c.notes_without_item.length + c.notes_with_missing_item.length) ? 'warn' : 'good')
+  ].join('');
+  const s = c.snapshots || {};
+  const parts = [];
+  if (s.library_snapshot) parts.push(`library snapshot ${s.library_snapshot.slice(0, 16).replace('T', ' ')}`);
+  if (s.notes_snapshot) parts.push(`notes snapshot ${s.notes_snapshot.slice(0, 16).replace('T', ' ')}`);
+  if (s.problems) parts.push('snapshot problem: ' + Object.values(s.problems).join('; '));
+  $('state').textContent = parts.length ? parts.join(' · ') : 'Snapshots missing: refresh them from the Literature maps page.';
+}
+
+/* ---------- projects ---------- */
+function renderProjectOptions(projects){
+  const sel = $('proj'), keep = store.get('kv-project') || '';
+  sel.innerHTML = '<option value="">whole library</option>' + Object.entries(projects || {}).map(([p, n]) => `<option value="${esc(p)}">${esc(p)} (${n})</option>`).join('');
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+function renderProject(c){
+  $('projTiles').innerHTML = [tile(c.items, 'works'), tile(c.with_note, 'with a note', c.with_note === c.items && c.items ? 'good' : ''),
+    tile(c.without_pdf.length, 'without PDF', c.without_pdf.length ? 'warn' : 'good'), tile(c.unverified.length, 'unverified', c.unverified.length ? 'warn' : 'good')].join('');
+  const list = (c.without_note || []).slice(0, 40);
+  $('projTitle').textContent = `Works without a reading note (${c.without_note.length})`;
+  $('projList').innerHTML = list.length ? list.map(w => `<li><span class="t">${esc(w.title || w.key)}</span> <span class="m">${esc(w.year || 'n.d.')}</span> · <a href="${zlink(w.key)}">Zotero</a>${w.pdf ? '' : ' <span class="pill warn">no PDF</span>'}${w.verified === 'match' ? ' <span class="pill good">verified</span>' : ''}</li>`).join('')
+    : '<li class="empty">Every work here has a note.</li>';
+  const orphans = (c.notes_without_item || []).map(p => `<li><span class="t">${esc(p.split('/').pop().replace(/\.md$/, ''))}</span> <span class="m">reference points to no Zotero item</span></li>`)
+    .concat((c.notes_with_missing_item || []).map(d => `<li><span class="t">${esc(d.note.split('/').pop().replace(/\.md$/, ''))}</span> <span class="m">item ${esc(d.zotero_key)} no longer in the library</span></li>`));
+  $('projNotes').innerHTML = orphans.length ? `<div class="m">Notes to repair (${orphans.length})</div><ul class="plain">${orphans.join('')}</ul>` : '';
+}
+async function loadProject(name){
+  if (!mcp) return;
+  try {
+    const r = await mcp.callTool(SERVER, 'coverage_report', name ? { project: name } : {});
+    when(r, $('f-proj'));
+    if (r.payload?.status === 'ok') renderProject(r.payload);
+  } catch (err) { say(explain(err)) }
+}
+
+/* ---------- fields treemap + years ---------- */
+const DIVISIONS = { '30': ['Agricultural, veterinary and food sciences', '--d30'], '33': ['Built environment and design', '--d33'], '35': ['Commerce, management, tourism', '--d35'],
+  '46': ['Information and computing sciences', '--d46'], '47': ['Language, communication and culture', '--d47'], '50': ['Philosophy and religious studies', '--d50'] };
+function division(code){ return code.slice(0, 2) }
+function colour(code){ const d = DIVISIONS[division(code)]; return css(d ? d[1] : '--dxx') }
+function renderTreemap(anzsrc){
+  const svg = d3.select('#treemap'); svg.selectAll('*').remove();
+  const entries = Object.entries(anzsrc || {});
+  if (!entries.length){ svg.append('text').attr('x', 12).attr('y', 24).attr('fill', css('--muted')).text('No sub/ tags in the library snapshot yet.'); $('legend').innerHTML = ''; return }
+  const root = d3.hierarchy({ children: entries.map(([code, n]) => ({ code, n })) }).sum(d => d.n).sort((a, b) => b.value - a.value);
+  d3.treemap().size([600, 300]).paddingInner(2)(root);
+  const g = svg.selectAll('g').data(root.leaves()).join('g').attr('transform', d => `translate(${d.x0},${d.y0})`);
+  g.append('rect').attr('width', d => Math.max(0, d.x1 - d.x0)).attr('height', d => Math.max(0, d.y1 - d.y0)).attr('fill', d => colour(d.data.code)).attr('opacity', .85).attr('rx', 2)
+    .append('title').text(d => `${d.data.code}: ${d.data.n} work(s)`);
+  g.filter(d => d.x1 - d.x0 > 70 && d.y1 - d.y0 > 26).append('text').attr('x', 6).attr('y', 16).attr('fill', css('--bg')).attr('font-size', 11).attr('font-family', css('--body'))
+    .text(d => { const label = d.data.code.replace(/^\d{6}-/, '').replace(/-/g, ' '); const max = Math.floor((d.x1 - d.x0 - 10) / 6.2); return label.length > max ? label.slice(0, Math.max(0, max - 1)) + '…' : label });
+  g.filter(d => d.x1 - d.x0 > 70 && d.y1 - d.y0 > 40).append('text').attr('x', 6).attr('y', 32).attr('fill', css('--bg')).attr('font-size', 11).attr('font-family', css('--mono')).text(d => d.data.n);
+  const seen = new Map(); for (const [code] of entries){ const d = division(code); if (!seen.has(d)) seen.set(d, DIVISIONS[d] ? DIVISIONS[d][0] : `division ${d}`) }
+  $('legend').innerHTML = [...seen].map(([d, name]) => `<span><span class="sw" style="background:${colour(d + '0000')}"></span>${esc(d)} ${esc(name)}</span>`).join('');
+}
+function renderYears(years){
+  const svg = d3.select('#years'); svg.selectAll('*').remove();
+  const data = Object.entries(years || {}).map(([y, n]) => ({ y: +y, n })).filter(d => d.y > 1500).sort((a, b) => a.y - b.y);
+  if (!data.length){ svg.append('text').attr('x', 12).attr('y', 24).attr('fill', css('--muted')).text('No years in the snapshot.'); return }
+  const W = 600, H = 160, m = { t: 8, r: 8, b: 26, l: 30 };
+  const x = d3.scaleBand().domain(data.map(d => d.y)).range([m.l, W - m.r]).padding(.15);
+  const y = d3.scaleLinear().domain([0, d3.max(data, d => d.n)]).nice().range([H - m.b, m.t]);
+  svg.append('g').selectAll('line').data(y.ticks(4)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', d => y(d)).attr('y2', d => y(d)).attr('stroke', css('--grid'));
+  svg.append('g').selectAll('rect').data(data).join('rect').attr('x', d => x(d.y)).attr('y', d => y(d.n)).attr('width', x.bandwidth()).attr('height', d => y(0) - y(d.n)).attr('fill', css('--accent'))
+    .append('title').text(d => `${d.y}: ${d.n}`);
+  const step = Math.max(1, Math.ceil(data.length / 12));
+  svg.append('g').selectAll('text').data(data.filter((d, i) => i % step === 0)).join('text').attr('x', d => x(d.y) + x.bandwidth() / 2).attr('y', H - 8).attr('text-anchor', 'middle').attr('font-size', 10).attr('fill', css('--muted')).attr('font-family', css('--mono')).text(d => d.y);
+  svg.append('g').selectAll('text').data(y.ticks(4)).join('text').attr('x', m.l - 4).attr('y', d => y(d) + 3).attr('text-anchor', 'end').attr('font-size', 10).attr('fill', css('--muted')).attr('font-family', css('--mono')).text(d => d);
+}
+
+/* ---------- corpus search ---------- */
+$('semantic').checked = store.get('kv-semantic') === '1';
+$('qform').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!mcp) return;
+  const q = $('q').value.trim(); if (!q) return;
+  store.set('kv-semantic', $('semantic').checked ? '1' : '0');
+  $('go').disabled = true; $('qmeta').textContent = 'Searching…'; $('hits').innerHTML = '';
+  try {
+    const r = await mcp.callTool(SERVER, 'search_everything', { query: q, scope: $('scope').value, limit: 30, semantic: $('semantic').checked }, { cache: false });
+    const p = r.payload || {};
+    if (p.status === 'semantic_unavailable'){ $('qmeta').textContent = `Search by meaning is not available on the server: ${p.detail}`; return }
+    const idx = p.index || {};
+    $('qmeta').textContent = `${p.returned} passage(s) · ${p.semantic ? 'by meaning' : 'by words'} · ${idx.sources ?? 0} source(s) indexed` + (p.semantic ? `, ${idx.pending_embeddings ?? 0} passage(s) not yet embedded` : '');
+    $('hits').innerHTML = (p.results || []).map(h => {
+      const where = h.scope === 'notes' ? `<span class="t">${esc(h.title)}</span> <span class="m">${esc(h.locator || '')}</span>`
+        : `<span class="t">${esc(h.title)}</span> <span class="m">${esc(h.locator || '')}</span> · <a href="${esc(h.open || zlink(h.zotero_key))}">open PDF</a>`;
+      const score = h.score != null ? ` <span class="pill">${h.score.toFixed(2)}</span>` : '';
+      return `<li>${where} <span class="pill">${esc(h.scope)}</span>${score}<div class="snip">${esc(h.snippet).replace(/\[([^\]]+)\]/g, '<mark>$1</mark>')}</div></li>`;
+    }).join('') || '<li class="empty">Nothing matched. Try other words, or the other language of the source.</li>';
+  } catch (err) { $('qmeta').textContent = explain(err) } finally { $('go').disabled = false }
+});
+
+/* ---------- searches, weekly, maps ---------- */
+function renderSearches(p){
+  const rows = (p.entries || []).map(e => {
+    if (e.kind === 'map_create') return `<li><span class="m">${esc(e.at.slice(0, 10))}</span> map <span class="t">${esc(e.map)}</span> created <span class="m">(${e.seeds || 0} seeds)</span></li>`;
+    const hits = Object.values(e.hits || {}).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0);
+    return `<li><span class="m">${esc(e.at.slice(0, 10))}</span> <span class="t">${esc(e.query)}</span> <span class="m">on ${esc((e.databases || []).join(', '))}</span> <span class="pill ${hits ? '' : 'amber'}">${hits} hit(s)</span>${e.errors ? ' <span class="pill warn">errors</span>' : ''}</li>`;
+  });
+  $('searches').innerHTML = rows.join('') || '<li class="empty">No searches recorded yet.</li>';
+}
+function md(text){
+  const out = []; let list = false;
+  for (const raw of (text || '').split('\n')){
+    const line = raw.replace(/\r$/, '');
+    const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/`(.+?)`/g, '<code>$1</code>').replace(/\[\[(.+?)\]\]/g, '<em>$1</em>').replace(/_(.+?)_/g, '<em>$1</em>').replace(/(https?:\/\/\S+|zotero:\/\/\S+)/g, '<a href="$1">$1</a>');
+    if (/^#{1,3}\s/.test(line)){ if (list){ out.push('</ul>'); list = false } out.push(`<h3>${inline(line.replace(/^#+\s/, ''))}</h3>`); continue }
+    const li = /^(\s*)-\s+(.*)$/.exec(line);
+    if (li){ if (!list){ out.push('<ul>'); list = true } out.push(`<li${li[1].length ? ' style="margin-left:1em"' : ''}>${inline(li[2])}</li>`); continue }
+    if (list){ out.push('</ul>'); list = false }
+    if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  if (list) out.push('</ul>');
+  return out.join('');
+}
+function renderWeekly(p){
+  if (p.status !== 'ok'){ $('weekly').innerHTML = `<span class="empty">${esc(p.detail || 'No report yet.')}</span>`; return }
+  $('weekly').innerHTML = md(p.markdown);
+}
+function renderMaps(p){
+  const rows = (p.maps || []).map(m => `<tr><td>${esc(m.name)}</td><td class="num">${m.seeds ?? ''}</td><td class="num">${m.works ?? ''}</td><td class="num">${m.to_read ?? ''}</td><td class="num">${m.read ?? ''}</td><td class="m">${esc((m.updated || '').slice(0, 10))}</td></tr>`);
+  $('maps').innerHTML = rows.join('') || '<tr><td colspan="6" class="empty">No maps yet.</td></tr>';
+}
+
+/* ---------- boot ---------- */
+function watch(tool, input, el, onData, section){
+  mcp.watchTool(SERVER, tool, input, ev => {
+    if (ev.type === 'error'){ if (authz(ev.error.code)) say(explain(ev.error)); else if (!section.dataset.ok) say(explain(ev.error)); return }
+    section.dataset.ok = '1'; when(ev.result, el);
+    const p = ev.result.payload;
+    if (p && typeof p === 'object') onData(p);
+  }, { refetchInterval: 300000 });
+}
+$('proj').addEventListener('change', () => { store.set('kv-project', $('proj').value); if ($('proj').value) loadProject($('proj').value); else if (whole) renderProject(whole) });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (whole){ renderTreemap(whole.anzsrc); renderYears(whole.years) } });
+renderTreemap({}); renderYears({});
+(async () => {
+  mcp = await claude.use('mcp');
+  if (!mcp){ $('state').textContent = 'This view cannot reach your connectors. Open the page in claude.ai while signed in.'; return }
+  watch('coverage_report', {}, $('f-fields'), p => {
+    if (p.status !== 'ok'){ $('state').textContent = p.detail || 'Library snapshot missing: refresh it from the Literature maps page.'; return }
+    whole = p; say(''); renderOverview(p); renderProjectOptions(p.projects); renderTreemap(p.anzsrc); renderYears(p.years);
+    if ($('proj').value) loadProject($('proj').value); else { renderProject(p); when({}, $('f-proj')) }
+  }, $('tiles'));
+  watch('search_log', { limit: 40 }, $('f-searches'), renderSearches, $('searches'));
+  watch('weekly_report', {}, $('f-weekly'), renderWeekly, $('weekly'));
+  watch('map_list', {}, $('f-maps'), renderMaps, $('maps'));
+})();
+</script>

@@ -677,6 +677,9 @@ def _graph_run(monkeypatch, s2_status=200, s2_body=None, **kwargs):
 
     async def handle(request):
         requests.append(request)
+        if request.url.host == "api.opencitations.net":
+            count = "40" if "citation-count" in request.url.path else "55"
+            return httpx.Response(200, json=[{"count": count}])
         return httpx.Response(s2_status, json=s2_body if s2_body is not None else
                               [{"referenceCount": 60, "citationCount": 12}])
 
@@ -692,16 +695,22 @@ def _graph_run(monkeypatch, s2_status=200, s2_body=None, **kwargs):
 
 def test_citation_graph_reports_coverage_gap(monkeypatch):
     result, requests = _graph_run(monkeypatch)
-    assert len(requests) == 1 and requests[0].url.path.endswith("/paper/batch")
+    s2 = [r for r in requests if r.url.host == "api.semanticscholar.org"]
+    oc = [r for r in requests if r.url.host == "api.opencitations.net"]
+    assert len(s2) == 1 and s2[0].url.path.endswith("/paper/batch") and len(oc) == 2
     row = result["coverage_check"][0]
     assert row["openalex_references"] == 1 and row["semantic_scholar_references"] == 60
     assert row["references_verdict"] == "openalex_lower"
     assert row["citations_verdict"] == "concordant"
+    # OpenCitations: the one count independent of OpenAlex
+    assert row["opencitations_cited_by"] == 40 and row["opencitations_references"] == 55
+    assert row["opencitations_citations_verdict"] == "openalex_lower" and row["opencitations_references_verdict"] == "openalex_lower"
 
 
 def test_citation_graph_survives_semantic_scholar_failure(monkeypatch):
     result, _ = _graph_run(monkeypatch, s2_status=500, s2_body={})
-    assert result["status"] == "ok" and result["coverage_check"] == []
+    # Semantic Scholar down: the OpenCitations row still stands on its own
+    assert result["status"] == "ok" and [set(r) >= {"opencitations_cited_by", "openalex_cited_by"} for r in result["coverage_check"]] == [True]
     assert any("semantic_scholar" in e for e in result["source_errors"])
 
 
