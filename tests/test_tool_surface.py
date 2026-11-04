@@ -70,7 +70,9 @@ def test_wheel_includes_every_module_server_imports():
     with open("pyproject.toml", "rb") as f:
         included = set(tomllib.load(f)["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"])
     src = open("server.py", encoding="utf-8").read()
-    local = {m + ".py" for m in re.findall(r"^\s*import (maps|knowledge)\b", src, re.M)}
+    import os
+    here = {f[:-3] for f in os.listdir(".") if f.endswith(".py") and f != "server.py"}
+    local = {m + ".py" for m in re.findall(r"^\s*import (\w+)\b", src, re.M) if m in here}
     assert local and local <= included
 
 

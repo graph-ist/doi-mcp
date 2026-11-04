@@ -13,6 +13,7 @@ Strumenti rimossi o fusi:
 - `map_check_retractions` → `check_retractions(map=...)`.
 
 Novità:
+- `patent_search` e `patent_get` (EPO Open Patent Services), registrati solo con `EPO_OPS_KEY` e `EPO_OPS_SECRET`. La letteratura citata da un brevetto porta `doi` solo se stampato nella citazione; un `doi_candidate` Crossref segue le regole di `find_doi` e va confermato con `verify_doi`.
 - Lo strato gateway (`openalex_*`, `semantic_scholar*`, `google_books`, `orcid`) si registra solo con `ENABLE_GATEWAY=true`.
 - `check_citations`: controllo incrociato tra citazioni nel testo e bibliografia APA.
 - `dnb` (Deutsche Nationalbibliothek, SRU) tra i database di `search_literature`: monografie e traduzioni in tedesco, senza abstract. PhilArchive espone solo OAI-PMH, che non permette la ricerca.

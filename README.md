@@ -78,6 +78,7 @@ Il server ha due strati. Gli strumenti di verifica e ricerca (da `find_doi` a `p
 | `map_rename`, `map_remove`, `map_delete` | Rinomina una mappa o ne cambia la descrizione; toglie singoli lavori; elimina una mappa intera (serve ripetere il nome esatto in `confirm_name`). | Calcolo locale |
 | `map_prune`, `map_refresh` | Riduce una mappa (seed, lavori con uno stato e i primi N candidati più collegati); riscarica da OpenAlex citazioni, momentum, topic e ritrattazioni di tutti i lavori; con `new_citing` aggiunge prima i nuovi lavori che citano i seed dall'ultimo controllo (controllo su richiesta, non un avviso). Entrambi fondono i doppioni (stesso titolo e primo autore, anni vicini). | OpenAlex |
 | `map_export` | La mappa come lista di lettura in Markdown (seed, poi lavori per stato, con link DOI, Zotero e note), da salvare in Obsidian fuori dallo schema, es. `Maps/<nome>.md`. | Calcolo locale |
+| `patent_search`, `patent_get` | Brevetti da EPO Open Patent Services (circa 140 milioni di documenti): ricerca a parole libere su titolo e abstract o in CQL nativo; per un brevetto dati bibliografici, brevetti citati, brevetti citanti e la letteratura scientifica citata nel rapporto di ricerca. Un DOI compare solo se stampato nella citazione; per le prime `resolve_literature` citazioni senza DOI (20 di default) una ricerca Crossref con le regole di `find_doi` può proporre un `doi_candidate` con punteggio, da confermare con `verify_doi`. Registrati solo se `EPO_OPS_KEY` e `EPO_OPS_SECRET` sono impostate. | EPO OPS 3.2, Crossref |
 | `paper_table` | Righe di dettaglio per una lista di DOI, id OpenAlex o id arXiv (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), arXiv come riserva, Semantic Scholar (una richiesta batch) |
 | `semantic_scholar` | Academic Graph e Recommendations in uno strumento con 16 azioni: paper (dettagli, autori, citazioni, riferimenti, batch, ricerca per rilevanza, bulk booleana, match, autocompletamento), autori (dettagli, pubblicazioni, ricerca, batch), estratti testuali, raccomandazioni da un paper (`recommend_single`) o da liste di esempi positivi e negativi (`recommend_multi`). Le azioni che restituiscono liste hanno `limit` 20 di default. | Semantic Scholar Academic Graph e Recommendations |
 | `semantic_scholar_datasets` | Release e link firmati dei dataset (`releases`, `release`, `files`, `diffs`). Non scarica i file. | Semantic Scholar Datasets |
@@ -245,6 +246,7 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 - `verify_doi` non ha una fonte di ritrattazioni per i DOI DataCite: `is_retracted` è `null` (sconosciuto), mai `false`. I DOI di altre agenzie (mEDRA, JaLC...) risultano registrati ma non verificabili nei metadati.
 - Il controllo di copertura di `citation_graph` confronta solo i conteggi dei seed, non le liste: OpenAlex e Semantic Scholar derivano in parte da Crossref, quindi la concordanza non è una prova indipendente.
 - DBLP risponde con una sfida proof-of-work (Anubis) e non è integrato.
+- EPO OPS applica un fair use oltre alla quota settimanale: un 403 può essere un rallentamento temporaneo. Il trasporto limita OPS a una richiesta al secondo. La sintassi CQL (`ta all "…"`, `pa=`, `ic=`, `ct=`) è passata al servizio così com'è; la ricerca a parole libere copre solo titolo e abstract.
 - `format_apa` riproduce i metadati come li ha depositati l'editore e non li verifica: con un `mismatch` di `verify_doi` il riferimento va composto dai valori verificati. `title_case_suspected` è un'euristica sul numero di parole capitalizzate (i nomi propri la falsano e sotto tre parole utili non giudica); nessuna conversione automatica del titolo.
 
 ## Storia e decisioni
@@ -338,7 +340,7 @@ uv export --no-dev --no-emit-project --format requirements-txt > requirements.lo
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock.txt
 ```
 
-Per aggiornare: copiare `server.py`, `maps.py` e `knowledge.py` (e, se cambiano le dipendenze, rifare l'installazione), poi riavviare il servizio. Dopo modifiche a strumenti o prompt, in Claude web il connettore va disattivato e riattivato perché rilegga l'elenco.
+Per aggiornare: copiare `server.py`, `maps.py`, `knowledge.py` e `patents.py` (e, se cambiano le dipendenze, rifare l'installazione), poi riavviare il servizio. Dopo modifiche a strumenti o prompt, in Claude web il connettore va disattivato e riattivato perché rilegga l'elenco.
 
 ## Variabili d'ambiente
 
@@ -352,6 +354,7 @@ Per aggiornare: copiare `server.py`, `maps.py` e `knowledge.py` (e, se cambiano 
 | `SEMANTIC_SCHOLAR_API_KEY` | Chiave inviata nell'header `x-api-key`; resta il limite cumulativo di 1 richiesta/s su tutti gli endpoint |
 | `GOOGLE_BOOKS_API_KEY` | Facoltativa: chiave inviata nell'header `x-goog-api-key` (mai nell'URL) per aumentare la quota di Google Books |
 | `ORCID_CLIENT_ID`, `ORCID_CLIENT_SECRET` | Facoltative, da impostare insieme: il server ottiene un token `/read-public` da `orcid.org/oauth/token`, lo tiene in memoria e lo invia come Bearer all'API pubblica. Il secret non viene inviato ad altri host né incluso negli errori |
+| `EPO_OPS_KEY`, `EPO_OPS_SECRET` | Credenziali OPS (developers.epo.org, app con «OPS v3.2»; gratuito fino a 4 GB a settimana). Senza di esse `patent_search` e `patent_get` non vengono registrati. Il token OAuth resta in memoria |
 | `ENABLE_GATEWAY` | Registra lo strato gateway (OpenAlex, Semantic Scholar, Google Books, ORCID) solo se impostata a `true`; default disattivato |
 | `KNOWLEDGE_DIR` | Cartella delle istantanee `library.json` e `notes.json` (default `/var/lib/knowledge`) |
 | `MCP_TRANSPORT` | `stdio` (default) o `http` |

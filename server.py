@@ -214,9 +214,11 @@ class _PoliteTransport(httpx.AsyncHTTPTransport):
     """Caps concurrency per host; intervals cover all endpoints, including retries."""
     # Crossref: polite pool allows a few concurrent requests; beyond that it answers 429
     CONCURRENCY = {"api.semanticscholar.org": 1, "export.arxiv.org": 1,
-                   "api.openalex.org": 1, "user.openalex.org": 1, "api.crossref.org": 2, "archive.org": 2}
+                   "api.openalex.org": 1, "user.openalex.org": 1, "api.crossref.org": 2, "archive.org": 2,
+                   "ops.epo.org": 1}
     MIN_INTERVAL = {"api.semanticscholar.org": 1.0, "export.arxiv.org": 3.0,
-                    "api.openalex.org": 1.0, "user.openalex.org": 1.0, "api.crossref.org": 0.12}
+                    "api.openalex.org": 1.0, "user.openalex.org": 1.0, "api.crossref.org": 0.12,
+                    "ops.epo.org": 1.0}
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -1571,25 +1573,6 @@ def _ia_access(doc: dict) -> str:
     return "print_disabled_only" if status == "is_printdisabled" else "borrowable"
 
 
-# Da reinserire in doi-mcp/server.py prima di internet_archive
-
-_REF_STOP = {"the", "and", "of", "a", "an", "in", "on", "for", "to", "its", "la", "le", "les", "di", "il",
-             "der", "die", "das", "und", "des", "du", "de", "et", "e"}
-
-
-def _ascii(s: str | None) -> str:
-    return re.sub(r"[^a-z0-9 ]", " ", unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower())
-
-
-def _title_words(s: str | None) -> list[str]:
-    return [w for w in _ascii(s).split() if w not in _REF_STOP and len(w) > 1]
-
-
-
-def _title_match(want: list[str], title: str | None) -> bool:
-    got, w = set(_title_words(title)), set(want)
-    return bool(got) and len(w & got) / len(got) >= 0.8 and len(w & got) / len(w) >= 0.6
-
 # The patent tools exist only when the EPO OPS keys are configured: without them they could
 # only fail, and each tool definition costs context in every conversation.
 EPO_CONFIGURED = bool(os.environ.get("EPO_OPS_KEY") and os.environ.get("EPO_OPS_SECRET"))
@@ -1607,7 +1590,9 @@ def _patent_error(e: Exception) -> dict:
     if isinstance(e, patents.NotConfigured):
         return {"status": "not_configured", "detail": str(e)}
     if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 403:
-        return {"status": "error", "detail": "EPO OPS refused the request (403): weekly quota used or app not enabled for OPS"}
+        return {"status": "error", "http_status": 403,
+                "detail": "EPO OPS refused the request: fair-use throttling (retry in a minute), "
+                          "weekly quota used, or app not enabled for OPS v3.2"}
     return {"status": "error", "detail": _err("EPO OPS", e)}
 
 
@@ -1619,11 +1604,14 @@ async def patent_search(query: str, limit: int = 25, page: int = 1) -> dict:
     (inventor). Returns number, title, applicants, dates, IPC classes, a short abstract and how
     many scientific works each cites. Use patent_get for the cited literature."""
     import patents
+    if not query.strip():
+        raise ValueError("query must not be empty")
     limit = max(1, min(int(limit), 100))
     start = (max(1, int(page)) - 1) * limit + 1
+    q = patents.cql(query)
     try:
         root = await patents.get(_http(), "published-data/search/biblio",
-                                 {"q": patents.cql(query), "Range": f"{start}-{start + limit - 1}"})
+                                 {"q": q, "Range": f"{start}-{start + limit - 1}"})
     except Exception as e:
         return _patent_error(e)
     docs, seen = [], set()
@@ -1631,21 +1619,22 @@ async def patent_search(query: str, limit: int = 25, page: int = 1) -> dict:
         if d["number"] not in seen:
             seen.add(d["number"])
             docs.append(_patent_brief(d))
-    return {"status": "ok", "query": patents.cql(query), "total": patents.total(root), "page": page, "patents": docs}
+    return {"status": "ok", "query": q, "total": patents.total(root), "page": page, "patents": docs}
 
 
 @_patent_tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def patent_get(number: str, resolve_literature: bool = True, citing: bool = True) -> dict:
+async def patent_get(number: str, resolve_literature: int = 20, citing: bool = True) -> dict:
     """One patent by publication number (EP1000000, US2019123456, WO2020123456): bibliographic
-    data, the patents it cites and the scientific literature it cites (from the search report),
-    each literature citation resolved to a DOI when possible (DOI in the text, else Crossref title
-    match, free). citing=True adds the patents that cite it (up to 25, with the total)."""
+    data, the patents it cites and the scientific literature it cites (from the search report).
+    A literature citation carries 'doi' only when the DOI is printed in the citation. For the
+    first resolve_literature citations without one (0 disables; each costs a Crossref call),
+    a Crossref lookup with find_doi's acceptance rules may add 'doi_candidate' with its title
+    score: a candidate to confirm with verify_doi, not a verified DOI.
+    citing=True adds the patents that cite it (up to 25, with the total)."""
     import patents
+    num = patents.number(number)
     try:
-        num = patents.number(number)
         root = await patents.get(_http(), f"published-data/publication/epodoc/{num}/biblio")
-    except ValueError as e:
-        return {"status": "error", "detail": str(e)}
     except Exception as e:
         return _patent_error(e)
     docs = patents.documents(root)
@@ -1658,24 +1647,32 @@ async def patent_get(number: str, resolve_literature: bool = True, citing: bool 
         have = {x["text"] for x in p["cites_literature"]}
         p["cites_literature"] += [x for x in d["cites_literature"] if x["text"] not in have]
         p["abstract"] = p["abstract"] or d["abstract"]
-    lit = []
-    for x in p["cites_literature"][:60]:
+    lit, lookups = [], 0
+    for x in p["cites_literature"]:
         f = patents.parse_npl(x["text"])
-        row = {"text": x["text"], "phase": x["phase"], **f, "resolved_by": "doi in text" if f["doi"] else None}
-        if not f["doi"] and f["title"] and resolve_literature:
+        row = {"text": x["text"], "phase": x["phase"], **f, "doi_candidate": None}
+        if not f["doi"] and f["title"] and lookups < max(0, int(resolve_literature)):
+            lookups += 1
             try:
-                want = _title_words(f["title"])
-                for cand in await _crossref(_http(), f["title"], f["first_author"]):
-                    if _title_match(want, cand.get("title")):
-                        row.update(doi=cand["doi"], resolved_by="crossref title", matched_title=cand["title"])
-                        break
-            except httpx.HTTPError:
-                row["resolved_by"] = "crossref unreachable"
+                cands = [c for c in await _crossref(_http(), f["title"], f["first_author"])
+                         if c and not _is_derivative(c, f["title"])]
+            except httpx.HTTPError as e:
+                row["lookup_error"] = _err("crossref", e)
+                cands = []
+            best = max(((_assess(c, f["title"], f["first_author"], f["year"]), c) for c in cands),
+                       key=lambda ac: (_eligible(ac[0]), ac[0]["score"]), default=None)
+            if best and _eligible(best[0]):
+                row["doi_candidate"] = {"doi": best[1]["doi"], "title": best[1]["title"],
+                                        "year": best[1]["year"], "title_score": best[0]["score"],
+                                        "author_ok": best[0]["author_ok"], "year_ok": best[0]["year_ok"]}
         lit.append(row)
     out = {"status": "ok", **{k: p[k] for k in ("number", "kind", "family_id", "title", "applicants", "inventors",
                                                 "published", "priority", "ipc", "abstract", "cites_patents")},
            "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{p['number']}",
-           "cites_literature": lit, "literature_with_doi": sum(1 for r in lit if r["doi"])}
+           "cites_literature": lit, "literature_with_doi": sum(1 for r in lit if r["doi"]),
+           "literature_with_candidate": sum(1 for r in lit if r["doi_candidate"]),
+           "note": "doi comes from the citation text; doi_candidate is a Crossref match under find_doi's "
+                   "rules and needs verify_doi before being cited"}
     if citing:
         try:
             croot = await patents.get(_http(), "published-data/search/biblio", {"q": f"ct={num}", "Range": "1-25"})

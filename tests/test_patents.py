@@ -60,14 +60,43 @@ def test_patent_get_resolves_literature(monkeypatch):
         return ET.fromstring(XML)
 
     async def fake_crossref(c, title, author):
-        return [{"doi": "10.1145/2148131.2148148", "title": "FoldMe: interacting with double-sided foldable displays"}]
+        return [s._cand("crossref", "10.1145/2148131.2148148",
+                        "FoldMe: interacting with double-sided foldable displays",
+                        ["Khalilbeigi", "Lissermann"], 2012),
+                s._cand("crossref", "10.1145/9999", "FoldMe: a poster", ["Rossi"], 2012)]
 
     monkeypatch.setattr(patents, "get", fake_get)
     monkeypatch.setattr(s, "_crossref", fake_crossref)
     out = asyncio.run(s.patent_get("EP3500000"))
-    assert out["status"] == "ok" and out["literature_with_doi"] == 2
-    assert [r["resolved_by"] for r in out["cites_literature"]] == ["doi in text", "crossref title"]
+    assert out["status"] == "ok" and out["literature_with_doi"] == 1 and out["literature_with_candidate"] == 1
+    first, second = out["cites_literature"]
+    assert first["doi"] == "10.1145/1449715.1449754" and first["doi_candidate"] is None
+    assert second["doi"] is None and second["doi_candidate"]["doi"] == "10.1145/2148131.2148148"
+    assert second["doi_candidate"]["author_ok"] is True and second["doi_candidate"]["title_score"] >= s.TITLE_THRESHOLD
     assert out["cited_by_total"] == 2 and calls[1][1]["q"] == "ct=EP3500000"
+
+
+def test_patent_get_rejects_weak_candidates_and_respects_budget(monkeypatch):
+    calls = []
+
+    async def fake_get(c, path, params=None):
+        return ET.fromstring(XML)
+
+    async def fake_crossref(c, title, author):
+        calls.append(title)
+        return [s._cand("crossref", "10.1145/1", "FoldMe: interacting with foldable displays and more things", ["Verdi"], 2012)]
+
+    monkeypatch.setattr(patents, "get", fake_get)
+    monkeypatch.setattr(s, "_crossref", fake_crossref)
+    out = asyncio.run(s.patent_get("EP3500000", citing=False))
+    assert out["cites_literature"][1]["doi_candidate"] is None and len(calls) == 1
+    out = asyncio.run(s.patent_get("EP3500000", resolve_literature=0, citing=False))
+    assert len(calls) == 1 and "cited_by" not in out
+
+
+def test_patent_get_invalid_number_raises_for_the_wrapper():
+    with pytest.raises(ValueError):
+        asyncio.run(s.patent_get("foldable"))
 
 
 def test_not_configured(monkeypatch):

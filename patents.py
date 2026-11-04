@@ -30,7 +30,7 @@ async def _access_token(c: httpx.AsyncClient) -> str:
     if _token["value"] and time.time() < _token["until"]:
         return _token["value"]
     if not configured():
-        raise NotConfigured("EPO OPS credentials missing: set EPO_OPS_KEY and EPO_OPS_SECRET in /etc/doi-mcp/env")
+        raise NotConfigured("EPO OPS credentials missing: set EPO_OPS_KEY and EPO_OPS_SECRET in the server environment")
     basic = base64.b64encode(f"{KEY}:{SECRET}".encode()).decode()
     r = await c.post(f"{BASE}/auth/accesstoken", data={"grant_type": "client_credentials"},
                      headers={"Authorization": f"Basic {basic}"})
