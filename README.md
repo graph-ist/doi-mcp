@@ -247,6 +247,10 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 - DBLP risponde con una sfida proof-of-work (Anubis) e non è integrato.
 - `format_apa` riproduce i metadati come li ha depositati l'editore e non li verifica: con un `mismatch` di `verify_doi` il riferimento va composto dai valori verificati. `title_case_suspected` è un'euristica sul numero di parole capitalizzate (i nomi propri la falsano e sotto tre parole utili non giudica); nessuna conversione automatica del titolo.
 
+## Storia e decisioni
+
+`CHANGELOG.md` elenca le modifiche visibili ai client. `docs/AUDIT-2026-11.md` documenta l'audit di progettazione dei tool, gli interventi della versione 0.4.0, i bug trovati e i passi consigliati.
+
 ## Installazione
 
 Richiede Python 3.10+ e [uv](https://docs.astral.sh/uv/).
