@@ -48,7 +48,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 INSTRUCTIONS = (
@@ -1663,6 +1663,75 @@ async def map_add_patents(map: str, numbers: list[str], as_seed: bool = False) -
                                "resolved": len(found), "unresolved": len(unresolved), "cited_by_total": p.get("cited_by_total"),
                                "url": p["url"]}
     return out
+
+
+CONTRAST_RE = re.compile(
+    r"\b(however|in contrast|contrary|contradict\w*|fail(?:s|ed)? to|does not|do not|did not|cannot|"
+    r"limitation|limited|critic\w*|challeng\w*|question\w*|disput\w*|overlook\w*|neglect\w*|unlike|"
+    r"whereas|problematic|shortcoming|insufficient|inadequate|misleading|we argue against|disagree\w*|"
+    r"tuttavia|al contrario|contraddi\w*|non riesce|limite|critic\w*|jedoch|im gegensatz|widerspr\w*|kritik\w*)\b", re.I)
+
+
+def _contrasting(contexts: list[str]) -> bool:
+    """Heuristic: the sentences around the citation carry a marker of contrast or critique. A
+    candidate to read, not a verdict."""
+    return any(CONTRAST_RE.search(c or "") for c in contexts)
+
+
+@_tool()
+async def map_intents(map: str, works: list[str] | None = None, max_works: int = 20) -> dict:
+    """Why works in a map cite each other, from Semantic Scholar: for each selected work (the
+    seeds by default, or the given ids/DOIs, up to max_works) the citation intents on its
+    incoming and outgoing citations ('background', 'methodology', 'result'), whether the citation
+    is influential, and the sentences around it. Edges whose sentences carry markers of contrast
+    or critique are flagged 'contrasting': candidates for the Objections of a thesis note, to be
+    read in the text before use. Stored with the map; map_get returns them as 'edge_intents'
+    keyed 'citing->cited'. One request per work and direction (Semantic Scholar allows one per
+    second): twenty works take about a minute."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    nodes = maps.nodes(db, m["id"])
+    by_doi = {n["doi"]: k for k, n in nodes.items() if n.get("doi")}
+    if works:
+        chosen = [w for w in _resolve_ids(nodes, works) if w in nodes]
+    else:
+        chosen = [k for k, n in nodes.items() if n["role"] == "seed"]
+    chosen = [k for k in chosen if nodes[k].get("doi")][:max(1, min(int(max_works), 50))]
+    if not chosen:
+        return {"status": "invalid_input", "detail": "no selected work has a DOI (Semantic Scholar needs one)"}
+    rows, errors, fetched = [], [], 0
+    fields = "intents,isInfluential,contexts,{side}.externalIds"
+    for k in chosen:
+        doi = nodes[k]["doi"]
+        for direction, side in (("citations", "citingPaper"), ("references", "citedPaper")):
+            r = await _s2_api(f"graph/v1/paper/DOI:{_doi_path(doi)}/{direction}",
+                              {"fields": fields.format(side=side), "limit": 1000})
+            fetched += 1
+            if r.get("status") != "ok":
+                errors.append(f"{k} {direction}: {r.get('detail') or r.get('http_status')}")
+                continue
+            for x in (r.get("data") or {}).get("data") or []:
+                other_doi = _clean_doi(((x.get(side) or {}).get("externalIds") or {}).get("DOI"))
+                other = by_doi.get(other_doi) if other_doi else None
+                if not other or other == k:
+                    continue
+                citing, cited = (other, k) if direction == "citations" else (k, other)
+                contexts = [c for c in (x.get("contexts") or []) if c][:5]
+                rows.append({"citing": citing, "cited": cited, "intents": x.get("intents") or [],
+                             "influential": bool(x.get("isInfluential")), "contexts": contexts,
+                             "contrasting": _contrasting(contexts)})
+    maps.save_intents(db, m["id"], rows)
+    maps.touch(db, m["id"])
+    contrasting = [{"citing": r["citing"], "cited": r["cited"], "context": (r["contexts"] or [""])[0][:300]}
+                   for r in rows if r["contrasting"]]
+    return {"status": "ok", "map": m["name"], "works": chosen, "requests": fetched, "edges_annotated": len(rows),
+            "influential": sum(1 for r in rows if r["influential"]), "contrasting": contrasting,
+            "source_errors": errors,
+            "note": "intents and influence from Semantic Scholar; 'contrasting' is a wording heuristic on the "
+                    "citation sentences, to be checked on the text"}
 
 
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -3486,7 +3555,8 @@ async def map_get(map: str, states: list[MapState] | None = None, min_cocitation
     return {"status": "ok", "map": dict(m), "works": works, "snapshots": _knowledge().status(),
             "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
             "coupling": [p for p in coupling if inside(p)],
-            "patent_edges": [e for e in _patent_edges(nodes) if inside(e)]}
+            "patent_edges": [e for e in _patent_edges(nodes) if inside(e)],
+            "edge_intents": {k: v for k, v in maps.intents(db, m["id"]).items() if inside(k.split("->"))}}
 
 
 def _resolve_ids(nodes: dict, ids: list[str]) -> list[str]:
@@ -3733,9 +3803,17 @@ def _corpus_db():
     return corpus, db
 
 
+SEMANTIC_EMBEDDER = None  # tests inject an embedder here; otherwise semantic.load_embedder()
+
+
+def _embedder():
+    import semantic
+    return SEMANTIC_EMBEDDER or semantic.load_embedder()
+
+
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def search_everything(query: str, scope: CorpusScope = "all", limit: int = 20,
-                            zotero_key: str | None = None) -> dict:
+                            zotero_key: str | None = None, semantic: bool = False) -> dict:
     """Search the user's own corpus, not the web: Obsidian notes (by section), the page texts of
     the PDFs and EPUBs in Zotero, and their highlights and comments. Results are passages with
     where they come from: a note path and heading, or a Zotero key with the page and a
@@ -3744,16 +3822,34 @@ async def search_everything(query: str, scope: CorpusScope = "all", limit: int =
     search again in German or Italian for sources in those languages. zotero_key restricts to
     one item. The index follows the snapshot files written by the other two servers
     (notes_text.json, fulltext/KEY.json): an item whose PDF was never indexed with the Zotero
-    MCP's index_fulltext is not searched; the log says how many sources are indexed."""
+    MCP's index_fulltext is not searched; the log says how many sources are indexed.
+    semantic=True searches by meaning instead (local multilingual embeddings: a query in one
+    language finds passages in another; 'score' is the cosine similarity); it needs the model
+    on the server (status 'semantic_unavailable' says what is missing) and only passages
+    already embedded are reachable ('index.pending_embeddings')."""
     limit = max(1, min(int(limit), 100))
     corpus, db = _corpus_db()
     try:
-        hits = await asyncio.to_thread(corpus.search, db, query, scope, limit, zotero_key)
+        if semantic:
+            import semantic as sem
+            emb = _embedder()
+            if emb is None:
+                return {"status": "semantic_unavailable", "detail": sem.available()[1],
+                        "hint": "lexical search still works: call again with semantic=false"}
+            progress = await asyncio.to_thread(corpus.embed_pending, db, emb, 5.0)
+            hits = await asyncio.to_thread(corpus.semantic_search, db, emb, query, scope, limit, zotero_key)
+        else:
+            progress = None
+            hits = await asyncio.to_thread(corpus.search, db, query, scope, limit, zotero_key)
         st = corpus.stats(db)
     finally:
         db.close()
-    return {"status": "ok", "query": query, "scope": scope, "results": hits, "returned": len(hits),
-            "index": st, "note": "lexical index over notes, PDF pages and annotations; nothing from the web"}
+    out = {"status": "ok", "query": query, "scope": scope, "semantic": semantic, "results": hits, "returned": len(hits),
+           "index": st, "note": ("passages by meaning (local embeddings); passages not yet embedded are not reachable"
+                                 if semantic else "lexical index over notes, PDF pages and annotations; nothing from the web")}
+    if progress:
+        out["embedding_progress"] = progress
+    return out
 
 
 _CITE_GROUP = re.compile(r"\[([^\[\]]*@[^\[\]]+)\]")
@@ -3971,6 +4067,9 @@ def _status() -> dict:
         cdb = corpus.connect()
         out["corpus"] = corpus.stats(cdb)
         cdb.close()
+        import semantic
+        ok, why = semantic.available()
+        out["semantic"] = {"available": ok, "detail": why, "model_dir": semantic.MODEL_DIR}
     except Exception as e:  # noqa: BLE001
         out["corpus"] = f"error: {e}"
     try:

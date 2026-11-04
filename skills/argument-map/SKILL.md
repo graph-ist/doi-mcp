@@ -8,7 +8,7 @@ description: Build or update a thesis note, the hub that records who supports a 
 Servers: Obsidian MCP (prompt `map_argument`; `query_notes`, `search_notes`, `backlinks`,
 `similar_notes`, `read_note`, `write_note`, `patch_frontmatter`, `append_note`,
 `refresh_notes_snapshot`), Zotero MCP (`get_fulltext`, `check_claims`, `get_annotations`),
-DOI MCP (`search_everything`, `search_literature`, `citation_graph`).
+DOI MCP (`search_everything`, `map_intents`, `search_literature`, `citation_graph`).
 
 The Obsidian prompt `map_argument` holds the note's form (`kind: thesis`; Position,
 Supporters, Objections, Replies, My Observations, Open Questions, To Verify). This skill is
@@ -36,9 +36,15 @@ the method around it.
    say.
 3. **Check.** For an entry whose note gives no page, `get_fulltext(key, pages=…)` on the item
    in its reference, or `check_claims` for the batch; what is not found goes to To Verify.
-4. **Widen** only on request: `search_literature` or `citation_graph` for positions the vault
+4. **From the graph.** If a literature map covers the topic, `map_intents(map)` on its seeds:
+   edges flagged `contrasting` (a citing work whose citation sentences carry contrast or
+   critique) are candidates for Objections, and `influential` ones for Supporters; each is
+   read in the text (`get_fulltext`) before it becomes an entry, because the flag is a
+   wording heuristic. `search_everything(…, semantic=true)` finds the passages across
+   languages once the corpus is embedded.
+5. **Widen** only on request: `search_literature` or `citation_graph` for positions the vault
    does not hold yet; those become reading candidates (literature-map skill), not entries.
-5. **Write.** Show the note; `write_note` or `patch_frontmatter` / `append_note` to the right
+6. **Write.** Show the note; `write_note` or `patch_frontmatter` / `append_note` to the right
    section; `refresh_notes_snapshot`.
 
 ## When to stop and ask

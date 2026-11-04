@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS nodes (
 -- references read from PDFs (books, humanities) resolved to OpenAlex works; work_id '' = not found
 CREATE TABLE IF NOT EXISTS ref_cache (
   key TEXT PRIMARY KEY, work_id TEXT NOT NULL, checked TEXT NOT NULL);
+-- why one work cites another, from Semantic Scholar (map_intents): intents, influence, the
+-- sentences around the citation, and whether those sentences read as contrasting (heuristic)
+CREATE TABLE IF NOT EXISTS edge_intents (
+  map_id INTEGER NOT NULL, citing TEXT NOT NULL, cited TEXT NOT NULL, intents TEXT NOT NULL,
+  influential INTEGER NOT NULL DEFAULT 0, contexts TEXT NOT NULL, contrasting INTEGER NOT NULL DEFAULT 0,
+  fetched TEXT NOT NULL, PRIMARY KEY (map_id, citing, cited));
 -- works cited in PDFs that OpenAlex does not have: id 'B:...', shown as book nodes
 CREATE TABLE IF NOT EXISTS ref_stubs (
   id TEXT PRIMARY KEY, title TEXT, first_author TEXT, year INTEGER);
@@ -198,4 +204,22 @@ def stubs(db: sqlite3.Connection, ids: list[str]) -> dict[str, dict]:
         part = ids[i:i + 500]
         for r in db.execute(f"SELECT * FROM ref_stubs WHERE id IN ({','.join('?' * len(part))})", part):
             out[r["id"]] = dict(r)
+    return out
+
+
+def save_intents(db: sqlite3.Connection, map_id: int, rows: list[dict]) -> None:
+    with db:
+        db.executemany("INSERT OR REPLACE INTO edge_intents (map_id, citing, cited, intents, influential, contexts, contrasting, fetched)"
+                       " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       [(map_id, r["citing"], r["cited"], json.dumps(r.get("intents") or []), int(bool(r.get("influential"))),
+                         json.dumps(r.get("contexts") or []), int(bool(r.get("contrasting"))), now()) for r in rows])
+
+
+def intents(db: sqlite3.Connection, map_id: int) -> dict[str, dict]:
+    """'citing->cited' -> {intents, influential, contexts, contrasting, fetched}."""
+    out = {}
+    for r in db.execute("SELECT * FROM edge_intents WHERE map_id = ?", (map_id,)):
+        out[f"{r['citing']}->{r['cited']}"] = {"intents": json.loads(r["intents"]), "influential": bool(r["influential"]),
+                                               "contexts": json.loads(r["contexts"]), "contrasting": bool(r["contrasting"]),
+                                               "fetched": r["fetched"]}
     return out

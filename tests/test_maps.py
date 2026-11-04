@@ -372,3 +372,31 @@ def test_patents_in_maps(db, snapshot, monkeypatch):
     assert "[Espacenet](https://worldwide.espacenet.com/patent/search?q=pn%3DEP3500000)" in text
     with pytest.raises(ValueError):
         run(s.map_add_patents("P", []))
+
+
+def test_map_intents_annotates_edges_and_flags_contrast(db, monkeypatch):
+    db["W1"]["doi"], db["W6"]["doi"], db["W3"]["doi"] = "10.1234/one", "10.1234/six", "10.1234/three"
+    calls = []
+
+    async def fake_s2(path, params=None, body=None):
+        calls.append(path)
+        if path.endswith("/citations"):
+            return {"status": "ok", "data": {"data": [
+                {"intents": ["background"], "isInfluential": True, "contexts": ["However, W1's account fails to explain X."],
+                 "citingPaper": {"externalIds": {"DOI": "10.1234/six"}}},
+                {"intents": ["methodology"], "isInfluential": False, "contexts": ["We follow W1's method."],
+                 "citingPaper": {"externalIds": {"DOI": "10.9999/not-in-map"}}}]}}
+        return {"status": "ok", "data": {"data": [
+            {"intents": ["result"], "isInfluential": False, "contexts": ["As W3 showed."], "citedPaper": {"externalIds": {"DOI": "10.1234/three"}}}]}}
+    monkeypatch.setattr(s, "_s2_api", fake_s2)
+    run(s.map_create("I", ["W1"]))
+    run(s.map_expand("I"))
+    out = run(s.map_intents("I"))
+    assert out["status"] == "ok" and out["works"] == ["W1"] and out["requests"] == 2 and out["edges_annotated"] == 2
+    assert out["influential"] == 1 and out["contrasting"] == [{"citing": "W6", "cited": "W1", "context": "However, W1's account fails to explain X."}]
+    got = run(s.map_get("I"))
+    assert got["edge_intents"]["W6->W1"]["contrasting"] and got["edge_intents"]["W6->W1"]["intents"] == ["background"]
+    assert got["edge_intents"]["W1->W3"]["intents"] == ["result"] and not got["edge_intents"]["W1->W3"]["contrasting"]
+    assert "W1->W3" not in run(s.map_get("I", states=["to_read"]))["edge_intents"]
+    assert run(s.map_intents("I", works=["W2"]))["status"] == "invalid_input"
+    assert s._contrasting(["Tuttavia, questa lettura non riesce a spiegare"]) and not s._contrasting(["We build on this."])

@@ -2,6 +2,12 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.7.0
+
+- `search_everything(semantic=true)`: ricerca per significato con embedding locali multilingue (multilingual-e5-small in ONNX, `semantic.py`, extra `semantic`); vettori in `corpus.sqlite`, indicizzazione incrementale a ogni chiamata, nel lavoro settimanale e con `semantic.py embed`; `semantic_unavailable` senza modello.
+- `map_intents`: intenti, influenza e frasi delle citazioni da Semantic Scholar sugli archi di una mappa, con il flag euristico `contrasting`; `map_get` restituisce `edge_intents`.
+- `GET /status` riporta la disponibilità dello strato semantico; il report settimanale lo stato dell'indicizzazione.
+
 ## 0.6.1
 
 - Registro delle ricerche: ogni `search_literature` e `map_create` aggiunge una riga a `STATE_DIRECTORY/searches.jsonl`; `search_log(query)` dice se la stessa ricerca o una simile è già stata fatta, quando e con quanti risultati; il report settimanale elenca le ricerche della settimana.

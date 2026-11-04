@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS sources (name TEXT PRIMARY KEY, mtime REAL NOT NULL, 
 CREATE VIRTUAL TABLE IF NOT EXISTS passages USING fts5(
   scope UNINDEXED, source UNINDEXED, ref UNINDEXED, locator UNINDEXED, title, text,
   tokenize = 'unicode61 remove_diacritics 2');
+-- one vector per passage (semantic.py); dropped with the passage when its source is re-indexed
+CREATE TABLE IF NOT EXISTS embeddings (passage INTEGER PRIMARY KEY, model TEXT NOT NULL, vec BLOB NOT NULL);
 """
 
 
@@ -112,6 +114,7 @@ def sync(db: sqlite3.Connection, knowledge_dir: str | None = None) -> dict:
     added, removed = 0, 0
     with db:
         for name in set(known) - set(current):
+            _drop_embeddings(db, name)
             db.execute("DELETE FROM passages WHERE source = ?", (name,))
             db.execute("DELETE FROM sources WHERE name = ?", (name,))
             removed += 1
@@ -128,6 +131,7 @@ def sync(db: sqlite3.Connection, knowledge_dir: str | None = None) -> dict:
                 rows = [r for n in data.get("notes", []) for r in note_passages(n["path"], n.get("title") or n["path"], n.get("text") or "")]
             else:
                 rows = item_passages(name.split("/", 1)[1], data)
+            _drop_embeddings(db, name)
             db.execute("DELETE FROM passages WHERE source = ?", (name,))
             db.executemany("INSERT INTO passages (scope, source, ref, locator, title, text) VALUES (?, ?, ?, ?, ?, ?)", rows)
             db.execute("INSERT OR REPLACE INTO sources (name, mtime, indexed, passages) VALUES (?, ?, ?, ?)",
@@ -136,10 +140,89 @@ def sync(db: sqlite3.Connection, knowledge_dir: str | None = None) -> dict:
     return {"reindexed": added, "removed": removed, "sources": len(current)}
 
 
+def _drop_embeddings(db: sqlite3.Connection, source: str) -> None:
+    db.execute("DELETE FROM embeddings WHERE passage IN (SELECT rowid FROM passages WHERE source = ?)", (source,))
+    _matrix.clear()
+
+
 def stats(db: sqlite3.Connection) -> dict:
     by_scope = {r["scope"]: r["n"] for r in db.execute("SELECT scope, count(*) AS n FROM passages GROUP BY scope")}
     srcs = db.execute("SELECT count(*) AS n, max(indexed) AS last FROM sources").fetchone()
-    return {"passages": by_scope, "sources": srcs["n"], "last_indexed": srcs["last"]}
+    emb = db.execute("SELECT count(*) AS n, min(model) AS model FROM embeddings").fetchone()
+    total = sum(by_scope.values())
+    return {"passages": by_scope, "sources": srcs["n"], "last_indexed": srcs["last"],
+            "embedded": emb["n"], "embedding_model": emb["model"], "pending_embeddings": max(0, total - emb["n"])}
+
+
+# --- semantic layer ---------------------------------------------------------------------------
+
+_matrix: dict = {}  # cache: (model, count, max rowid) -> (rowids, numpy matrix)
+
+
+def embed_pending(db: sqlite3.Connection, embedder, budget_seconds: float = 20.0, batch: int = 16) -> dict:
+    """Embed passages that have no vector yet, oldest first, until the time budget is spent;
+    the rest waits for the next call (search_everything spends a few seconds, the weekly job
+    and semantic.py embed spend as long as needed)."""
+    import semantic
+    started, done = time.monotonic(), 0
+    while time.monotonic() - started < budget_seconds:
+        rows = db.execute("SELECT rowid, title, text FROM passages WHERE rowid NOT IN (SELECT passage FROM embeddings)"
+                          " ORDER BY rowid LIMIT ?", (batch,)).fetchall()
+        if not rows:
+            break
+        vecs = embedder.embed([f"{r['title'] or ''}\n{r['text']}" for r in rows], kind="passage")
+        with db:
+            db.executemany("INSERT OR REPLACE INTO embeddings (passage, model, vec) VALUES (?, ?, ?)",
+                           [(r["rowid"], embedder.name, semantic.pack(v)) for r, v in zip(rows, vecs)])
+        done += len(rows)
+    _matrix.clear()
+    left = db.execute("SELECT count(*) FROM passages WHERE rowid NOT IN (SELECT passage FROM embeddings)").fetchone()[0]
+    return {"embedded_now": done, "pending": left, "seconds": round(time.monotonic() - started, 1), "model": embedder.name}
+
+
+def _load_matrix(db: sqlite3.Connection, model: str):
+    import numpy as np
+    meta = db.execute("SELECT count(*), max(passage) FROM embeddings WHERE model = ?", (model,)).fetchone()
+    key = (model, meta[0], meta[1])
+    if key in _matrix:
+        return _matrix[key]
+    rows = db.execute("SELECT passage, vec FROM embeddings WHERE model = ? ORDER BY passage", (model,)).fetchall()
+    ids = [r["passage"] for r in rows]
+    mat = (np.frombuffer(b"".join(r["vec"] for r in rows), dtype=np.float32).reshape(len(rows), -1)
+           if rows else np.zeros((0, 1), dtype=np.float32))
+    _matrix.clear()
+    _matrix[key] = (ids, mat)
+    return ids, mat
+
+
+def semantic_search(db: sqlite3.Connection, embedder, query: str, scope: str = "all", limit: int = 20,
+                    ref: str | None = None, min_score: float = 0.0) -> list[dict]:
+    """Passages closest in meaning to the query (cosine over the stored vectors), with the same
+    fields as search() plus 'score'; passages not yet embedded cannot be found this way."""
+    import numpy as np
+    ids, mat = _load_matrix(db, embedder.name)
+    if not ids:
+        return []
+    q = np.asarray(embedder.embed([query], kind="query")[0], dtype=np.float32)
+    scores = mat @ q
+    order = np.argsort(-scores)
+    out = []
+    for i in order:
+        if len(out) >= limit or scores[i] < min_score:
+            break
+        r = db.execute("SELECT scope, ref, locator, title, substr(text, 1, 400) AS snippet FROM passages WHERE rowid = ?", (ids[i],)).fetchone()
+        if r is None or (scope != "all" and r["scope"] != scope) or (ref and r["ref"] != ref):
+            continue
+        d = {"scope": r["scope"], "ref": r["ref"], "locator": r["locator"] or None, "title": r["title"], "snippet": r["snippet"],
+             "score": round(float(scores[i]), 3), "match": "semantic"}
+        if r["scope"] == "notes":
+            d["note"] = r["ref"]
+        else:
+            d["zotero_key"] = r["ref"]
+            page = re.sub(r"\D", "", r["locator"] or "")
+            d["open"] = f"zotero://open-pdf/library/items/{r['ref']}" + (f"?page={page}" if page else "")
+        out.append(d)
+    return out
 
 
 # --- query ---------------------------------------------------------------------------------------

@@ -36,7 +36,8 @@ Servers: DOI MCP (`check_draft`, `search_everything`, `verify_doi`, `verify_book
 4. **Claims.** For the sentences that attribute a position or quote a passage: `check_claims`
    (one call for the batch) or `get_fulltext(key, pages=…)`; `search_everything` to find where
    the user read something when the citation is missing. Report each claim as supported with
-   page, not found, or contradicted; never rewrite the user's argument.
+   page, not found, or contradicted; never rewrite the user's argument. For a source in
+   another language than the claim, `search_everything(…, semantic=true, zotero_key=key)`.
 5. **Bibliography.** `export_items(keys=bibliography_keys, format="csljson")` (or BibTeX)
    for Pandoc; `format_citations(style="apa")` when the user wants the list in prose.
 6. **Report** in a table: key, item, verified, claims checked, what remains. Run `check_draft`
