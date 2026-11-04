@@ -1571,6 +1571,121 @@ def _ia_access(doc: dict) -> str:
     return "print_disabled_only" if status == "is_printdisabled" else "borrowable"
 
 
+# Da reinserire in doi-mcp/server.py prima di internet_archive
+
+_REF_STOP = {"the", "and", "of", "a", "an", "in", "on", "for", "to", "its", "la", "le", "les", "di", "il",
+             "der", "die", "das", "und", "des", "du", "de", "et", "e"}
+
+
+def _ascii(s: str | None) -> str:
+    return re.sub(r"[^a-z0-9 ]", " ", unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower())
+
+
+def _title_words(s: str | None) -> list[str]:
+    return [w for w in _ascii(s).split() if w not in _REF_STOP and len(w) > 1]
+
+
+
+def _title_match(want: list[str], title: str | None) -> bool:
+    got, w = set(_title_words(title)), set(want)
+    return bool(got) and len(w & got) / len(got) >= 0.8 and len(w & got) / len(w) >= 0.6
+
+# The patent tools exist only when the EPO OPS keys are configured: without them they could
+# only fail, and each tool definition costs context in every conversation.
+EPO_CONFIGURED = bool(os.environ.get("EPO_OPS_KEY") and os.environ.get("EPO_OPS_SECRET"))
+_patent_tool = _tool if EPO_CONFIGURED else (lambda **kw: (lambda fn: fn))
+
+
+def _patent_brief(p: dict) -> dict:
+    return {k: p[k] for k in ("number", "kind", "title", "applicants", "published", "priority", "ipc")} | {
+        "abstract": (p["abstract"] or "")[:400] or None, "cites_literature": len(p["cites_literature"]),
+        "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{p['number']}"}
+
+
+def _patent_error(e: Exception) -> dict:
+    import patents
+    if isinstance(e, patents.NotConfigured):
+        return {"status": "not_configured", "detail": str(e)}
+    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 403:
+        return {"status": "error", "detail": "EPO OPS refused the request (403): weekly quota used or app not enabled for OPS"}
+    return {"status": "error", "detail": _err("EPO OPS", e)}
+
+
+@_patent_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def patent_search(query: str, limit: int = 25, page: int = 1) -> dict:
+    """Search patents worldwide (EPO Open Patent Services, ~140 million documents). Free words
+    search title and abstract; OPS CQL is accepted as is, e.g. 'ta all "foldable display" and
+    pa=samsung and pd>=2018', 'ic=G06F1/16', 'ct=EP1000000' (patents citing it), 'in=smith'
+    (inventor). Returns number, title, applicants, dates, IPC classes, a short abstract and how
+    many scientific works each cites. Use patent_get for the cited literature."""
+    import patents
+    limit = max(1, min(int(limit), 100))
+    start = (max(1, int(page)) - 1) * limit + 1
+    try:
+        root = await patents.get(_http(), "published-data/search/biblio",
+                                 {"q": patents.cql(query), "Range": f"{start}-{start + limit - 1}"})
+    except Exception as e:
+        return _patent_error(e)
+    docs, seen = [], set()
+    for d in patents.documents(root):
+        if d["number"] not in seen:
+            seen.add(d["number"])
+            docs.append(_patent_brief(d))
+    return {"status": "ok", "query": patents.cql(query), "total": patents.total(root), "page": page, "patents": docs}
+
+
+@_patent_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def patent_get(number: str, resolve_literature: bool = True, citing: bool = True) -> dict:
+    """One patent by publication number (EP1000000, US2019123456, WO2020123456): bibliographic
+    data, the patents it cites and the scientific literature it cites (from the search report),
+    each literature citation resolved to a DOI when possible (DOI in the text, else Crossref title
+    match, free). citing=True adds the patents that cite it (up to 25, with the total)."""
+    import patents
+    try:
+        num = patents.number(number)
+        root = await patents.get(_http(), f"published-data/publication/epodoc/{num}/biblio")
+    except ValueError as e:
+        return {"status": "error", "detail": str(e)}
+    except Exception as e:
+        return _patent_error(e)
+    docs = patents.documents(root)
+    if not docs:
+        return {"status": "not_found", "number": num}
+    # kinds of one publication (A1, A2, B1) carry different parts: merge them
+    p = next((d for d in docs if d["title"]), docs[0])
+    for d in docs:
+        p["cites_patents"] = list(dict.fromkeys(p["cites_patents"] + d["cites_patents"]))
+        have = {x["text"] for x in p["cites_literature"]}
+        p["cites_literature"] += [x for x in d["cites_literature"] if x["text"] not in have]
+        p["abstract"] = p["abstract"] or d["abstract"]
+    lit = []
+    for x in p["cites_literature"][:60]:
+        f = patents.parse_npl(x["text"])
+        row = {"text": x["text"], "phase": x["phase"], **f, "resolved_by": "doi in text" if f["doi"] else None}
+        if not f["doi"] and f["title"] and resolve_literature:
+            try:
+                want = _title_words(f["title"])
+                for cand in await _crossref(_http(), f["title"], f["first_author"]):
+                    if _title_match(want, cand.get("title")):
+                        row.update(doi=cand["doi"], resolved_by="crossref title", matched_title=cand["title"])
+                        break
+            except httpx.HTTPError:
+                row["resolved_by"] = "crossref unreachable"
+        lit.append(row)
+    out = {"status": "ok", **{k: p[k] for k in ("number", "kind", "family_id", "title", "applicants", "inventors",
+                                                "published", "priority", "ipc", "abstract", "cites_patents")},
+           "url": f"https://worldwide.espacenet.com/patent/search?q=pn%3D{p['number']}",
+           "cites_literature": lit, "literature_with_doi": sum(1 for r in lit if r["doi"])}
+    if citing:
+        try:
+            croot = await patents.get(_http(), "published-data/search/biblio", {"q": f"ct={num}", "Range": "1-25"})
+            out["cited_by_total"] = patents.total(croot)
+            out["cited_by"] = [_patent_brief(d) for d in patents.documents(croot)]
+        except Exception as e:
+            out["cited_by_error"] = _patent_error(e)["detail"]
+    return out
+
+
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def internet_archive(title: str | None = None, author: str | None = None, year: int | None = None,
                            isbn: str | None = None, query: str | None = None, limit: int = 10,
