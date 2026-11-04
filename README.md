@@ -17,7 +17,7 @@ flowchart TD
   Strumento -->|google_books, orcid| Registri["Libri e identità degli autori"]
   Strumento -->|search_literature, paper_table| Ricerca["Ricerca e dettagli dei paper"]
   Strumento -->|citation_graph| Grafo["Grafo delle citazioni"]
-  Strumento -->|semantic_scholar, semantic_scholar_recommendations| SS["Operazioni Semantic Scholar"]
+  Strumento -->|semantic_scholar, semantic_scholar_datasets| SS["Operazioni Semantic Scholar"]
   Strumento -->|openalex_*| OA["Ricerca, classificazione e account OpenAlex"]
 
   Riferimenti --> HTTP["Client HTTP condiviso"]
@@ -78,12 +78,13 @@ flowchart TD
 | `map_check_retractions` | Ritrattazioni, expression of concern e correzioni per tutti i lavori con DOI della mappa; i ritrattati vengono segnati. | Crossref |
 | `map_export` | La mappa come lista di lettura in Markdown (seed, poi lavori per stato, con link DOI, Zotero e note), da salvare in Obsidian fuori dallo schema, es. `Maps/<nome>.md`. | Calcolo locale |
 | `paper_table` | Righe di dettaglio per una lista di DOI, id OpenAlex o id arXiv (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), arXiv come riserva, Semantic Scholar (una richiesta batch) |
-| `semantic_scholar` | Academic Graph e Datasets in uno strumento con 18 azioni: paper (dettagli, autori, citazioni, riferimenti, batch, ricerca per rilevanza, bulk booleana, match, autocompletamento), autori (dettagli, pubblicazioni, ricerca, batch), estratti testuali, release e link dei dataset. Non scarica i file. | Semantic Scholar Academic Graph e Datasets |
-| `semantic_scholar_recommendations` | Raccomandazioni da un paper o da liste di esempi positivi e negativi. | Semantic Scholar Recommendations |
+| `semantic_scholar` | Academic Graph e Recommendations in uno strumento con 16 azioni: paper (dettagli, autori, citazioni, riferimenti, batch, ricerca per rilevanza, bulk booleana, match, autocompletamento), autori (dettagli, pubblicazioni, ricerca, batch), estratti testuali, raccomandazioni da un paper (`recommend_single`) o da liste di esempi positivi e negativi (`recommend_multi`). Le azioni che restituiscono liste hanno `limit` 20 di default. | Semantic Scholar Academic Graph e Recommendations |
+| `semantic_scholar_datasets` | Release e link firmati dei dataset (`releases`, `release`, `files`, `diffs`). Non scarica i file. | Semantic Scholar Datasets |
 | `openalex_entity` | Liste e dettagli di tutte le 26 risorse del catalogo, con filtri, ricerca, aggregazioni, campi e cursori liberi. | OpenAlex |
 | `openalex_autocomplete` | Suggerimenti e risoluzione rapida di identificatori, globali o per tipo di entità. | OpenAlex |
 | `openalex_text` | Classifica titolo e abstract per topic e keyword, tramite GET o POST. | OpenAlex |
-| `openalex_query` | Esegue e traduce OQL/OQO; valida query, consulta contesto grammaticale, proprietà e specifiche. | OpenAlex |
+| `openalex_query` | Esegue una query OQL (stringa) o OQO (oggetto); consuma il budget. | OpenAlex |
+| `openalex_query_inspect` | Traduce (anche da URL classico), valida, consulta contesto grammaticale, proprietà e specifiche del linguaggio senza eseguire. | OpenAlex |
 | `openalex_status` | Consulta quota e metadati/link dei changefiles; questi ultimi richiedono un piano abilitato. | OpenAlex |
 | `openalex_account_read` | Legge collezioni, membri, importazioni e ricerche salvate, senza modificarli. | OpenAlex |
 | `openalex_account_write` | Crea, aggiorna o elimina collezioni e ricerche salvate, gestisce membri/importazioni e invia correzioni. Anteprima predefinita; richiede conferma esplicita per inviare. | OpenAlex, OpenAlex Users |
@@ -121,15 +122,15 @@ Esempio di argomenti per `openalex_entity`, lavori dal 2020 raggruppati per anno
 |---|---|
 | `openalex_autocomplete` | `GET /autocomplete`, `GET /autocomplete/{entity}`; `query` diventa il parametro `q` |
 | `openalex_text` | `GET` e `POST` su `/text`, `/text/topics`, `/text/keywords`; `target`: `all`, `topics`, `keywords` |
-| `openalex_query`, `execute` | `GET /?oql=...`, `GET /?oqo=...`, `POST /` con uno dei due formati |
-| `openalex_query`, `translate` | `GET /query/{query_format}/{query}`, `POST /query`; formati `oql`, `oqo`, `oxurl` |
-| `openalex_query`, `validate` / `context` | `GET /validate`, `GET /parse-context`; per il contesto serve `params.pos` |
-| `openalex_query`, `properties` / `spec` | `GET /properties[/{entity}]`, `GET /query/spec[/{artifact}]` |
+| `openalex_query` | `GET /?oql=...`, `GET /?oqo=...`, `POST /` con uno dei due formati |
+| `openalex_query_inspect`, `translate` | `POST /query`; formati `oql`, `oqo`, `oxurl` |
+| `openalex_query_inspect`, `validate` / `context` | `GET /validate`, `GET /parse-context`; per il contesto serve `params.pos` |
+| `openalex_query_inspect`, `properties` / `spec` | `GET /properties[/{entity}]`, `GET /query/spec[/{artifact}]` |
 | `openalex_status` | `GET /rate-limit`, `GET /changefiles`, `GET /changefiles/{date}` |
 | `openalex_account_read` | `GET /collections[/{collection_id}]`, membri, elenco/dettaglio importazioni; `GET /saved-searches[/{saved_search_id}]` |
 | `openalex_account_write` | `POST /collections`, `PATCH`/`DELETE /collections/{collection_id}`, `POST`/`DELETE` dei membri, `DELETE` del singolo membro, `POST` delle importazioni; `POST`/`PATCH`/`DELETE` delle ricerche salvate; `POST user.openalex.org/curations` |
 
-**Query e testo.** `openalex_query` accetta `query` come stringa OQL o oggetto OQO, `query_format` e `method` (`POST` predefinito per evitare limiti di lunghezza dell'URL). Ordinamento, campi e paginazione restano in `params`. `translate` non esegue la ricerca; `validate` restituisce le diagnostiche originali. `openalex_text` richiede da 20 a 2000 caratteri complessivi tra titolo e abstract; costa $0.01 per richiesta secondo la documentazione consultata. Non inviare materiale riservato senza autorizzazione. La ricerca semantica è disponibile tramite `openalex_entity` con `params["search.semantic"]` oppure tramite OQL/OQO.
+**Query e testo.** `openalex_query` accetta `query` come stringa OQL o oggetto OQO, `query_format` e `method` (`POST` predefinito per evitare limiti di lunghezza dell'URL). Ordinamento, campi e paginazione restano in `params`. `openalex_query_inspect` non esegue la ricerca: `translate` converte tra formati, `validate` restituisce le diagnostiche originali. Le liste di `openalex_entity` hanno `per_page` 25 di default. `openalex_text` richiede da 20 a 2000 caratteri complessivi tra titolo e abstract; costa $0.01 per richiesta secondo la documentazione consultata. Non inviare materiale riservato senza autorizzazione. La ricerca semantica è disponibile tramite `openalex_entity` con `params["search.semantic"]` oppure tramite OQL/OQO.
 
 **Account e conferma.** Le azioni di lettura sono `collections`, `collection`, `members`, `imports`, `import`, `saved_searches`, `saved_search`. Le azioni di scrittura sono `create_collection`, `update_collection`, `delete_collection`, `add_members`, `remove_members`, `remove_member`, `import_collection`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `curate`. Gli identificatori si passano negli argomenti dedicati; il JSON nativo va in `body`. Per la rimozione multipla dei membri si usa invece `params.member_ids`, una stringa separata da virgole, senza body.
 
@@ -154,7 +155,7 @@ Il trasporto applica un limite conservativo di 1 richiesta/s per ciascun host Op
 
 ### Copertura Semantic Scholar
 
-Due strumenti dedicati coprono le 20 operazioni delle specifiche ufficiali [Academic Graph](https://api.semanticscholar.org/api-docs/graph), [Recommendations](https://api.semanticscholar.org/api-docs/recommendations) e [Datasets](https://api.semanticscholar.org/api-docs/datasets), consultate il 21 ottobre 2026: `semantic_scholar` (18 azioni, un'unica voce per ridurre la sovrapposizione di strumenti simili) e `semantic_scholar_recommendations` (2 azioni). Non modificano il comportamento degli strumenti precedenti: `citation_graph` continua a usare OpenAlex. I nomi `semantic_scholar_paper`, `_author`, `_snippets` e `_datasets` delle versioni precedenti non esistono più: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti.
+Due strumenti dedicati coprono le 20 operazioni delle specifiche ufficiali [Academic Graph](https://api.semanticscholar.org/api-docs/graph), [Recommendations](https://api.semanticscholar.org/api-docs/recommendations) e [Datasets](https://api.semanticscholar.org/api-docs/datasets), consultate il 21 ottobre 2026: `semantic_scholar` (16 azioni: Academic Graph e Recommendations, un'unica voce per ridurre la sovrapposizione di strumenti simili) e `semantic_scholar_datasets` (4 azioni). Non modificano il comportamento degli strumenti precedenti: `citation_graph` continua a usare OpenAlex. I nomi `semantic_scholar_paper`, `_author`, `_snippets` e `_recommendations` delle versioni precedenti non esistono più: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti.
 
 | Strumento | `action` | Metodo e percorso |
 |---|---|---|
@@ -172,12 +173,12 @@ Due strumenti dedicati coprono le 20 operazioni delle specifiche ufficiali [Acad
 | `semantic_scholar` | `author_search` | `GET /graph/v1/author/search` |
 | `semantic_scholar` | `author_batch` | `POST /graph/v1/author/batch` |
 | `semantic_scholar` | `snippets` | `GET /graph/v1/snippet/search` |
-| `semantic_scholar_recommendations` | `single` | `GET /recommendations/v1/papers/forpaper/{paper_id}` |
-| `semantic_scholar_recommendations` | `multi` | `POST /recommendations/v1/papers/` |
-| `semantic_scholar` | `dataset_releases` | `GET /datasets/v1/release/` |
-| `semantic_scholar` | `dataset_release` | `GET /datasets/v1/release/{release_id}` |
-| `semantic_scholar` | `dataset_files` | `GET /datasets/v1/release/{release_id}/dataset/{dataset_name}` |
-| `semantic_scholar` | `dataset_diffs` | `GET /datasets/v1/diffs/{start_release_id}/to/{release_id}/{dataset_name}` |
+| `semantic_scholar` | `recommend_single` | `GET /recommendations/v1/papers/forpaper/{paper_id}` |
+| `semantic_scholar` | `recommend_multi` | `POST /recommendations/v1/papers/` |
+| `semantic_scholar_datasets` | `releases` | `GET /datasets/v1/release/` |
+| `semantic_scholar_datasets` | `release` | `GET /datasets/v1/release/{release_id}` |
+| `semantic_scholar_datasets` | `files` | `GET /datasets/v1/release/{release_id}/dataset/{dataset_name}` |
+| `semantic_scholar_datasets` | `diffs` | `GET /datasets/v1/diffs/{start_release_id}/to/{release_id}/{dataset_name}` |
 
 **Parametri e risposte.** Gli strumenti restituiscono `status`, `http_status` e `data`, che conserva il JSON originale, inclusi campi annidati, valori null, licenze e cursori. Gli errori HTTP conservano la risposta dell'API; gli errori di trasporto restituiscono `status=error` e `detail`. Gli input obbligatori mancanti, i batch fuori limite e gli argomenti che un'azione non usa vengono rifiutati prima della richiesta. L'API verifica la validità dei parametri di query e dei campi richiesti.
 
@@ -199,7 +200,7 @@ Esempio di argomenti per `semantic_scholar`, ricerca booleana con ordinamento pe
 }
 ```
 
-Per le raccomandazioni, `single` richiede `paper_id` e ammette `params.from` (`recent` o `all-cs`); `multi` richiede `positive_paper_ids` e accetta `negative_paper_ids`. Entrambe ammettono `params.fields` e `params.limit` fino a 500. Per i dataset, `release_id` è `latest` di default; `dataset_files` richiede `dataset_name`, mentre `dataset_diffs` richiede anche `start_release_id`. I nomi dei dataset si ricavano con `dataset_release`. I link firmati sono temporanei e vanno trattati come credenziali di accesso; disponibilità e permessi dipendono dalla chiave API. Nessun file del corpus viene scaricato o applicato localmente.
+Per le raccomandazioni, `recommend_single` richiede `paper_id` e ammette `params.from` (`recent` o `all-cs`); `recommend_multi` richiede `positive_paper_ids` e accetta `negative_paper_ids`. Entrambe ammettono `params.fields` e `params.limit` fino a 500. In `semantic_scholar_datasets`, `release_id` è `latest` di default; `files` richiede `dataset_name`, mentre `diffs` richiede anche `start_release_id`. I nomi dei dataset si ricavano con `release`. I link firmati sono temporanei e vanno trattati come credenziali di accesso; disponibilità e permessi dipendono dalla chiave API. Nessun file del corpus viene scaricato o applicato localmente.
 
 I risultati di `match` e delle raccomandazioni non equivalgono a citazioni bibliografiche verificate: per questo restano disponibili `find_doi` e `verify_doi`.
 

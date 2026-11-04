@@ -38,7 +38,16 @@ from pydantic import Field
 
 VERSION = "0.3.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
-mcp = FastMCP("paper-doi", stateless_http=True, transport_security=TransportSecuritySettings(
+MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
+INSTRUCTIONS = (
+    "Citation verification: find_doi then verify_doi (verify_book for editions); format_apa "
+    "or format_reference only after verification. Literature search: search_literature; "
+    "paper_table for details on a list of ids. Persistent literature maps (map_* tools) are "
+    "viewed by the user on the 'Literature maps' page, the only map page: " + MAPS_PAGE +
+    " . Give that link whenever a map is created, expanded or asked for. Raw API passthroughs "
+    "(openalex_*, semantic_scholar*, orcid, google_books) return native JSON: keep per_page "
+    "and limit small and use select/fields where the API offers them.")
+mcp = FastMCP("paper-doi", instructions=INSTRUCTIONS, stateless_http=True, transport_security=TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
     allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", *_PUBLIC_HOSTS],
     allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*",
@@ -363,6 +372,8 @@ async def openalex_entity(entity: OpenAlexEntity, entity_id: str | None = None,
     details (DOI/PMID for works, ORCID for authors, ROR for institutions, ISSN for
     sources). Identifiers are URL-encoded, never interpreted as a destination URL.
     raw-affiliation-strings has no single-entity identifier; use its list filters.
+    Lists default to per_page=25 and are long: pass select (e.g. 'id,title,publication_year')
+    to keep the response readable.
 
     params forwards native filter, search, sort, group_by, select, page, per_page,
     cursor, sample, seed, corpus and other API-supported options without rewriting.
@@ -373,12 +384,14 @@ async def openalex_entity(entity: OpenAlexEntity, entity_id: str | None = None,
     Requests can consume your OpenAlex budget; no bulk auto-pagination or downloads.
     """
     if entity not in _OA_ENTITIES:
-        raise ValueError("Unknown OpenAlex entity")
+        raise ValueError(f"Unknown entity '{entity}'; use one of {', '.join(_OA_ENTITIES)}")
     path = entity
     if entity_id is not None:
         if entity in _OA_LIST_ONLY:
             raise ValueError(f"{entity} only supports list queries")
         path += "/" + _oa_segment(entity_id)
+    elif entity not in _OA_LIST_ONLY:
+        params = {"per_page": 25, **(params or {})}
     return await _oa_api(path, params)
 
 
@@ -430,64 +443,78 @@ async def openalex_text(title: str, abstract: str = "",
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def openalex_query(
-    action: Literal["execute", "translate", "validate", "context", "properties", "spec"],
-    query: str | dict | None = None, query_format: Literal["oql", "oqo", "oxurl"] = "oql",
-    method: Literal["GET", "POST"] = "POST", entity: OpenAlexEntity | None = None,
-    artifact: str | None = None, params: dict[str, str | int | bool] | None = None,
+    query: str | dict, query_format: Literal["oql", "oqo"] = "oql",
+    method: Literal["GET", "POST"] = "POST",
+    params: dict[str, str | int | bool] | None = None,
 ) -> dict:
-    """Execute/translate OQL and OQO and inspect the OpenAlex query language.
+    """Execute an OpenAlex OQL query (string) or OQO query (JSON object); one page per call.
 
-    execute: GET or POST / with oql string or oqo object. oxurl is translation-only;
-    use openalex_entity for REST queries. params holds sibling view options (sort,
-    select, page, per_page, cursor, rerank, format). Fetches one page; retains
-    meta.next_cursor, validation diagnostics, costs and meta.x_query.
-    translate: GET /query/{query_format}/{query} or POST /query; accepts oql,
-    oqo or oxurl (classic URL). Translates and validates WITHOUT executing a search.
-    validate: GET /validate?q=<oql>; context: GET /parse-context?q=<oql>&pos=<n>.
-    properties: GET /properties or /properties/{entity} (queryable column registry).
-    spec: GET /query/spec or /query/spec/{artifact}, e.g. artifact='oqo'.
-    validate/context require an OQL string; context position goes in params.pos.
-    Execution consumes the account's query budget; translation is free. JSON and
-    CSV/text responses are supported; binary archive exports are not decoded.
+    Consumes the account's query budget. To translate, validate or inspect the language
+    without executing, use openalex_query_inspect; for classic REST filters use
+    openalex_entity. params holds view options (sort, select, page, per_page, cursor,
+    rerank, format); not the query itself. Returns meta.next_cursor, diagnostics, costs.
     """
-    if method not in {"GET", "POST"} or query_format not in {"oql", "oqo", "oxurl"}:
-        raise ValueError("Invalid query method or format")
-    if entity is not None and (entity not in _OA_ENTITIES or action != "properties"):
-        raise ValueError("entity is only supported for properties")
+    params = _oa_query_params(params)
+    _oa_query_check(query, query_format)
+    if method == "POST":
+        return await _oa_api("", params, "POST", {query_format: query})
+    encoded = json.dumps(query) if isinstance(query, dict) else query
+    return await _oa_api("", {**params, query_format: encoded})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def openalex_query_inspect(
+    action: Literal["translate", "validate", "context", "properties", "spec"],
+    query: str | dict | None = None, query_format: Literal["oql", "oqo", "oxurl"] = "oql",
+    entity: OpenAlexEntity | None = None, artifact: str | None = None,
+    params: dict[str, str | int | bool] | None = None,
+) -> dict:
+    """Inspect the OpenAlex query language without executing a search (free).
+
+    translate: query in oql, oqo or oxurl (a classic REST URL) to the other forms, with
+    validation. validate: an oql string. context: parse context of an oql string at
+    params.pos. properties: the queryable columns, for all entities or for entity.
+    spec: the language specification, or one artifact of it (e.g. 'oqo').
+    To run a query use openalex_query.
+    """
+    params = _oa_query_params(params)
+    if entity is not None and action != "properties":
+        raise ValueError("entity is only accepted by action='properties'")
     if artifact is not None and action != "spec":
-        raise ValueError("artifact is only supported for spec")
-    params = dict(params or {})
-    if {"oql", "oqo", "oxurl", "q"} & params.keys():
-        raise ValueError("Pass query using the query argument, not params")
+        raise ValueError("artifact is only accepted by action='spec'")
     if action in {"properties", "spec"}:
         if query is not None:
-            raise ValueError("This action does not accept query")
+            raise ValueError(f"action='{action}' takes no query")
         path = "properties" if action == "properties" else "query/spec"
         suffix = entity if action == "properties" else artifact
         return await _oa_api(path + ("/" + _oa_segment(suffix) if suffix else ""), params)
     if query is None or (isinstance(query, str) and not query.strip()):
-        raise ValueError("query is required")
+        raise ValueError(f"action='{action}' requires query")
     if action in {"validate", "context"}:
         if query_format != "oql" or not isinstance(query, str):
-            raise ValueError("validate/context require OQL text")
-        path = "validate" if action == "validate" else "parse-context"
+            raise ValueError(f"action='{action}' requires an OQL string (query_format='oql')")
         if action == "context" and "pos" not in params:
-            raise ValueError("context requires params.pos")
-        return await _oa_api(path, {**params, "q": query})
+            raise ValueError("action='context' requires params.pos (cursor position)")
+        return await _oa_api("validate" if action == "validate" else "parse-context",
+                             {**params, "q": query})
+    _oa_query_check(query, query_format)
+    return await _oa_api("query", params, "POST", {query_format: query})
+
+
+def _oa_query_params(params: dict | None) -> dict:
+    params = dict(params or {})
+    if bad := {"oql", "oqo", "oxurl", "q"} & params.keys():
+        raise ValueError(f"Pass the query in the query argument, not params.{bad.pop()}")
+    return params
+
+
+def _oa_query_check(query: Any, query_format: str) -> None:
     if query_format == "oqo" and not isinstance(query, dict):
-        raise ValueError("oqo requires a JSON object")
+        raise ValueError("query_format='oqo' requires query to be a JSON object")
     if query_format != "oqo" and not isinstance(query, str):
-        raise ValueError("oql/oxurl require text")
-    if action not in {"execute", "translate"} or (action == "execute" and query_format == "oxurl"):
-        raise ValueError("Unsupported query action or execution format")
-    path = "" if action == "execute" else "query"
-    if method == "POST":
-        return await _oa_api(path, params, "POST", {query_format: query})
-    encoded_query = json.dumps(query) if isinstance(query, dict) else query
-    if action == "translate":
-        path += f"/{query_format}/{_oa_segment(encoded_query)}"
-        return await _oa_api(path, params)
-    return await _oa_api(path, {**params, query_format: encoded_query})
+        raise ValueError(f"query_format='{query_format}' requires query to be a string")
+    if isinstance(query, str) and not query.strip():
+        raise ValueError("query must not be empty")
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -1655,37 +1682,18 @@ async def _s2_snippets(query: str,
     return await _s2_api("graph/v1/snippet/search", {**(params or {}), "query": query})
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def semantic_scholar_recommendations(
-    action: Literal["single", "multi"], paper_id: str | None = None,
-    positive_paper_ids: list[str] | None = None,
-    negative_paper_ids: list[str] | None = None,
-    params: dict[str, str | int] | None = None,
-) -> dict:
-    """Access both Recommendations API endpoints, preserving recommendedPapers.
-
-    single: GET /recommendations/v1/papers/forpaper/{paper_id}; requires paper_id.
-    params supports from ('recent' or 'all-cs'), limit (max 500), fields.
-    multi: POST /recommendations/v1/papers/; requires positive_paper_ids and accepts
-    optional negative_paper_ids to steer recommendations away from unwanted papers.
-    params supports limit (max 500), fields; 'from' is only supported by single.
-    IDs use the API-supported paper identifier formats, e.g. DOI:10.x/y.
-    One call, no automatic pagination. Recommendations are not verified citations.
-    Shares the Semantic Scholar 1 request/s limit, authentication and retries.
-    """
-    if action == "single":
+async def _s2_recommend(action: str, paper_id, positive_paper_ids, negative_paper_ids, params):
+    if action == "recommend_single":
         if positive_paper_ids is not None or negative_paper_ids is not None:
-            raise ValueError("single uses paper_id, not positive/negative paper lists")
+            raise ValueError("recommend_single takes paper_id, not positive/negative_paper_ids")
         return await _s2_api(
             f"recommendations/v1/papers/forpaper/{_path_segment(paper_id, 'paper_id')}", params)
-    if action != "multi":
-        raise ValueError("Unknown recommendations action")
     if paper_id is not None or not positive_paper_ids:
-        raise ValueError("multi requires positive_paper_ids, not paper_id")
+        raise ValueError("recommend_multi requires positive_paper_ids (and no paper_id)")
     if any(not value.strip() for value in [*positive_paper_ids, *(negative_paper_ids or [])]):
         raise ValueError("Paper identifiers must not be empty")
     if "from" in (params or {}):
-        raise ValueError("params.from is only supported by single")
+        raise ValueError("params.from ('recent' or 'all-cs') is only accepted by recommend_single")
     body = {"positivePaperIds": [value.strip() for value in positive_paper_ids],
             "negativePaperIds": [value.strip() for value in (negative_paper_ids or [])]}
     return await _s2_api("recommendations/v1/papers/", params, body)
@@ -1739,67 +1747,82 @@ _S2_ACTIONS = {
     "author_details": ("author", "details"), "author_papers": ("author", "papers"),
     "author_search": ("author", "search"), "author_batch": ("author", "batch"),
     "snippets": ("snippets", ""),
-    "dataset_releases": ("dataset", "releases"), "dataset_release": ("dataset", "release"),
-    "dataset_files": ("dataset", "dataset"), "dataset_diffs": ("dataset", "diffs"),
+    "recommend_single": ("recommend", "single"), "recommend_multi": ("recommend", "multi"),
 }
 _S2_ARGS = {"paper": {"paper_id", "ids"}, "author": {"author_id", "ids"},
-            "snippets": {"query"}, "dataset": {"release_id", "dataset_name", "start_release_id"}}
+            "snippets": {"query"},
+            "recommend": {"paper_id", "positive_paper_ids", "negative_paper_ids"}}
+# Actions that return lists: a default limit keeps the native response readable
+_S2_LIST_ACTIONS = {"paper_citations", "paper_references", "paper_search", "paper_bulk",
+                    "author_papers", "author_search", "snippets",
+                    "recommend_single", "recommend_multi"}
+S2_DEFAULT_LIMIT = 20
 S2Action = Literal[
     "paper_details", "paper_authors", "paper_citations", "paper_references", "paper_batch",
     "paper_search", "paper_bulk", "paper_match", "paper_autocomplete", "author_details",
-    "author_papers", "author_search", "author_batch", "snippets", "dataset_releases",
-    "dataset_release", "dataset_files", "dataset_diffs"]
+    "author_papers", "author_search", "author_batch", "snippets",
+    "recommend_single", "recommend_multi"]
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def semantic_scholar(
     action: S2Action, paper_id: str | None = None, author_id: str | None = None,
-    ids: list[str] | None = None, query: str | None = None, release_id: str | None = None,
-    dataset_name: str | None = None, start_release_id: str | None = None,
+    ids: list[str] | None = None, query: str | None = None,
+    positive_paper_ids: list[str] | None = None, negative_paper_ids: list[str] | None = None,
     params: dict[str, str | int] | None = None,
 ) -> dict:
-    """Semantic Scholar Academic Graph and Datasets; native JSON, one page per call.
+    """Semantic Scholar Academic Graph and Recommendations; native JSON, one page per call.
 
-    Returns status, http_status and data exactly as the API sent them. Recommendations
-    has its own tool. Actions and the arguments each one needs:
-    - paper_details, paper_authors, paper_citations, paper_references: paper_id (S2 hash,
-      CorpusId:123, DOI:10.x/y, ARXIV:2401.01234, PMID:123...).
-    - paper_batch: ids (1-500); papers not found stay null in the list.
-    - paper_search (plain text, limit up to 100), paper_bulk (Boolean + | - and "phrases",
-      sort such as citationCount:desc, token pagination, up to 1000 per page),
-      paper_match (closest title: a candidate, NOT a verified match; use find_doi and
-      verify_doi), paper_autocomplete: all take params.query.
-    - author_details, author_papers: author_id (a Semantic Scholar author ID, not a name).
-      author_search: params.query. author_batch: ids (1-1000).
-    - snippets: query (plain text); params: paperIds, authors (max 10, AND), year,
-      fields, limit up to 1000. An excerpt is not the full paper.
-    - dataset_releases; dataset_release (release_id, default latest); dataset_files
-      (+ dataset_name); dataset_diffs (start_release_id, release_id, dataset_name).
-      Only metadata and temporary signed links come back: no file is downloaded.
-      Find dataset names with dataset_release.
-    params uses the API's own names: fields (nested allowed, e.g. citations.title), year,
-    publicationDateOrYear, venue, fieldsOfStudy, minCitationCount, openAccessPdf (empty
-    string), offset and limit (up to 1000 on lists). For the next page pass data.next as
-    offset, or data.token as token for paper_bulk. Arguments an action does not use are
-    rejected. Shares the 1 request/s limit, the API key and the 429 retries.
+    paper_*: paper_id (S2 hash, CorpusId:123, DOI:10.x/y, ARXIV:2401.01234, PMID:123),
+    except paper_batch (ids, 1-500) and paper_search/paper_bulk/paper_match/
+    paper_autocomplete (params.query). paper_match returns the closest title: a candidate,
+    not a verified match (use find_doi and verify_doi).
+    author_*: author_id (S2 author ID, not a name), author_batch (ids, 1-1000),
+    author_search (params.query). snippets: query (text excerpts, not full papers).
+    recommend_single: paper_id, params.from 'recent' or 'all-cs'; recommend_multi:
+    positive_paper_ids and optional negative_paper_ids. Not verified citations.
+    params uses the API's names (fields, year, venue, fieldsOfStudy, minCitationCount,
+    openAccessPdf, offset, limit, token). Lists default to limit 20; next page: data.next
+    as offset, or data.token as token (paper_bulk). Arguments an action does not use are
+    rejected. Datasets have their own tool, semantic_scholar_datasets.
     """
     if action not in _S2_ACTIONS:
-        raise ValueError("Unknown Semantic Scholar action")
+        raise ValueError(f"Unknown action '{action}'; use one of {', '.join(_S2_ACTIONS)}")
     family, op = _S2_ACTIONS[action]
     given = {name for name, value in {
         "paper_id": paper_id, "author_id": author_id, "ids": ids, "query": query,
-        "release_id": release_id, "dataset_name": dataset_name,
-        "start_release_id": start_release_id}.items() if value is not None}
+        "positive_paper_ids": positive_paper_ids,
+        "negative_paper_ids": negative_paper_ids}.items() if value is not None}
     if given - _S2_ARGS[family]:
-        raise ValueError(f"{action} does not accept: {', '.join(sorted(given - _S2_ARGS[family]))}")
+        raise ValueError(f"{action} does not accept: {', '.join(sorted(given - _S2_ARGS[family]))}"
+                         f"; it uses {', '.join(sorted(_S2_ARGS[family]))}")
+    if action in _S2_LIST_ACTIONS:
+        params = {"limit": S2_DEFAULT_LIMIT, **(params or {})}
     if family == "paper":
         return await _s2_paper(op, paper_id=paper_id, ids=ids, params=params)
     if family == "author":
         return await _s2_author(op, author_id=author_id, ids=ids, params=params)
     if family == "snippets":
         return await _s2_snippets(query or "", params)
-    if params:
-        raise ValueError("dataset actions take no params")
+    return await _s2_recommend(action, paper_id, positive_paper_ids, negative_paper_ids, params)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def semantic_scholar_datasets(
+    action: Literal["releases", "release", "files", "diffs"], release_id: str = "latest",
+    dataset_name: str | None = None, start_release_id: str | None = None,
+) -> dict:
+    """Semantic Scholar Datasets API: release list, one release (its dataset names),
+    download links of a dataset in a release (files: dataset_name), or incremental diffs
+    (diffs: start_release_id, release_id, dataset_name). Only metadata and temporary
+    signed links come back; nothing is downloaded. Rarely needed: the bulk snapshots are
+    for offline processing, not for answering questions (use semantic_scholar).
+    """
+    if action in {"files", "diffs"} and not dataset_name:
+        raise ValueError(f"action='{action}' requires dataset_name (see action='release')")
+    if action == "diffs" and not start_release_id:
+        raise ValueError("action='diffs' requires start_release_id")
+    op = "dataset" if action == "files" else action
     return await _s2_datasets(op, release_id or "latest", dataset_name, start_release_id)
 
 
@@ -2177,7 +2200,8 @@ async def _search_openalex(query, year_from, year_to, doc_types, limit, page, sc
 @mcp.tool()
 async def search_literature(query: str, year_from: int | None = None, year_to: int | None = None,
                             doc_types: list[str] | None = None, limit: int = 25, page: int = 1,
-                            scope: str = "title_abstract", open_access_only: bool = False,
+                            scope: Literal["title_abstract", "fulltext"] = "title_abstract",
+                            open_access_only: bool = False,
                             exclude_retracted: bool = True, fill_missing_abstracts: bool = True,
                             database: str = "openalex") -> dict:
     """Search the literature and return records with abstracts and keywords.
@@ -2431,39 +2455,18 @@ async def citation_graph(seeds: list[str], include_references: bool = True,
                          include_citing: bool = True, citing_per_seed: int = 20,
                          max_nodes: int = 150, min_cocitation: int = 2,
                          min_coupling: int = 3, check_coverage: bool = True) -> dict:
-    """Build a citation graph around seed works (DOIs or OpenAlex ids, max 10) for visualization.
+    """One-off citation graph around seed works (DOIs or OpenAlex ids, max 10), not stored.
 
-    Nodes are the seeds, the works they cite (role 'reference') and the most-cited works
-    citing them (role 'citing'), ranked by how many seeds they connect to, then by citation
-    count, up to max_nodes. Each node has id, doi, title, first_author, year, cited_by
-    (OpenAlex citation count), field (OpenAlex primary field), role, seeds_linked (how
-    many seeds it cites or is cited by), seed_cocited (how often works in the graph cite it
-    together with a seed) and seed_coupling (highest coupling strength with a seed). Rank
-    likely missing readings by these three, in this order; with one seed seeds_linked is 1
-    for every node, so the other two decide.
-    'citation_edges' are [citing_id, cited_id] pairs inside the graph. 'cocitation' lists
-    [id_a, id_b, n] where n works in this graph cite both; computed on this sample, not the
-    whole literature, so n is a lower bound. 'coupling' lists [id_a, id_b, shared, strength]:
-    the two works share 'shared' references in their full reference lists, and strength =
-    shared / sqrt(refs_a * refs_b) in 0-1. Coupling links recent works that nobody has
-    co-cited yet. Use paper_table with node ids for abstracts and keywords.
-
-    To visualize, build a D3 artifact with two views: (1) timeline, x = year, y = cited_by
-    on a log scale, arrows for citation_edges, seeds highlighted, colour by field;
-    (2) similarity network, force layout with a toggle between cocitation (weight n) and
-    coupling (weight strength), node size by seeds_linked, isolated nodes hidden.
-    Enable d3.zoom on both (wheel/pinch to zoom, drag to pan,
-    double-click or a button to reset); on the timeline rescale the axes instead of
-    scaling the marks, and show titles only for seeds or once zoomed in.
-    Tell the reader that distances in a force layout have no metric
-    meaning and that citation counts favour older works. OpenAlex reference lists are
-    incomplete for many humanities and older works: 'log.seeds_without_references' flags them.
-    'coverage_check' (check_coverage=True, one Semantic Scholar batch request, seeds with a
-    DOI only, never blocks the graph) compares each seed's reference and citation counts in
-    OpenAlex and Semantic Scholar: 'both_empty' means two sources agree there is nothing to
-    find; 'openalex_lower' or 'openalex_missing' means the graph under-counts that seed and
-    its absences are coverage gaps, not facts. Counts are definitions that differ per
-    source and both derive partly from Crossref, so 'concordant' is not independent proof.
+    Same nodes, scores (seeds_linked, seed_cocited, seed_coupling), citation_edges,
+    cocitation and coupling as map_get, computed on this sample (lower bounds). For work
+    that continues across chats prefer map_create + map_expand + map_get, which persist the
+    graph and the reading state. Use paper_table with node ids for abstracts.
+    OpenAlex reference lists are incomplete for humanities and older works:
+    'log.seeds_without_references' flags them; 'coverage_check' (check_coverage=True, one
+    Semantic Scholar batch, DOI seeds only) says per seed whether OpenAlex counts are
+    'concordant', 'openalex_lower', 'openalex_missing' or 'both_empty'. The page in the
+    server instructions shows maps, not this output; for a one-off visualization build a
+    D3 artifact (timeline year x citations, and a force network on cocitation/coupling).
     """
     seeds = seeds[:10]
     citing_per_seed = max(0, min(citing_per_seed, 100))
@@ -2619,8 +2622,9 @@ async def paper_table(ids: list[str], fill_from_semantic_scholar: bool = True) -
 # citation_graph fetchers and _graph_links. Links are recomputed from stored reference lists.
 
 MAP_MAX_NODES = 2000
-MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 EXPAND_MODES = ("references", "citing", "similar", "authors")
+ExpandMode = Literal["references", "citing", "similar", "authors"]
+MapState = Literal["new", "to_read", "read", "dismissed"]
 
 
 def _map_db():
@@ -2741,7 +2745,7 @@ def _public_node(n: dict) -> dict:
 async def map_create(name: str, seeds: list[str] | None = None, description: str | None = None) -> dict:
     """Create a persistent literature map, optionally with seed works (DOIs or OpenAlex ids).
     Maps live on the Pi (SQLite) and keep seeds, candidates and reading state across chats;
-    the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get.
     """
     maps, db = _map_db()
     try:
@@ -2768,7 +2772,7 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
     call. A candidate already in the map is promoted to seed. When OpenAlex has no reference
     list for a seed (books, humanities), the references come from Semantic Scholar if it has
     them; 'warnings' names seeds that still have none, which make sparse maps: add more seeds
-    from the same field. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT ."""
+    from the same field."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -2814,7 +2818,7 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
 
 
 @mcp.tool()
-async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 20,
+async def map_expand(map: str, modes: list[ExpandMode] | None = None, per_seed: int = 20,
                      seeds: list[str] | None = None, max_new: int = 150) -> dict:
     """Grow a map from its seeds (or from the given seed ids): 'references' (works the seeds
     cite), 'citing' (most-cited works citing each seed), 'similar' (Semantic Scholar
@@ -2824,7 +2828,7 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
     citing/similar/authors per seed (max 100). seeds may name any works in the map (not only
     seeds) to expand from them. At most max_new new works enter per call (default 150; a map
     holds at most 2000): those linked to most starting works first, then the most cited.
-    Duplicate records of one work (preprint and published version) are merged afterwards. The user views maps at https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT .
+    Duplicate records of one work (preprint and published version) are merged afterwards.
     """
     maps, db = _map_db()
     try:
@@ -2876,7 +2880,7 @@ async def map_expand(map: str, modes: list[str] | None = None, per_seed: int = 2
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def map_suggest(map: str, limit: int = 20, include_states: list[str] | None = None) -> dict:
+async def map_suggest(map: str, limit: int = 20, include_states: list[MapState] | None = None) -> dict:
     """Candidates most likely missing from the reading, ranked like citation_graph: by how many
     seeds they cite or are cited by (seeds_linked), then how often works in the map cite them
     together with a seed (seed_cocited), then the strongest coupling with a seed, then citation
@@ -2927,14 +2931,13 @@ async def map_mark(map: str, ids: list[str], state: Literal["new", "to_read", "r
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def map_get(map: str, states: list[str] | None = None, min_cocitation: int = 2,
+async def map_get(map: str, states: list[MapState] | None = None, min_cocitation: int = 2,
                   min_coupling: int = 3) -> dict:
     """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
     and links computed on the whole map: citation_edges, cocitation, coupling (same format and
     caveats as citation_graph). states filters the works returned (links are kept only
-    between returned works). To SHOW a map, give the user the 'Literature maps' page, which
-    reads every map live: https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT (choose the map in its menu). Build a separate artifact only
-    if the user asks for one."""
+    between returned works). To SHOW a map, give the user the 'Literature maps' page (link in
+    the server instructions and map_list), not a new artifact, unless the user asks for one."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -3142,7 +3145,7 @@ async def map_check_retractions(map: str) -> dict:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def map_export(map: str, states: list[str] | None = None) -> dict:
+async def map_export(map: str, states: list[MapState] | None = None) -> dict:
     """A map as a Markdown reading list (seeds, then works by state, with DOI links and
     whether each is in Zotero or has a note), to save in Obsidian with the Obsidian MCP's
     write_note outside the schema scope, e.g. 'Maps/<map name>.md'. states defaults to

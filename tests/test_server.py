@@ -97,22 +97,22 @@ def test_semantic_scholar_paper_routes(monkeypatch, action, suffix):
     (s.semantic_scholar, {"action": "snippets", "query": "interaction design",
                           "params": {"limit": 3}},
      "GET", "/graph/v1/snippet/search", None),
-    (s.semantic_scholar_recommendations, {"action": "single", "paper_id": "123",
-                                         "params": {"from": "all-cs", "limit": 5}},
+    (s.semantic_scholar, {"action": "recommend_single", "paper_id": "123",
+                          "params": {"from": "all-cs", "limit": 5}},
      "GET", "/recommendations/v1/papers/forpaper/123", None),
-    (s.semantic_scholar_recommendations, {"action": "multi", "positive_paper_ids": ["123"],
-                                         "negative_paper_ids": ["456"]},
+    (s.semantic_scholar, {"action": "recommend_multi", "positive_paper_ids": ["123"],
+                          "negative_paper_ids": ["456"]},
      "POST", "/recommendations/v1/papers/",
      {"positivePaperIds": ["123"], "negativePaperIds": ["456"]}),
-    (s.semantic_scholar, {"action": "dataset_releases"},
+    (s.semantic_scholar_datasets, {"action": "releases"},
      "GET", "/datasets/v1/release/", None),
-    (s.semantic_scholar, {"action": "dataset_release"},
+    (s.semantic_scholar_datasets, {"action": "release"},
      "GET", "/datasets/v1/release/latest", None),
-    (s.semantic_scholar, {"action": "dataset_files", "dataset_name": "papers",
+    (s.semantic_scholar_datasets, {"action": "files", "dataset_name": "papers",
                           "release_id": "2026-10-01"},
      "GET", "/datasets/v1/release/2026-10-01/dataset/papers", None),
-    (s.semantic_scholar, {"action": "dataset_diffs", "dataset_name": "papers",
-                          "start_release_id": "2026-10-01"},
+    (s.semantic_scholar_datasets, {"action": "diffs", "dataset_name": "papers",
+                                   "start_release_id": "2026-10-01"},
      "GET", "/datasets/v1/diffs/2026-10-01/to/latest/papers", None),
 ])
 def test_semantic_scholar_other_routes(monkeypatch, tool, kwargs, method, path, body):
@@ -122,8 +122,11 @@ def test_semantic_scholar_other_routes(monkeypatch, tool, kwargs, method, path, 
         assert request.method == method
         assert request.url.path == path
         assert request.headers["x-api-key"] == "test-key"
+        expected = dict(kwargs.get("params", {}))
+        if tool is s.semantic_scholar and kwargs["action"] in s._S2_LIST_ACTIONS:
+            expected.setdefault("limit", s.S2_DEFAULT_LIMIT)
         assert dict(request.url.params) == {
-            key: str(value) for key, value in kwargs.get("params", {}).items()
+            key: str(value) for key, value in expected.items()
         } | ({"query": kwargs["query"]} if "query" in kwargs else {})
         assert (json.loads(request.content) if request.content else None) == body
         return httpx.Response(200, json={"original": [None, {"license": "CC-BY"}]})
@@ -153,23 +156,21 @@ def test_semantic_scholar_other_routes(monkeypatch, tool, kwargs, method, path, 
     (s.semantic_scholar, {"action": "snippets"}),
     (s.semantic_scholar, {"action": "snippets", "query": " "}),
     (s.semantic_scholar, {"action": "snippets", "query": "design", "params": {"query": "other"}}),
-    (s.semantic_scholar, {"action": "dataset_files"}),
-    (s.semantic_scholar, {"action": "dataset_diffs", "dataset_name": "papers"}),
-    (s.semantic_scholar, {"action": "dataset_release", "dataset_name": "papers"}),
-    (s.semantic_scholar, {"action": "dataset_releases", "start_release_id": "2026-10-01"}),
-    (s.semantic_scholar, {"action": "dataset_releases", "params": {"fields": "x"}}),
+    (s.semantic_scholar, {"action": "dataset_releases"}),
+    (s.semantic_scholar_datasets, {"action": "files"}),
+    (s.semantic_scholar_datasets, {"action": "diffs", "dataset_name": "papers"}),
     (s.semantic_scholar, {"action": "paper_details", "paper_id": "1", "author_id": "2"}),
     (s.semantic_scholar, {"action": "author_details", "author_id": "1", "paper_id": "2"}),
     (s.semantic_scholar, {"action": "paper_search", "params": {"query": "x"}, "query": "y"}),
-    (s.semantic_scholar, {"action": "paper_details", "paper_id": "1", "release_id": "latest"}),
+    (s.semantic_scholar, {"action": "paper_details", "paper_id": "1", "positive_paper_ids": ["2"]}),
     (s.semantic_scholar, {"action": "unknown"}),
-    (s.semantic_scholar_recommendations, {"action": "single"}),
-    (s.semantic_scholar_recommendations, {"action": "single", "paper_id": "123",
-                                         "positive_paper_ids": ["456"]}),
-    (s.semantic_scholar_recommendations, {"action": "multi"}),
-    (s.semantic_scholar_recommendations, {"action": "multi", "positive_paper_ids": [" "]}),
-    (s.semantic_scholar_recommendations, {"action": "multi", "positive_paper_ids": ["123"],
-                                         "params": {"from": "recent"}}),
+    (s.semantic_scholar, {"action": "recommend_single"}),
+    (s.semantic_scholar, {"action": "recommend_single", "paper_id": "123",
+                          "positive_paper_ids": ["456"]}),
+    (s.semantic_scholar, {"action": "recommend_multi"}),
+    (s.semantic_scholar, {"action": "recommend_multi", "positive_paper_ids": [" "]}),
+    (s.semantic_scholar, {"action": "recommend_multi", "positive_paper_ids": ["123"],
+                          "params": {"from": "recent"}}),
 ])
 def test_semantic_scholar_rejects_invalid_inputs_before_network(monkeypatch, tool, kwargs):
     def unexpected_http():
@@ -195,7 +196,7 @@ def test_semantic_scholar_preserves_api_errors(monkeypatch, status_code):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             monkeypatch.setattr(s, "_http", lambda: client)
             monkeypatch.setattr(s.asyncio, "sleep", no_sleep)
-            return await s.semantic_scholar("dataset_releases")
+            return await s.semantic_scholar_datasets("releases")
 
     assert asyncio.run(run()) == {"status": "error", "http_status": status_code,
                                  "data": {"error": "API error"}}
@@ -212,7 +213,7 @@ def test_semantic_scholar_transport_errors(monkeypatch, failure):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             monkeypatch.setattr(s, "_http", lambda: client)
-            return await s.semantic_scholar("dataset_releases")
+            return await s.semantic_scholar_datasets("releases")
 
     result = asyncio.run(run())
     assert result["status"] == "error"
@@ -221,13 +222,13 @@ def test_semantic_scholar_transport_errors(monkeypatch, failure):
 
 def test_semantic_scholar_mcp_tools_registered():
     tools = {tool.name: tool for tool in asyncio.run(s.mcp.list_tools())}
-    for name in ("semantic_scholar", "semantic_scholar_recommendations"):
+    for name in ("semantic_scholar", "semantic_scholar_datasets"):
         assert tools[name].inputSchema["type"] == "object"
         assert tools[name].annotations.readOnlyHint is True
-    for retired in ("paper", "author", "snippets", "datasets"):
+    for retired in ("paper", "author", "snippets", "recommendations"):
         assert f"semantic_scholar_{retired}" not in tools
     enum = set(tools["semantic_scholar"].inputSchema["properties"]["action"]["enum"])
-    assert len(enum) == 18 and enum == set(s._S2_ACTIONS)
+    assert len(enum) == 16 and enum == set(s._S2_ACTIONS)
 
 
 @pytest.mark.parametrize("api_key", ["", "test-openalex-key"])
@@ -337,24 +338,25 @@ def test_openalex_entity_single_identifier(monkeypatch, identifier):
                        "method": "GET"}, "GET", "/text/topics", None),
     (s.openalex_text, {"title": "Human computer interaction and ethics", "target": "keywords"},
      "POST", "/text/keywords", {"title": "Human computer interaction and ethics", "abstract": ""}),
-    (s.openalex_query, {"action": "execute", "query": "works where year is (2020)"},
+    (s.openalex_query, {"query": "works where year is (2020)"},
      "POST", "/", {"oql": "works where year is (2020)"}),
-    (s.openalex_query, {"action": "execute", "query": {"get_rows": "works"}, "query_format": "oqo"},
+    (s.openalex_query, {"query": {"get_rows": "works"}, "query_format": "oqo"},
      "POST", "/", {"oqo": {"get_rows": "works"}}),
-    (s.openalex_query, {"action": "execute", "query": "works", "method": "GET"},
+    (s.openalex_query, {"query": "works", "method": "GET"},
      "GET", "/", None),
-    (s.openalex_query, {"action": "translate", "query": "/works", "query_format": "oxurl"},
+    (s.openalex_query_inspect, {"action": "translate", "query": "/works", "query_format": "oxurl"},
      "POST", "/query", {"oxurl": "/works"}),
-    (s.openalex_query, {"action": "translate", "query": "works", "method": "GET"},
-     "GET", "/query/oql/works", None),
-    (s.openalex_query, {"action": "validate", "query": "works"}, "GET", "/validate", None),
-    (s.openalex_query, {"action": "context", "query": "works", "params": {"pos": 5}},
+    (s.openalex_query_inspect, {"action": "translate", "query": {"get_rows": "works"},
+                                "query_format": "oqo"},
+     "POST", "/query", {"oqo": {"get_rows": "works"}}),
+    (s.openalex_query_inspect, {"action": "validate", "query": "works"}, "GET", "/validate", None),
+    (s.openalex_query_inspect, {"action": "context", "query": "works", "params": {"pos": 5}},
      "GET", "/parse-context", None),
-    (s.openalex_query, {"action": "properties"}, "GET", "/properties", None),
-    (s.openalex_query, {"action": "properties", "entity": "works"},
+    (s.openalex_query_inspect, {"action": "properties"}, "GET", "/properties", None),
+    (s.openalex_query_inspect, {"action": "properties", "entity": "works"},
      "GET", "/properties/works", None),
-    (s.openalex_query, {"action": "spec"}, "GET", "/query/spec", None),
-    (s.openalex_query, {"action": "spec", "artifact": "oqo"}, "GET", "/query/spec/oqo", None),
+    (s.openalex_query_inspect, {"action": "spec"}, "GET", "/query/spec", None),
+    (s.openalex_query_inspect, {"action": "spec", "artifact": "oqo"}, "GET", "/query/spec/oqo", None),
     (s.openalex_status, {}, "GET", "/rate-limit", None),
     (s.openalex_status, {"action": "changefiles"}, "GET", "/changefiles", None),
     (s.openalex_status, {"action": "changefiles", "date": "2026-10-01"},
@@ -371,7 +373,7 @@ def test_openalex_special_routes(monkeypatch, tool, kwargs, method, path, body):
         assert (json.loads(request.content) if request.content else None) == body
         if tool is s.openalex_autocomplete:
             assert request.url.params["q"] == kwargs["query"]
-        if tool is s.openalex_query and kwargs["action"] in {"validate", "context"}:
+        if tool is s.openalex_query_inspect and kwargs["action"] in {"validate", "context"}:
             assert request.url.params["q"] == kwargs["query"]
         return httpx.Response(200, json={"api_key": "test-key", "results": [],
                                         "message": "test-key", "meta": {"next_cursor": "next"}})
@@ -470,12 +472,15 @@ def test_openalex_single_routes(monkeypatch, entity):
     (s.openalex_autocomplete, {"query": "test", "entity": "unknown"}),
     (s.openalex_text, {"title": "short"}),
     (s.openalex_text, {"title": "x" * 2001}),
-    (s.openalex_query, {"action": "execute"}),
-    (s.openalex_query, {"action": "execute", "query": "works", "query_format": "oxurl"}),
-    (s.openalex_query, {"action": "execute", "query": "works", "query_format": "oqo"}),
-    (s.openalex_query, {"action": "context", "query": "works"}),
-    (s.openalex_query, {"action": "execute", "query": "works", "params": {"oql": "authors"}}),
-    (s.openalex_query, {"action": "spec", "artifact": ".."}),
+    (s.openalex_query, {"query": " "}),
+    (s.openalex_query, {"query": "works", "query_format": "oqo"}),
+    (s.openalex_query, {"query": {"get_rows": "works"}, "query_format": "oql"}),
+    (s.openalex_query_inspect, {"action": "context", "query": "works"}),
+    (s.openalex_query, {"query": "works", "params": {"oql": "authors"}}),
+    (s.openalex_query_inspect, {"action": "spec", "artifact": ".."}),
+    (s.openalex_query_inspect, {"action": "translate"}),
+    (s.openalex_query_inspect, {"action": "properties", "query": "works"}),
+    (s.openalex_query_inspect, {"action": "validate", "query": "works", "entity": "works"}),
     (s.openalex_account_read, {"action": "collection"}),
     (s.openalex_account_read, {"action": "collections", "collection_id": "col_123"}),
     (s.openalex_account_write, {"action": "create_collection"}),
