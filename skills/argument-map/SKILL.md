@@ -23,7 +23,8 @@ the method around it.
 - The user's position goes to My Observations, in the user's words; the model's reading of a
   source goes to the source's note (reading-note skill), not to the thesis note.
 - Distinctions first: when a term in the thesis admits several readings, Position says which
-  one the note takes, and entries that argue about a different reading say so.
+  one the note takes (link the concept note, concept-card skill), and entries that argue about
+  a different reading say so.
 
 ## Steps
 

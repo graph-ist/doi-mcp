@@ -13,6 +13,7 @@ entry point, loaded by Claude when the task matches its description.
 | `prior-art` | a technique or a paper, to see its patents and the literature they cite | DOI, Zotero |
 | `draft` | a manuscript with `[@citekey]` citations, to check, verify and give a bibliography | DOI, Zotero, Obsidian |
 | `argument-map` | a thesis, to record who supports it and who objects, with pages | Obsidian, Zotero, DOI |
+| `concept-card` | a contested term, to record its readings by author and how they relate (adopts, revises, rejects, applies) | Obsidian, Zotero, DOI |
 
 Reference checking (`find_doi`, `verify_doi`, `verify_book`, `format_apa`, `check_citations`)
 stays a prompt of the DOI MCP (*Verifica riferimenti*), because it involves one server only.

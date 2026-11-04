@@ -2,6 +2,10 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.8.1
+
+- Skill `concept-card` (schede di concetto con relazioni tipizzate, MCP Obsidian 0.5.0); fixture di contratto di Obsidian aggiornate con `relations`.
+
 ## 0.8.0
 
 - OpenCitations Index come terzo conteggio nel `coverage_check` di `citation_graph` (`opencitations_cited_by`, `opencitations_references` e verdetti) e in `map_refresh`, che salva `cited_by_oc` per ogni seed e segnala in `coverage_gaps` i seed che OpenCitations conta molto più di OpenAlex; il report settimanale li elenca. `OPENCITATIONS_TOKEN` facoltativo.
