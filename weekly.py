@@ -16,6 +16,7 @@ Env: STATE_DIRECTORY, KNOWLEDGE_DIR, BACKUP_DIR, BACKUP_KEEP, plus the server's 
 import asyncio
 import json
 import os
+import urllib.request
 import shutil
 import sqlite3
 import sys
@@ -127,6 +128,19 @@ def render(results: dict) -> str:
             lines.append(f"  - to read or to write up: {r.get('title')} ({r.get('year') or 'n.d.'}) · zotero://select/library/items/{r['key']}")
         for n in c.get("notes_with_missing_item", [])[:10]:
             lines.append(f"  - note whose item is gone: [[{n['note'].rsplit('/', 1)[-1].removesuffix('.md')}]]")
+    lines += ["", "## Searches this week"]
+    searches = results.get("searches") or []
+    if isinstance(searches, dict) and "error" in searches:
+        lines.append(f"- {searches['error']}")
+    elif not searches:
+        lines.append("- none")
+    for e in (searches if isinstance(searches, list) else [])[:30]:
+        if e.get("kind") == "map_create":
+            lines.append(f"- {e['at'][:10]}: map **{e.get('map')}** created ({e.get('seeds', 0)} seeds)")
+        else:
+            hits = e.get("hits") or {}
+            total = sum(v for v in hits.values() if isinstance(v, int))
+            lines.append(f"- {e['at'][:10]}: `{e.get('query')}` on {', '.join(e.get('databases') or [])}: {total} hit(s)" + (" (with errors)" if e.get('errors') else ""))
     lines += ["", "## Maintenance"]
     h = results.get("harvest") or {}
     lines.append(f"- PhilArchive: {h.get('records', 0)} record(s) harvested" if "error" not in h else f"- PhilArchive: {h['error']}")
@@ -136,10 +150,31 @@ def render(results: dict) -> str:
     return "\n".join(lines)
 
 
+def notify(results: dict, report_path: str) -> dict:
+    """Push a short summary to ntfy when NTFY_URL is set (https://ntfy.sh/<topic> or a private
+    server; NTFY_TOKEN for a protected topic). The report itself stays in the vault inbox."""
+    url = os.environ.get("NTFY_URL", "").strip()
+    if not url:
+        return {"status": "disabled"}
+    maps = results.get("maps") or {}
+    new = sum((r.get("new_citing") or r.get("added") or 0) for r in maps.values() if isinstance(r, dict)) if isinstance(maps, dict) else 0
+    notices = len((results.get("retractions") or {}).get("notices") or [])
+    errors = [k for k, v in results.items() if isinstance(v, dict) and "error" in v]
+    body = f"{new} new citing work(s), {notices} retraction notice(s)" + (f"; failed: {', '.join(errors)}" if errors else "")
+    headers = {"Title": f"Weekly report {results.get('date')}", "Tags": "books" + (",warning" if errors else ""),
+               "Content-Type": "text/plain; charset=utf-8"}
+    if os.environ.get("NTFY_TOKEN"):
+        headers["Authorization"] = f"Bearer {os.environ['NTFY_TOKEN']}"
+    req = urllib.request.Request(url, data=body.encode("utf-8"), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return {"status": "sent", "http_status": r.status, "body": body}
+
+
 async def run(server, knowledge, do_backup: bool = True, do_harvest: bool = True) -> dict:
     results: dict = {"date": today()}
     steps = [("maps", lambda: refresh_maps(server)), ("retractions", lambda: retractions(server, knowledge)),
-             ("coverage", lambda: asyncio.to_thread(coverage, knowledge))]
+             ("coverage", lambda: asyncio.to_thread(coverage, knowledge)),
+             ("searches", lambda: asyncio.to_thread(server._read_search_log, 7))]
     if do_harvest:
         steps.append(("harvest", lambda: asyncio.to_thread(harvest)))
     if do_backup:
@@ -163,6 +198,10 @@ async def run(server, knowledge, do_backup: bool = True, do_harvest: bool = True
     finally:
         os.umask(old_umask)
     results["report"] = path
+    try:
+        results["notify"] = notify(results, path)
+    except Exception as e:  # noqa: BLE001
+        results["notify"] = {"error": f"{type(e).__name__}: {e}"}
     return results
 
 

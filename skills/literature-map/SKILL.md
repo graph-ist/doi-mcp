@@ -25,7 +25,8 @@ linked in the DOI MCP's instructions; give that link whenever a map changes.
 
 ## Steps
 
-1. **Seeds.** `map_create(name, description)`; then `map_add_seeds` with DOIs, or
+1. **Seeds.** `search_log(topic)` first: it says whether the same search was made and what it
+   gave. `map_create(name, description)`; then `map_add_seeds` with DOIs, or
    `zotero_collection` / `zotero_tag` (e.g. `cited/<project>`). Items without DOI enter as
    `Z:` nodes; if the result warns that their bibliography is not extracted, run the Zotero
    MCP's `save_references(collection=…)` (books and humanities) and add the seeds again.

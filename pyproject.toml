@@ -1,6 +1,6 @@
 [project]
 name = "paper-doi-mcp"
-version = "0.6.0"
+version = "0.6.1"
 description = "MCP server that resolves and verifies DOIs and book editions, and searches the scholarly literature across open indexes"
 requires-python = ">=3.10"
 dependencies = ["mcp[cli]>=1.2.0,<2", "httpx>=0.27"]

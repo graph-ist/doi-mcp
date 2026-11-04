@@ -162,6 +162,25 @@ def parse_npl(text: str) -> dict:
     doi = DOI.search(text)
     title = re.search(r"[\"“]([^\"”]{8,300})[\"”]", text)
     year = re.findall(r"\b(19[5-9]\d|20[0-3]\d)\b", text)
-    author = re.match(r"\s*([A-ZÀ-Þ][A-Za-zÀ-ÿ'\-]+)", text)
     return {"doi": doi.group(0).rstrip(".)]") if doi else None, "title": title.group(1).strip(" ,.") if title else None,
-            "first_author": author.group(1).title() if author else None, "year": int(year[0]) if year else None}
+            "first_author": npl_surname(text), "year": int(year[0]) if year else None}
+
+
+def npl_surname(text: str) -> str | None:
+    """First author's surname of an NPL citation. Search reports write 'SMITH J ET AL:' (surname,
+    initials), but also 'JOHN SMITH:' or 'John Smith, Mary Jones:' (given name first): when the
+    words after the first are not initials, the surname is the last word of the first author."""
+    head = re.split(r"[:\"“]", text, maxsplit=1)[0]
+    first = re.split(r",| ET AL| AND |;|&", head, maxsplit=1, flags=re.I)[0].strip(" .")
+    words = [w for w in re.findall(r"[A-Za-zÀ-ÿ'\-]+\.?", first) if w.lower() not in ("et", "al", "al.")]
+    if not words:
+        return None
+    initial = lambda w: len(w.rstrip(".")) <= 2 and w.rstrip(".").isupper()
+    rest = list(words)
+    while len(rest) > 1 and initial(rest[-1]):
+        rest.pop()  # 'VAN DER LINDEN J' -> ['VAN', 'DER', 'LINDEN']
+    if len(rest) < len(words) or len(rest) == 1:
+        surname = " ".join(rest)  # surname first, with its particles
+    else:
+        surname = rest[-1]  # 'JOHN SMITH': given name first
+    return surname.rstrip(".").title()

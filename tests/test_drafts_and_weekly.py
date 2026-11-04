@@ -118,3 +118,70 @@ def test_http_auth_is_bearer_only_and_status_is_loopback(snap, tmp_path, monkeyp
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("203.0.113.9", 1)), base_url="http://host") as c:
             assert (await c.get("/status")).status_code == 404
     asyncio.run(scenario())
+
+
+def test_search_register_and_search_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(s, "SEARCH_LOG", str(tmp_path / "searches.jsonl"))
+
+    async def fake_openalex(query, year_from, year_to, doc_types, limit, page, scope, oa, ex, fill):
+        return s._ok("OpenAlex", query, scope, None, page, limit, 42, [])
+
+    async def fake_dnb(query, year_from, year_to, limit, page, scope):
+        raise RuntimeError("DNB down")
+    monkeypatch.setattr(s, "_search_openalex", fake_openalex)
+    monkeypatch.setitem(s._ADAPTERS, "dnb", fake_dnb)
+    asyncio.run(s.search_literature("affordance theory", year_from=2015))
+    asyncio.run(s.search_literature("affordance theory", database="openalex,dnb"))
+    asyncio.run(s.search_literature("embodied interaction"))
+    entries = s._read_search_log()
+    assert [e["kind"] for e in entries] == ["search_literature"] * 3
+    assert entries[0]["hits"] == {"OpenAlex": 42} and entries[0]["year_from"] == 2015 and entries[0]["errors"] == 0
+    assert entries[1]["databases"] == ["openalex", "dnb"] and entries[1]["errors"] == 1
+    out = asyncio.run(s.search_log("Affordance Theory"))
+    assert len(out["same"]) == 2 and out["summary"].startswith("searched 2 time(s) before, last on")
+    assert asyncio.run(s.search_log("theory of affordances"))["similar"] == [] and \
+        asyncio.run(s.search_log("affordance theory and design"))["similar"]
+    assert asyncio.run(s.search_log("nothing like this"))["summary"] == "not searched before"
+    assert asyncio.run(s.search_log())["total_in_period"] == 3 and asyncio.run(s.search_log(days=0))["total_in_period"] == 3
+
+
+def test_weekly_report_lists_searches_and_notifies(snap, tmp_path, monkeypatch):
+    import weekly
+    monkeypatch.setattr(weekly, "STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(weekly, "LAST", str(tmp_path / "state" / "weekly-last.json"))
+    monkeypatch.setattr(s, "SEARCH_LOG", str(tmp_path / "searches.jsonl"))
+    s._log_event("search_literature", query="affordance theory", databases=["openalex"], hits={"OpenAlex": 42}, returned=25, errors=0)
+    s._log_event("map_create", map="Design", seeds=3)
+
+    async def maps():
+        return {"maps": []}
+
+    async def retractions(dois=None, map=None):
+        return {"notices": [], "not_checked": []}
+    monkeypatch.setattr(s, "map_list", maps)
+    monkeypatch.setattr(s, "check_retractions", retractions)
+    sent = {}
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=20):
+        sent["url"], sent["body"], sent["headers"] = req.full_url, req.data.decode(), dict(req.headers)
+        return _Resp()
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.example/topic")
+    monkeypatch.setenv("NTFY_TOKEN", "tk")
+    monkeypatch.setattr(weekly.urllib.request, "urlopen", fake_urlopen)
+    out = asyncio.run(weekly.run(s, knowledge, do_backup=False, do_harvest=False))
+    report = open(out["report"], encoding="utf-8").read()
+    assert "## Searches this week" in report and "`affordance theory` on openalex: 42 hit(s)" in report and "map **Design** created (3 seeds)" in report
+    assert out["notify"]["status"] == "sent" and sent["url"] == "https://ntfy.example/topic"
+    assert sent["headers"]["Title"].startswith("Weekly report") and sent["headers"]["Authorization"] == "Bearer tk"
+    assert "0 new citing work(s), 0 retraction notice(s)" in sent["body"]
+    monkeypatch.delenv("NTFY_URL")
+    assert asyncio.run(weekly.run(s, knowledge, do_backup=False, do_harvest=False))["notify"] == {"status": "disabled"}

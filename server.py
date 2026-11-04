@@ -27,7 +27,7 @@ import re
 import time
 import unicodedata
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from matching import (  # one implementation of "is this record the cited work?", shared with the Zotero MCP
     TITLE_THRESHOLD, SHORT_TITLE_TOKENS, NON_WORK_TYPES, DERIVATIVE_RE, RETRACTED_PREFIX_RE, NAME_PARTICLES,
@@ -48,7 +48,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 INSTRUCTIONS = (
@@ -2407,6 +2407,75 @@ async def _search_philarchive(query, year_from, year_to, limit, page, scope) -> 
 
 DATABASES = ["openalex", "europepmc", "semanticscholar", "hal", "doaj", "arxiv", "osf", "zenodo", "dnb", "philarchive"]
 
+SEARCH_LOG = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "searches.jsonl")
+
+
+def _log_event(kind: str, **fields) -> None:
+    """Append a line to the search register (STATE_DIRECTORY/searches.jsonl); never fails a tool."""
+    try:
+        os.makedirs(os.path.dirname(SEARCH_LOG), exist_ok=True)
+        with open(SEARCH_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kind": kind, **fields},
+                               ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        pass
+
+
+def _log_search(out: dict, query: str, names: list[str], year_from, year_to, scope: str) -> dict:
+    log = out.get("log") or {}
+    hits = ({d["database"]: d.get("total_hits") for d in log.get("databases", []) if isinstance(d, dict)}
+            if "databases" in log else {log.get("database", names[0]): log.get("total_hits")})
+    _log_event("search_literature", query=query, databases=names, year_from=year_from, year_to=year_to, scope=scope,
+               status=out.get("status"), hits=hits, returned=len(out.get("results") or []),
+               errors=len(out.get("source_errors") or []) + (1 if out.get("status") != "ok" else 0))
+    return out
+
+
+def _read_search_log(days: int | None = None) -> list[dict]:
+    try:
+        lines = open(SEARCH_LOG, encoding="utf-8").read().splitlines()
+    except OSError:
+        return []
+    out = []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds") if days else None
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if cutoff and e.get("at", "") < cutoff:
+            continue
+        out.append(e)
+    return out
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def search_log(query: str | None = None, days: int = 365, limit: int = 20) -> dict:
+    """The register of past searches and maps: every search_literature call (query, databases,
+    years, hits per database, date) and every map_create, kept on the server. With query it
+    returns the entries whose query is the same or close (shared words), newest first, so a
+    search is not repeated and "already searched on …, N hits" can be said; without query the
+    latest entries. Nothing here judges relevance: it records what was asked and what came back."""
+    entries = _read_search_log(days)
+    if query:
+        want = set(_norm(query).split()) - {"and", "or", "not"}
+
+        def close(e):
+            have = set(_norm(e.get("query") or e.get("map") or "").split()) - {"and", "or", "not"}
+            if not want or not have:
+                return 0.0
+            return len(want & have) / len(want | have)
+        scored = [(close(e), e) for e in entries]
+        same = [e for sc, e in scored if _norm(e.get("query") or "") == _norm(query)]
+        near = [e for sc, e in scored if sc >= 0.5 and _norm(e.get("query") or "") != _norm(query)]
+        out = {"status": "ok", "query": query, "same": sorted(same, key=lambda e: e["at"], reverse=True)[:limit],
+               "similar": sorted(near, key=lambda e: e["at"], reverse=True)[:limit]}
+        out["summary"] = (f"searched {len(same)} time(s) before, last on {out['same'][0]['at'][:10]}" if same
+                          else "not searched before") + (f"; {len(near)} similar search(es)" if near else "")
+        return out
+    latest = sorted(entries, key=lambda e: e["at"], reverse=True)[:limit]
+    return {"status": "ok", "entries": latest, "total_in_period": len(entries), "days": days}
+
 
 def _surname_set(authors: list[str]) -> set[str]:
     """Surnames from heterogeneous formats: 'Mark C. Fox', 'Fox, M.', 'Fox MC'."""
@@ -2539,7 +2608,7 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
         for rec in r.get("results", []):
             rec["found_in"] = names
             rec["independent_sources"] = _independent(names)
-        return r
+        return _log_search(r, query, names, year_from, year_to, scope)
 
     merged, by_key, by_title, logs, errors, before = [], {}, {}, [], [], 0
     stats: dict[str, int] = {}
@@ -2589,7 +2658,7 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
                 by_key.setdefault(k, hit)
     for rec in merged:
         rec["independent_sources"] = _independent(rec["found_in"])
-    return {
+    out = {
         "status": "ok",
         "log": {"query": query, "scope": scope, "page": page, "per_page": limit,
                 "databases": logs, "records_before_dedup": before,
@@ -2599,6 +2668,7 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
                 "executed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
         "results": merged, "source_errors": errors,
     }
+    return _log_search(out, query, names, year_from, year_to, scope)
 
 
 CG_SELECT = ("id,doi,title,publication_year,cited_by_count,authorships,primary_topic,"
@@ -3160,6 +3230,7 @@ async def map_create(name: str, seeds: list[str] | None = None, description: str
     if seeds:
         out.update(await map_add_seeds(name, seeds))
         out["status"] = "ok"
+    _log_event("map_create", map=name.strip(), description=description, seeds=len(seeds or []))
     return out
 
 

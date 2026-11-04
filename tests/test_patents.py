@@ -105,3 +105,12 @@ def test_not_configured(monkeypatch):
     patents._token["value"] = None
     out = asyncio.run(s.patent_search("foldable display"))
     assert out["status"] == "not_configured"
+
+
+def test_npl_surname_handles_both_name_orders():
+    assert patents.npl_surname('LEE J ET AL: "Towards more paper-like input", PROC. UIST 2008') == "Lee"
+    assert patents.npl_surname('JOHN SMITH: "A foldable display", 2019') == "Smith"
+    assert patents.npl_surname('Maria Rossi, Luca Bianchi: "Flexible", 2020') == "Rossi"
+    assert patents.npl_surname('VAN DER LINDEN J: "x"') == "Van Der Linden"
+    assert patents.npl_surname('SMITH J.: "y"') == "Smith" and patents.npl_surname(': "no author"') is None
+    assert patents.parse_npl('JOHN SMITH: "A foldable display device", 2019')["first_author"] == "Smith"

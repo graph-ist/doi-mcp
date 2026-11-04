@@ -2,6 +2,12 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.6.1
+
+- Registro delle ricerche: ogni `search_literature` e `map_create` aggiunge una riga a `STATE_DIRECTORY/searches.jsonl`; `search_log(query)` dice se la stessa ricerca o una simile è già stata fatta, quando e con quanti risultati; il report settimanale elenca le ricerche della settimana.
+- Lavoro settimanale: notifica ntfy con il riassunto quando il report è pronto (`NTFY_URL`, `NTFY_TOKEN`).
+- Brevetti: il cognome del primo autore nelle citazioni di letteratura è letto anche nella forma «NOME COGNOME:» e con le particelle («VAN DER LINDEN J»).
+
 ## 0.6.0
 
 Incompatibile con 0.5.x
