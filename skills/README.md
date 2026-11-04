@@ -34,6 +34,10 @@ These are the invariants of the system; the skills restate them so that each one
 - Whether a work is *in the library* is decided by Zotero (`find_dois`); whether it is *read* is
   decided by the map state (`map_mark`) and by the existence of its note. The reading state never
   goes into the note.
-- After a write to Zotero: `refresh_library_snapshot`. After a write to the vault:
-  `refresh_notes_snapshot`. The maps read those snapshots and nothing else.
+- The maps read the two snapshots and nothing else. Both servers refresh their snapshot by
+  themselves a few seconds after a write; call `refresh_library_snapshot` or
+  `refresh_notes_snapshot` only when a map is read in the same breath as the write.
+- A bibliographic check leaves a trace: `create_item_from_doi` with the expected fields writes
+  a `Verified:` line on the item, `set_verification` records the outcome of `verify_doi` or
+  `verify_book` on an existing item, and the maps show it as `verified`.
 - Show a note or a batch of changes before writing it; one confirmation per batch, not per item.

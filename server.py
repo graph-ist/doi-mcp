@@ -47,7 +47,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 INSTRUCTIONS = (
@@ -1612,6 +1612,55 @@ async def patent_get(number: str, resolve_literature: int = 20, citing: bool = T
     return out
 
 
+@_patent_tool()
+async def map_add_patents(map: str, numbers: list[str], as_seed: bool = False) -> dict:
+    """Add patents to a literature map as 'P:<number>' nodes. Each cites the scientific literature
+    its search report lists with a printed DOI, resolved to OpenAlex works that enter the map as
+    candidates (found_by 'patent:P:<number>'). Citations without a DOI come back in 'unresolved'
+    with their raw text: resolve them with find_doi and verify_doi and add the works with
+    map_add_seeds; they are never guessed from a title. Patent nodes appear in map_get
+    'patent_edges' but take no part in co-citation, coupling or duplicate merging: an examiner's
+    citation establishes prior art, it is not a scholarly citation. 1 to 20 numbers per call."""
+    maps, db = _map_db()
+    try:
+        m = maps.map_row(db, map)
+    except KeyError as e:
+        return {"status": "not_found", "detail": str(e)}
+    if not numbers or len(numbers) > 20:
+        raise ValueError("numbers: give 1 to 20 patent publication numbers")
+    out = {"status": "ok", "map": m["name"], "patents": {}, "literature_added": 0, "unresolved": [], "source_errors": []}
+    for number in numbers:
+        try:
+            p = await patent_get(number, resolve_literature=0, citing=True)
+        except ValueError as e:
+            out["patents"][number] = {"status": "invalid_input", "detail": str(e)}
+            continue
+        if p.get("status") != "ok":
+            out["patents"][number] = p
+            continue
+        dois = [r["doi"] for r in p["cites_literature"] if r.get("doi")]
+        found, errs = await _oa_batch("doi", dois) if dois else ([], [])
+        out["source_errors"] += errs
+        pid = f"P:{p['number']}"
+        year = next((int(d[:4]) for d in (p.get("priority"), p.get("published")) if d and d[:4].isdigit()), None)
+        node = {"id": pid, "doi": None, "title": p["title"], "first_author": (p.get("applicants") or [None])[0],
+                "year": year, "cited_by": p.get("cited_by_total") or 0, "field": None, "subfield": None,
+                "topic": "patent", "momentum": None, "is_retracted": None,
+                "refs": [w["id"] for w in found], "refs_source": "epo"}
+        with db:
+            for w in found:
+                maps.upsert(db, m["id"], w, "candidate", f"patent:{pid}")
+            result = maps.upsert(db, m["id"], node, "seed" if as_seed else "candidate", "patent")
+            maps.touch(db, m["id"])
+        unresolved = [r["text"] for r in p["cites_literature"] if not r.get("doi")]
+        out["unresolved"] += [{"patent": pid, "text": t} for t in unresolved]
+        out["literature_added"] += len(found)
+        out["patents"][pid] = {"result": result, "title": p["title"], "literature_with_doi": len(dois),
+                               "resolved": len(found), "unresolved": len(unresolved), "cited_by_total": p.get("cited_by_total"),
+                               "url": p["url"]}
+    return out
+
+
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def internet_archive(title: str | None = None, author: str | None = None, year: int | None = None,
                            isbn: str | None = None, query: str | None = None, limit: int = 10,
@@ -2575,6 +2624,8 @@ def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: in
     """Citation edges, co-citation and coupling pairs; also sets each node's 'seeds_linked'."""
     edges, cocit, citers = [], {}, {}
     for n in nodes.values():
+        if _is_patent(n["id"]):
+            continue  # examiner citations: shown as patent_edges, never as co-citation or coupling
         inside = sorted({r for r in n["refs"] if r in nodes and r != n["id"]})
         edges += [[n["id"], r] for r in inside]
         for i, a in enumerate(inside):
@@ -2849,6 +2900,15 @@ def _is_oa(work_id: str) -> bool:
     return bool(re.fullmatch(r"W\d+", work_id or ""))
 
 
+def _is_patent(work_id: str) -> bool:
+    return str(work_id or "").startswith("P:")
+
+
+def _patent_edges(nodes: dict[str, dict]) -> list[list[str]]:
+    """[patent node, cited work] for every patent in the map and every cited work in the map."""
+    return [[k, r] for k, n in nodes.items() if _is_patent(k) for r in sorted(set(n["refs"])) if r in nodes]
+
+
 async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tuple[dict, str]], list[str]]:
     """(node, found_by) pairs for one expansion mode."""
     out, errors = [], []
@@ -2916,6 +2976,8 @@ def _map_view(nodes: dict[str, dict], min_cocitation: int = 2, min_coupling: int
     # co-cited with anything in the map: separates candidates when one seed links them all
     total = {k: 0 for k in nodes}
     for n in nodes.values():
+        if _is_patent(n["id"]):
+            continue
         inside = {r for r in n["refs"] if r in nodes and r != n["id"]}
         for r in inside:
             total[r] += len(inside) - 1
@@ -3047,7 +3109,9 @@ def _knowledge():
 
 
 def _public_node(n: dict) -> dict:
-    return {k: v for k, v in n.items() if k != "refs"}
+    out = {k: v for k, v in n.items() if k != "refs"}
+    out["kind"] = "patent" if _is_patent(n["id"]) else "book" if str(n["id"]).startswith(("B:", "Z:")) else "work"
+    return out
 
 
 @_tool()
@@ -3323,7 +3387,8 @@ async def map_get(map: str, states: list[MapState] | None = None, min_cocitation
     _knowledge().annotate(works)
     return {"status": "ok", "map": dict(m), "works": works, "snapshots": _knowledge().status(),
             "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
-            "coupling": [p for p in coupling if inside(p)]}
+            "coupling": [p for p in coupling if inside(p)],
+            "patent_edges": [e for e in _patent_edges(nodes) if inside(e)]}
 
 
 def _resolve_ids(nodes: dict, ids: list[str]) -> list[str]:
@@ -3345,7 +3410,7 @@ def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
     nodes = maps.nodes(db, map_id)
     groups: dict[str, list[dict]] = {}
     for n in nodes.values():
-        if (k := _dup_key(n)):
+        if not _is_patent(n["id"]) and (k := _dup_key(n)):
             groups.setdefault(k, []).append(n)
     order = {"new": 0, "dismissed": 1, "to_read": 2, "read": 3}
     merged = []
@@ -3528,7 +3593,9 @@ async def map_export(map: str, states: list[MapState] | None = None) -> dict:
     def line(n):
         ref = f"{n.get('first_author') or 'Unknown'} ({n.get('year') or 'n.d.'}). {n.get('title') or n['id']}."
         bits = [f"[DOI](https://doi.org/{n['doi']})" if n.get("doi") else None,
+                f"[Espacenet](https://worldwide.espacenet.com/patent/search?q=pn%3D{n['id'][2:]})" if _is_patent(n["id"]) else None,
                 f"[Zotero](zotero://select/library/items/{n['zotero_key']})" if n.get("zotero_key") else None,
+                f"verified {n['verified']['date']}" if (n.get("verified") or {}).get("status") == "match" else None,
                 ", ".join(f"[[{x['title']}]]" for x in n.get("notes", [])) or None,
                 "**retracted**" if n.get("is_retracted") else None,
                 n.get("note")]

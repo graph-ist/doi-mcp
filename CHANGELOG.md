@@ -2,6 +2,12 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.5.0
+
+- Ponte con Zotero: oltre a DOI e chiave, un lavoro viene abbinato per numero di brevetto (`P:`) e per titolo, cognome del primo autore e anno con le regole di `matching.py`; `library_match` dice quale criterio ha deciso. I nodi portano `verified` (la riga `Verified:` dell'item Zotero) e `map_export` lo mostra.
+- `map_add_patents` (solo con credenziali EPO): brevetti come nodi `P:<numero>` con la letteratura citata a DOI stampato; `map_get` restituisce `patent_edges` e `kind` (`work`, `book`, `patent`); i brevetti non entrano in co-citazione, coupling né nella fusione dei doppioni.
+- La pagina delle mappe non è stata aggiornata: i campi nuovi non sono ancora mostrati.
+
 ## 0.4.1
 
 - `matching.py`: il confronto bibliografico (normalizzazione dei titoli, similarità con varianti di sottotitolo, cognomi, anno, errata e repliche, analisi delle voci di bibliografia) esce da `server.py` in un modulo di sola libreria standard, incluso nel wheel. Nessun cambiamento di comportamento; l'MCP Zotero ne usa una copia identica, così `create_item_from_doi` ed `extract_references` applicano le stesse regole di `find_doi` e `verify_doi`.

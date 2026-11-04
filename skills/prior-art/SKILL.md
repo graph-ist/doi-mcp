@@ -5,8 +5,9 @@ description: Find patents around an interaction technique or a paper, read what 
 
 # Prior art
 
-Servers: DOI MCP (`patent_search`, `patent_get`, `find_doi`, `verify_doi`, `paper_table`,
-`map_add_seeds`), Zotero MCP (`find_dois`, `create_item_from_doi`, `create_item`). The patent
+Servers: DOI MCP (`patent_search`, `patent_get`, `map_add_patents`, `find_doi`, `verify_doi`,
+`paper_table`, `map_add_seeds`), Zotero MCP (`find_dois`, `create_item_from_doi`,
+`create_item_from_patent`). The patent
 tools exist only when the server has EPO OPS credentials; if they are missing from the tool
 list, say so and stop.
 
@@ -35,11 +36,13 @@ list, say so and stop.
    verified, candidate rejected, unresolved (with the raw text).
 4. **Use.** `paper_table` on the verified DOIs for abstracts; `find_dois` to see which are
    already in Zotero; add the rest through the add-to-library skill. A patent itself goes into
-   Zotero as `create_item(item_type="patent")` with `patentNumber`, `assignee`, `issueDate`,
-   `priorityNumbers`, `url` from `patent_get`; it has no DOI.
-5. **Map.** Verified literature can seed or extend a literature map (`map_add_seeds`). The
-   patents themselves do not enter the map: list them in the map's description or in the
-   Obsidian export as a separate section.
+   Zotero with `create_item_from_patent`, passing the fields of `patent_get` (number, title,
+   applicants, inventors, published, priority, abstract, url, family_id, ipc); it has no DOI and
+   the publication number is its identifier.
+5. **Map.** `map_add_patents(map, numbers)` puts the patents in a literature map as `P:` nodes
+   linked to the literature they cite with a printed DOI; its `unresolved` list is what still
+   needs `find_doi` and `verify_doi`, then `map_add_seeds`. `map_get` returns the links as
+   `patent_edges`, apart from the scholarly citation measures.
 
 ## Report
 

@@ -11,6 +11,8 @@ import json
 import os
 import re
 
+import matching
+
 KNOWLEDGE_DIR = os.environ.get("KNOWLEDGE_DIR", "/var/lib/knowledge")
 # Highest schema_version of each snapshot this reader understands. The writers (Zotero MCP
 # snapshot.py, Obsidian MCP snapshot.ts) bump theirs when a field changes meaning or is removed;
@@ -109,17 +111,61 @@ def items_where(collection: str | None = None, tag: str | None = None) -> list[d
     return out
 
 
+def _first_surname(it: dict) -> set[str]:
+    creators = it.get("creators") or []
+    return matching.surname(creators[0]) if creators and creators[0] else set()
+
+
+def _by_title(n: dict, by_surname: dict[str, list[dict]]) -> dict | None:
+    """The library item with the node's title (under the matching rules) and first author's
+    surname, year within one when both are known. For books and works whose DOI is on one side
+    only (OpenAlex has one, the Zotero record does not, or the reverse)."""
+    if not n.get("title") or not n.get("first_author"):
+        return None
+    best, best_score = None, 0.0
+    seen = set()
+    for tok in matching.surname(n["first_author"]):
+        for it in by_surname.get(tok, []):
+            if it["key"] in seen:
+                continue
+            seen.add(it["key"])
+            check = matching.assess({"title": it.get("title"), "authors": it.get("creators") or [], "year": it.get("year")},
+                                    n["title"], n["first_author"], n.get("year"))
+            if matching.eligible(check) and check["score"] > best_score:
+                best, best_score = it, check["score"]
+    return best
+
+
 def annotate(nodes: list[dict]) -> None:
-    """Add in_library, zotero_key and notes to map nodes (in place)."""
+    """Add in_library, zotero_key, library_match, verified, notes and zotero_tags to map nodes
+    (in place). A node is matched to a library item by DOI, then by Zotero key ('Z:' nodes and
+    seeds taken from Zotero), then by patent number ('P:' nodes), then by title, first author and
+    year under the matching rules; library_match says which."""
     lib, by_key = by_doi(), notes_by_key()
-    keys = {it["key"]: it for it in (library() or {}).get("items", [])}
+    items = (library() or {}).get("items", [])
+    keys = {it["key"]: it for it in items}
+    by_patent = {it["patent_number"]: it for it in items if it.get("patent_number")}
+    by_surname: dict[str, list[dict]] = {}
+    for it in items:
+        for tok in _first_surname(it):
+            by_surname.setdefault(tok, []).append(it)
     for n in nodes:
-        it = lib.get(norm_doi(n.get("doi"))) if n.get("doi") else None
-        # books without DOI: the node's zotero_key (set when the seed came from Zotero) or a "Z:KEY" id
-        zk = n.get("zotero_key") or (n["id"][2:] if str(n.get("id", "")).startswith("Z:") else None)
-        it = it or (keys.get(zk) if zk else None)
+        nid = str(n.get("id", ""))
+        it, how = (lib.get(norm_doi(n.get("doi"))) if n.get("doi") else None), "doi"
+        if it is None:
+            # books without DOI: the node's zotero_key (set when the seed came from Zotero) or a "Z:KEY" id
+            zk = n.get("zotero_key") or (nid[2:] if nid.startswith("Z:") else None)
+            it, how = (keys.get(zk) if zk else None), "key"
+        if it is None and nid.startswith("P:"):
+            num = nid[2:]
+            it = by_patent.get(num) or next((v for k, v in by_patent.items() if k.startswith(num) or num.startswith(k)), None)
+            how = "patent"
+        if it is None and not nid.startswith("P:"):
+            it, how = _by_title(n, by_surname), "title"
         n["in_library"] = bool(it)
+        n["library_match"] = how if it else None
         n["zotero_key"] = it["key"] if it else None
+        n["verified"] = it.get("verified") if it else None
         n["notes"] = by_key.get(it["key"], []) if it else []
         # only the tags that mean something on a map: core/seminal and cited/*
         n["zotero_tags"] = [t for t in it.get("tags", []) if t == "core/seminal" or t.startswith("cited/")] if it else []

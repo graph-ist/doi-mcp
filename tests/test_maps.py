@@ -80,7 +80,11 @@ def snapshot(monkeypatch, tmp_path):
     d = tmp_path / "knowledge"; d.mkdir()
     (d / "library.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "items": [
         {"key": "ZKEY0001", "doi": "10.1234/one", "title": "One", "tags": ["cited/x", "core/seminal", "sub/1"], "collections": ["Design › Theory"]},
-        {"key": "ZKEY0002", "doi": None, "title": "Book without DOI", "creators": ["Writer"], "year": 1999, "tags": ["cited/x"], "collections": []}]}))
+        {"key": "ZKEY0002", "doi": None, "title": "Book without DOI", "creators": ["Writer"], "year": 1999, "tags": ["cited/x"], "collections": []},
+        {"key": "ZKEY0003", "doi": None, "title": "Designerly ways of knowing", "creators": ["Cross", "Other"], "year": 1982,
+         "tags": ["sub/330304-design-theory"], "collections": [], "verified": {"date": "2026-11-04", "status": "match", "detail": "verify_book verified"}},
+        {"key": "ZKEY0004", "doi": None, "title": "Foldable display device", "creators": ["Lee"], "year": 2017,
+         "patent_number": "EP3500000B1", "tags": [], "collections": []}]}))
     (d / "notes.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "notes": [
         {"title": "One note", "path": "Zettelkasten/Summaries/One note.md", "zotero_keys": ["ZKEY0001"]}]}))
     monkeypatch.setattr(knowledge, "KNOWLEDGE_DIR", str(d))
@@ -316,3 +320,55 @@ def test_snapshot_schema_version_is_checked(snapshot):
     (snapshot / "library.json").write_text(json.dumps({**lib, "schema_version": 1}))
     knowledge._cache.clear()
     assert knowledge.library() is not None and "problems" not in knowledge.status()
+
+
+def test_bridge_matches_by_title_patent_and_shows_verification(snapshot):
+    import knowledge
+    nodes = [
+        # OpenAlex has a DOI for the book, the Zotero record has none: matched by title, author and year
+        {"id": "W10", "doi": "10.5555/oa-book", "title": "Designerly Ways of Knowing", "first_author": "Nigel Cross", "year": 1982},
+        # same title, other author: no match
+        {"id": "W11", "doi": None, "title": "Designerly ways of knowing", "first_author": "Schön", "year": 1982},
+        # a bibliography stub from a PDF, matched by title
+        {"id": "B:cross-1982-designerly-ways-knowing", "doi": None, "title": "Designerly ways of knowing", "first_author": "Cross", "year": 1983},
+        # a patent node matched by publication number, kind code ignored
+        {"id": "P:EP3500000", "doi": None, "title": "Foldable display device", "first_author": "ACME", "year": 2017},
+        {"id": "P:US1", "doi": None, "title": "Other", "first_author": "X", "year": 2000},
+    ]
+    knowledge.annotate(nodes)
+    assert [n["library_match"] for n in nodes] == ["title", None, "title", "patent", None]
+    assert nodes[0]["zotero_key"] == "ZKEY0003" and nodes[0]["verified"]["status"] == "match"
+    assert nodes[3]["zotero_key"] == "ZKEY0004" and nodes[1]["in_library"] is False
+
+
+def test_patents_in_maps(db, snapshot, monkeypatch):
+    async def fake_patent_get(number, resolve_literature=0, citing=True):
+        if number == "bad":
+            raise ValueError("not a patent publication number")
+        return {"status": "ok", "number": "EP3500000", "title": "Foldable display device", "applicants": ["ACME GMBH"],
+                "priority": "2017-06-01", "published": "2020-01-15", "cited_by_total": 2,
+                "url": "https://worldwide.espacenet.com/patent/search?q=pn%3DEP3500000",
+                "cites_literature": [{"text": "LEE J: ...", "doi": "10.1234/one"}, {"text": "KHALILBEIGI M: FoldMe", "doi": None}]}
+
+    async def fake_oa_batch(filter_key, values):
+        assert filter_key == "doi" and values == ["10.1234/one"]
+        return [db["W1"]], []
+    monkeypatch.setattr(s, "patent_get", fake_patent_get)
+    monkeypatch.setattr(s, "_oa_batch", fake_oa_batch)
+    run(s.map_create("P", ["W2"]))
+    out = run(s.map_add_patents("P", ["EP3500000", "bad"]))
+    assert out["literature_added"] == 1 and out["patents"]["P:EP3500000"]["result"] == "added"
+    assert out["patents"]["bad"]["status"] == "invalid_input" and out["unresolved"][0]["text"].startswith("KHALILBEIGI")
+    run(s.map_expand("P"))
+    got = run(s.map_get("P"))
+    p = next(w for w in got["works"] if w["id"] == "P:EP3500000")
+    assert p["kind"] == "patent" and p["year"] == 2017 and p["in_library"] and p["zotero_key"] == "ZKEY0004"
+    assert ["P:EP3500000", "W1"] in got["patent_edges"] and not any("P:" in e[0] for e in got["citation_edges"])
+    # the patent cites W1 and W1 cites W3: no co-citation or coupling may involve the patent
+    assert not any("P:EP3500000" in pair[:2] for pair in got["cocitation"] + got["coupling"])
+    w1 = next(w for w in got["works"] if w["id"] == "W1")
+    assert "patent:P:EP3500000" in w1["found_by"] and w1["kind"] == "work"
+    text = run(s.map_export("P", states=["new"]))["markdown"]
+    assert "[Espacenet](https://worldwide.espacenet.com/patent/search?q=pn%3DEP3500000)" in text
+    with pytest.raises(ValueError):
+        run(s.map_add_patents("P", []))

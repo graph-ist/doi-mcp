@@ -6,8 +6,9 @@ description: Add a work to the Zotero library with a verified DOI or edition, it
 # Add to library
 
 Servers: DOI MCP (`find_doi`, `verify_doi`, `verify_book`, `check_retractions`), Zotero MCP
-(`find_dois`, `create_item_from_doi`, `create_item`, `attach_pdf`, `update_item_links`,
-`list_collections`, `refresh_library_snapshot`), optionally `map_mark` of the DOI MCP.
+(`find_dois`, `create_item_from_doi`, `create_item`, `create_item_from_patent`,
+`set_verification`, `attach_pdf`, `update_item_links`, `list_collections`), optionally
+`map_mark` of the DOI MCP.
 
 ## Rules that hold everywhere
 
@@ -28,7 +29,9 @@ Servers: DOI MCP (`find_doi`, `verify_doi`, `verify_book`, `check_retractions`),
    candidates and stop for that work. Books: `is_book=true`, then `verify_book`.
 2. **Deduplicate.** `find_dois` with every DOI of the batch. Works already in the library are
    reported with their key and skipped; the user may still want them tagged or moved
-   (`update_item_links`).
+   (`update_item_links`). If step 1 verified an item that was already there, record it:
+   `set_verification(key, "match", "verify_doi registered_match")` (or `"mismatch"`,
+   `"retracted"` with what was found).
 3. **Create.** `create_item_from_doi(doi, expected_title=…, expected_first_author=…,
    expected_year=…, collection_keys=[…], tags=[…])`. A status `not_created` means the DOI's
    record does not match the work or the work is retracted: report it, do not pass `force`
@@ -36,9 +39,9 @@ Servers: DOI MCP (`find_doi`, `verify_doi`, `verify_book`, `check_retractions`),
    fields verified in step 1.
 4. **PDF.** `attach_pdf(key)` looks for an open access copy; a refusal from a publisher is
    expected and not an error. For a scan the OCR worker runs by itself.
-5. **Snapshot and maps.** `refresh_library_snapshot` once per batch. If the works came from a
-   map, `map_mark(map, works, "to_read")` so the map shows them as acquired; the map reads the
-   snapshot for `in_library`.
+5. **Maps.** If the works came from a map, `map_mark(map, works, "to_read")` so the map shows
+   them as acquired. The library snapshot refreshes by itself a few seconds after the writes;
+   `refresh_library_snapshot` only if the map is read right away.
 6. **Report** a table: work, outcome (`added` / `already in library` / `not created: reason` /
    `no DOI found`), key, PDF yes/no. Only corrections and failures need words.
 

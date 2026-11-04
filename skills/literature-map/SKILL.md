@@ -15,7 +15,9 @@ linked in the DOI MCP's instructions; give that link whenever a map changes.
 
 - A map node is a candidate until the user decides: `map_mark` with `to_read`, `read` or
   `dismissed` is the only reading state; it never goes into notes or Zotero.
-- `in_library`, `zotero_key` and `notes` on a node come from the snapshots: refresh them
+- `in_library`, `zotero_key`, `library_match` (doi, key, patent or title), `verified` and
+  `notes` on a node come from the snapshots, which the other servers refresh by themselves
+  after their writes: refresh them by hand
   (`refresh_library_snapshot`, `refresh_notes_snapshot`) before judging what is missing, and
   read `snapshots` in `map_get` for their age or a `problems` entry.
 - Citation metrics favour older works and OpenAlex lacks references for most books and
