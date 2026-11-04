@@ -11,6 +11,8 @@ entry point, loaded by Claude when the task matches its description.
 | `reading-note` | a work read, to turn into an Obsidian note | Zotero, Obsidian, DOI |
 | `literature-map` | a topic or a collection to map, expand and triage | DOI, Zotero, Obsidian |
 | `prior-art` | a technique or a paper, to see its patents and the literature they cite | DOI, Zotero |
+| `draft` | a manuscript with `[@citekey]` citations, to check, verify and give a bibliography | DOI, Zotero, Obsidian |
+| `argument-map` | a thesis, to record who supports it and who objects, with pages | Obsidian, Zotero, DOI |
 
 Reference checking (`find_doi`, `verify_doi`, `verify_book`, `format_apa`, `check_citations`)
 stays a prompt of the DOI MCP (*Verifica riferimenti*), because it involves one server only.
@@ -41,3 +43,7 @@ These are the invariants of the system; the skills restate them so that each one
   a `Verified:` line on the item, `set_verification` records the outcome of `verify_doi` or
   `verify_book` on an existing item, and the maps show it as `verified`.
 - Show a note or a batch of changes before writing it; one confirmation per batch, not per item.
+- `search_everything` searches the user's own corpus (notes, PDF pages, highlights), lexically,
+  in the language of the query; it never replaces reading the passage it points to.
+- The weekly job (`weekly_report`, the Monday timer) brings new citing works, retractions and
+  coverage gaps to the vault inbox; `coverage_report` gives the same for one project on demand.

@@ -31,7 +31,9 @@ lineage diagram, alias rules). This skill is the order of operations around it.
    heading), not a second note.
 2. **Read.** `get_outline(key)` for the sections; `get_annotations(key)` for the highlights
    (page order; `export_annotations` when there are many); `get_fulltext(key, pages="a-b")` for
-   each passage a claim needs. A scan without text: `ocr_pdf`, then wait for `ocr_status`.
+   each passage a claim needs, and `search_everything(…, zotero_key=key)` to find a passage
+   once the PDF is indexed with `index_fulltext`. A scan without text: `ocr_pdf`, then wait
+   for `ocr_status`.
 3. **Reference.** `format_citations(keys=[key], style="apa")` → `reference` as
    `[APA](zotero://select/library/items/KEY)`. For a work not in Zotero, stop and offer the
    add-to-library skill first; plain APA text only if the user declines.

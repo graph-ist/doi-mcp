@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the DOI MCP weekly job on Monday morning
+
+[Timer]
+OnCalendar=Mon *-*-* 06:17:00
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

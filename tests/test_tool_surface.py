@@ -48,7 +48,9 @@ def test_gateway_tools_are_listed_and_registered_only_when_enabled():
     assert s.GATEWAY_ENABLED and expected <= set(TOOLS)
     core = set(TOOLS) - expected
     assert {"find_doi", "verify_doi", "verify_book", "search_literature", "map_create"} <= core
-    assert len(core) <= 26  # 24 + patent_search and patent_get, present only with EPO keys
+    # 24 + patent_search, patent_get, map_add_patents (only with EPO keys) + search_everything,
+    # check_draft, coverage_report, weekly_report
+    assert len(core) <= 31
 
 
 def test_validation_errors_reach_the_client_as_status_dicts():

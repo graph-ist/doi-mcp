@@ -184,3 +184,77 @@ def references(item_key: str) -> list[str] | None:
     except (OSError, ValueError):
         return None
     return data.get("entries") or []
+
+
+# --- citation keys, coverage ------------------------------------------------------------------
+
+def by_citekey() -> dict[str, dict]:
+    """Items by Better BibTeX citation key (the 'Citation Key:' line in Extra) and by item key."""
+    out = {}
+    for it in (library() or {}).get("items", []):
+        if it.get("citekey"):
+            out.setdefault(it["citekey"].lower(), it)
+        out.setdefault(it["key"].lower(), it)
+    return out
+
+
+def by_surname_year() -> dict[tuple[str, int], list[dict]]:
+    """Items by (first author's surname, year), for keys written as 'cross1982' or 'cross1982a'."""
+    out: dict[tuple[str, int], list[dict]] = {}
+    for it in (library() or {}).get("items", []):
+        if not it.get("year"):
+            continue
+        for tok in _first_surname(it):
+            out.setdefault((matching.ascii_fold(tok).replace(" ", ""), int(it["year"])), []).append(it)
+    return out
+
+
+def resolve_citekey(key: str) -> tuple[dict | None, str]:
+    """(item, how): how is 'citekey', 'item_key', 'surname_year', 'ambiguous' or 'unresolved'."""
+    k = key.strip().lower()
+    it = by_citekey().get(k)
+    if it:
+        return it, "citekey" if it.get("citekey", "").lower() == k else "item_key"
+    m = re.fullmatch(r"([a-z][a-z\-']+?)[_:]?((?:1[5-9]|20)\d{2})[a-z]?", k)
+    if m:
+        cands = by_surname_year().get((matching.ascii_fold(m.group(1)).replace(" ", ""), int(m.group(2))), [])
+        if len(cands) == 1:
+            return cands[0], "surname_year"
+        if len(cands) > 1:
+            return None, "ambiguous"
+    return None, "unresolved"
+
+
+def coverage(project: str | None = None, collection: str | None = None) -> dict:
+    """What the three archives say about a project: the items tagged cited/<project> (or in a
+    collection) with or without a note, a PDF and a verification; the notes in the schema scope
+    whose reference points to no item, or to an item that is gone."""
+    lib, nts = library(), notes()
+    if not lib:
+        return {"status": "no_snapshot", "detail": "library.json is missing"}
+    items = items_where(collection, f"cited/{project}" if project else None) if (project or collection) else lib.get("items", [])
+    by_key = notes_by_key()
+    rows = []
+    for it in items:
+        rows.append({"key": it["key"], "title": it.get("title"), "year": it.get("year"), "doi": it.get("doi"),
+                     "notes": [n["path"] for n in by_key.get(it["key"], [])],
+                     "pdf": bool(it.get("attachments")), "verified": (it.get("verified") or {}).get("status"),
+                     "tags": [t for t in it.get("tags", []) if t.startswith(("cited/", "core/"))]})
+    keys = {it["key"] for it in lib.get("items", [])}
+    dangling, unlinked = [], []
+    for n in (nts or {}).get("notes", []):
+        if not n.get("path", "").startswith("Zettelkasten/") or n.get("kind") in ("map", "thesis", "person", "concept"):
+            continue
+        zk = n.get("zotero_keys") or []
+        if not zk and n.get("folder", "").endswith("Reading Notes"):
+            unlinked.append(n["path"])
+        for k in zk:
+            if k not in keys:
+                dangling.append({"note": n["path"], "zotero_key": k})
+    return {"status": "ok", "project": project, "collection": collection, "items": len(rows),
+            "without_note": [r for r in rows if not r["notes"]],
+            "without_pdf": [{"key": r["key"], "title": r["title"]} for r in rows if not r["pdf"]],
+            "unverified": [{"key": r["key"], "title": r["title"]} for r in rows if r["verified"] != "match"],
+            "with_note": sum(1 for r in rows if r["notes"]),
+            "notes_without_item": unlinked, "notes_with_missing_item": dangling,
+            "snapshots": status()}

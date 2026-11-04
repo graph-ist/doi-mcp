@@ -21,6 +21,7 @@ import functools
 import hmac
 import html
 import json
+import sys
 import os
 import re
 import time
@@ -47,7 +48,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 INSTRUCTIONS = (
@@ -58,7 +59,10 @@ INSTRUCTIONS = (
     "viewed by the user on the 'Literature maps' page, the only map page: " + MAPS_PAGE +
     " . Give that link whenever a map is created, expanded or asked for. Raw API passthroughs "
     "(openalex_*, semantic_scholar*, orcid, google_books) return native JSON: keep per_page "
-    "and limit small and use select/fields where the API offers them.")
+    "and limit small and use select/fields where the API offers them. search_everything looks "
+    "through the user's own notes, PDF texts and highlights (not the web); check_draft checks a "
+    "manuscript's [@citekey] citations against the Zotero library; coverage_report says what a "
+    "project still lacks (notes, PDFs, verification).")
 mcp = FastMCP("paper-doi", instructions=INSTRUCTIONS, stateless_http=True, transport_security=TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
     allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", *_PUBLIC_HOSTS],
@@ -2378,7 +2382,30 @@ async def _search_s2(query, year_from, year_to, limit, page, scope) -> dict:
                d.get("total"), recs, note="no Boolean syntax; no author keywords")
 
 
-DATABASES = ["openalex", "europepmc", "semanticscholar", "hal", "doaj", "arxiv", "osf", "zenodo", "dnb"]
+async def _search_philarchive(query, year_from, year_to, limit, page, scope) -> dict:
+    # Local copy of PhilArchive (philosophy preprints), harvested over OAI-PMH by the weekly job:
+    # no network here. Empty until the first harvest; the log says when it was last refreshed.
+    import philarchive
+    db = philarchive.connect()
+    try:
+        info = philarchive.count(db)
+        if not info["records"]:
+            return {"status": "error", "detail": "PhilArchive copy is empty: run philarchive.py harvest (the weekly job does it)"}
+        rows, total = await asyncio.to_thread(philarchive.search, db, query, year_from, year_to, limit, page, scope)
+    finally:
+        db.close()
+    recs = [_rec("philarchive", doi=_clean_doi(r.get("doi")), title=r.get("title"),
+                 authors=[a.strip() for a in (r.get("creators") or "").split(";") if a.strip()], year=r.get("year"),
+                 venue="PhilArchive", venue_type="repository", type="preprint", language=r.get("language"),
+                 abstract=r.get("description"), abstract_source="philarchive" if r.get("description") else None,
+                 keywords=[k.strip() for k in (r.get("subjects") or "").split(";") if k.strip()], oa_url=r.get("url"),
+                 note="self-archived; the published version, if any, may differ") for r in rows]
+    return _ok("PhilArchive (local harvest)", query, scope, None, page, limit, total, recs,
+               harvested=info["last_harvest"], records_in_copy=info["records"],
+               note="local OAI-PMH harvest of PhilArchive, not PhilPapers: preprints and self-archived papers only")
+
+
+DATABASES = ["openalex", "europepmc", "semanticscholar", "hal", "doaj", "arxiv", "osf", "zenodo", "dnb", "philarchive"]
 
 
 def _surname_set(authors: list[str]) -> set[str]:
@@ -2412,7 +2439,7 @@ def _same_work(a: dict, b: dict) -> str | None:
     return "title+year (authors unavailable)"
 _ADAPTERS = {"europepmc": _search_europepmc, "doaj": _search_doaj, "hal": _search_hal,
              "zenodo": _search_zenodo, "osf": _search_osf, "semanticscholar": _search_s2,
-             "arxiv": _search_arxiv, "dnb": _search_dnb}
+             "arxiv": _search_arxiv, "dnb": _search_dnb, "philarchive": _search_philarchive}
 
 
 async def _search_openalex(query, year_from, year_to, doc_types, limit, page, scope,
@@ -2470,8 +2497,9 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
     TL;DRs, free text only), hal (French archive; humanities, HCI), doaj (open-access
     journals), arxiv (physics, maths, CS incl. HCI and AI), osf (PsyArXiv, SocArXiv; title
     only), zenodo (self-deposited, not peer-reviewed), dnb (Deutsche Nationalbibliothek:
-    German-language books, dissertations and translations, incl. philosophy; no abstracts).
-    Philosophy journals are thinly covered by all; PhilPapers has no search API.
+    German-language books, dissertations and translations, incl. philosophy; no abstracts),
+    philarchive (local harvest of the philosophy preprint archive, refreshed weekly; abstracts).
+    Philosophy journals are thinly covered by all; PhilPapers itself has no search API.
     query takes Boolean syntax (AND, OR, NOT, "phrases", parentheses) where the database
     allows it. scope 'fulltext' searches indexed full text on OpenAlex, all fields elsewhere.
     doc_types (OpenAlex types: 'article', 'review', 'book', 'book-chapter', 'preprint',
@@ -2483,8 +2511,7 @@ async def search_literature(query: str, year_from: int | None = None, year_to: i
     databases; 'independent_sources' counts OpenAlex and Semantic Scholar as one, since both
     derive largely from Crossref. A failing database goes to source_errors without aborting
     the rest. 'log' records query, filters, date and per-database hit counts, which cannot
-    be summed as unique papers; deduplication covers the current page only. The tool
-    retrieves, it does not judge relevance.
+    be summed as unique papers; deduplication covers the current page only.
     """
     limit = max(1, min(limit, 50))
     names = DATABASES if database.strip() == "all" else [
@@ -3623,6 +3650,153 @@ async def map_list() -> dict:
     return {"status": "ok", "maps": maps.summary(db)}
 
 
+# --- the three archives together: search, drafts, coverage, weekly report ---------------------
+
+CorpusScope = Literal["all", "notes", "library", "annotations"]
+
+
+def _corpus_db():
+    import corpus
+    db = corpus.connect()
+    corpus.sync(db)
+    return corpus, db
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def search_everything(query: str, scope: CorpusScope = "all", limit: int = 20,
+                            zotero_key: str | None = None) -> dict:
+    """Search the user's own corpus, not the web: Obsidian notes (by section), the page texts of
+    the PDFs and EPUBs in Zotero, and their highlights and comments. Results are passages with
+    where they come from: a note path and heading, or a Zotero key with the page and a
+    zotero://open-pdf link. Lexical search (words, "phrases", AND, OR, NOT, trailing * for
+    prefixes; diacritics ignored): a query finds passages in the language it is written in, so
+    search again in German or Italian for sources in those languages. zotero_key restricts to
+    one item. The index follows the snapshot files written by the other two servers
+    (notes_text.json, fulltext/KEY.json): an item whose PDF was never indexed with the Zotero
+    MCP's index_fulltext is not searched; the log says how many sources are indexed."""
+    limit = max(1, min(int(limit), 100))
+    corpus, db = _corpus_db()
+    try:
+        hits = await asyncio.to_thread(corpus.search, db, query, scope, limit, zotero_key)
+        st = corpus.stats(db)
+    finally:
+        db.close()
+    return {"status": "ok", "query": query, "scope": scope, "results": hits, "returned": len(hits),
+            "index": st, "note": "lexical index over notes, PDF pages and annotations; nothing from the web"}
+
+
+_CITE_GROUP = re.compile(r"\[([^\[\]]*@[^\[\]]+)\]")
+_CITE_BARE = re.compile(r"(?<![\w@\[])-?@([A-Za-z][\w:.#$%&+?<>~/-]*[\w])")
+_CITE_IN_GROUP = re.compile(r"-?@([A-Za-z][\w:.#$%&+?<>~/-]*[\w])\s*(?:,\s*)?([^;]*)")
+_LOCATOR = re.compile(r"\b(?:pp?\.|p\b|pages?|§|chap\.|ch\.|sec\.|n\.)\s*\d|\b\d{1,4}\s*[-–]\s*\d{1,4}\b")
+_QUOTE = re.compile(r"[\"“«„]([^\"”»“]{25,})[\"”»“]")
+
+
+def _draft_citations(text: str) -> list[dict]:
+    """Pandoc-style citations in a draft: [@key, p. 3; @other], @key [p. 3], -@key."""
+    found = []
+    spans = []
+    for m in _CITE_GROUP.finditer(text):
+        spans.append((m.start(), m.end()))
+        for c in _CITE_IN_GROUP.finditer(m.group(1)):
+            found.append({"key": c.group(1).rstrip(".,;:"), "locator": c.group(2).strip() or None, "pos": m.start(),
+                          "has_locator": bool(_LOCATOR.search(c.group(2) or ""))})
+    for m in _CITE_BARE.finditer(text):
+        if any(a <= m.start() < b for a, b in spans):
+            continue
+        after = text[m.end():m.end() + 40]
+        loc = re.match(r"\s*\[([^\]]*)\]", after)
+        found.append({"key": m.group(1).rstrip(".,;:"), "locator": loc.group(1).strip() if loc else None, "pos": m.start(),
+                      "has_locator": bool(loc and _LOCATOR.search(loc.group(1)))})
+    return found
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def check_draft(text: str, retractions: bool = False) -> dict:
+    """Check a manuscript's citations against the Zotero library before it leaves the desk. The
+    draft uses Pandoc citekeys ([@cross1982designerly, p. 221], @key [p. 3], -@key): each is
+    resolved to an item by Better BibTeX citation key ('Citation Key:' in Extra, carried by the
+    library snapshot), by Zotero item key, or by surname+year when that names exactly one item.
+    Reports: unresolved and ambiguous keys; resolved items without a 'Verified: … match' line
+    (verify them with verify_doi / verify_book and record it with the Zotero MCP's
+    set_verification); quotations of 25+ characters cited without a page; with
+    retractions=True, the resolved DOIs are checked on Crossref. 'bibliography_keys' are the
+    Zotero keys to pass to export_items for the reference list. The check is offline except
+    for retractions; it does not judge whether a source supports a claim (check_claims does)."""
+    k = _knowledge()
+    if not k.library():
+        return {"status": "no_snapshot", "detail": "library.json is missing: refresh_library_snapshot in the Zotero MCP"}
+    cites = _draft_citations(text)
+    if not cites:
+        return {"status": "ok", "citations": 0, "detail": "no [@citekey] citations found in the text", "unresolved": [],
+                "ambiguous": [], "unverified": [], "quotes_without_page": [], "bibliography_keys": []}
+    resolved: dict[str, dict] = {}
+    unresolved, ambiguous = [], []
+    for c in cites:
+        if c["key"] in resolved or c["key"] in unresolved or c["key"] in ambiguous:
+            continue
+        it, how = k.resolve_citekey(c["key"])
+        if it:
+            resolved[c["key"]] = {"key": it["key"], "title": it.get("title"), "year": it.get("year"), "doi": it.get("doi"),
+                                  "resolved_by": how, "verified": (it.get("verified") or {}).get("status")}
+        elif how == "ambiguous":
+            ambiguous.append(c["key"])
+        else:
+            unresolved.append(c["key"])
+    quotes = []
+    for q in _QUOTE.finditer(text):
+        # the citation that follows the quotation, within a sentence's reach
+        after = [c for c in cites if q.end() <= c["pos"] <= q.end() + 120]
+        if after:
+            first = min(after, key=lambda c: c["pos"])
+            if not first["has_locator"]:
+                quotes.append({"quote": q.group(1)[:80] + ("…" if len(q.group(1)) > 80 else ""), "citation": first["key"]})
+    out = {"status": "ok", "citations": len(cites), "distinct_keys": len({c["key"] for c in cites}),
+           "resolved": resolved, "unresolved": unresolved, "ambiguous": ambiguous,
+           "unverified": [{"citekey": ck, **{x: v[x] for x in ("key", "title")}} for ck, v in resolved.items() if v["verified"] != "match"],
+           "quotes_without_page": quotes,
+           "bibliography_keys": sorted({v["key"] for v in resolved.values()})}
+    if retractions:
+        dois = sorted({v["doi"] for v in resolved.values() if v.get("doi")})
+        out["retractions"] = await check_retractions(dois=dois) if dois else {"status": "ok", "detail": "no DOIs to check"}
+    out["summary"] = (f"{len(cites)} citations, {len(resolved)} keys resolved, {len(unresolved)} unresolved, "
+                      f"{len(ambiguous)} ambiguous, {len(out['unverified'])} unverified, {len(quotes)} quotes without page")
+    return out
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def coverage_report(project: str | None = None, collection: str | None = None) -> dict:
+    """What a project still lacks across the three archives, from the snapshots: the Zotero items
+    tagged cited/<project> (or in a Zotero collection; neither: the whole library) without a
+    reading note, without a PDF, or without a 'Verified: … match' line; the reading notes with
+    no Zotero item in their reference; notes pointing to an item that no longer exists. The
+    weekly job writes the same per project to the vault inbox."""
+    return await asyncio.to_thread(_knowledge().coverage, project, collection)
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def weekly_report(run_now: bool = False) -> dict:
+    """The latest weekly report (new works citing the seeds of each map, retractions in the
+    library, coverage per project, maintenance) as Markdown, with the date it was generated.
+    run_now=True runs the job immediately (minutes: it calls OpenAlex and Crossref for every map
+    and DOI; no backup, no harvest) instead of waiting for the timer."""
+    import weekly
+    if run_now:
+        results = await weekly.run(sys.modules[__name__], _knowledge(), do_backup=False, do_harvest=False)
+        path = results["report"]
+    else:
+        try:
+            path = json.load(open(weekly.LAST, encoding="utf-8")).get("report")
+        except (OSError, ValueError):
+            return {"status": "not_found", "detail": "no weekly report yet: the timer has not run; run_now=True runs it"}
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return {"status": "not_found", "detail": f"report file missing: {path}"}
+    return {"status": "ok", "report": path, "markdown": text,
+            "note": "the Obsidian MCP copies new reports into the vault inbox once an hour"}
+
+
 PROMPT_RULES = ("Regole: allega un DOI solo se find_doi restituisce `match` e verify_doi "
                 "`registered_match`; non fornire mai un DOI a memoria. Se `is_retracted` è vero, "
                 "segnalalo. Riporta solo correzioni, campi non verificati, DOI mancanti e "
@@ -3711,20 +3885,63 @@ def prompt_paper_table(
             f"{_opt(papers, 'quelli della mappa o della ricerca precedente')}")
 
 
+def _status() -> dict:
+    """Operator view for GET /status (loopback only): maps, snapshots, corpus, PhilArchive copy,
+    last weekly run. No credentials, no secrets."""
+    out: dict = {"service": "paper-doi-mcp", "version": VERSION, "gateway": GATEWAY_ENABLED, "patents": EPO_CONFIGURED}
+    try:
+        maps, db = _map_db()
+        out["maps"] = len(maps.summary(db))
+    except Exception as e:  # noqa: BLE001
+        out["maps"] = f"error: {e}"
+    out["snapshots"] = _knowledge().status()
+    try:
+        import corpus
+        cdb = corpus.connect()
+        out["corpus"] = corpus.stats(cdb)
+        cdb.close()
+    except Exception as e:  # noqa: BLE001
+        out["corpus"] = f"error: {e}"
+    try:
+        import philarchive
+        pdb = philarchive.connect()
+        out["philarchive"] = philarchive.count(pdb)
+        pdb.close()
+    except Exception as e:  # noqa: BLE001
+        out["philarchive"] = f"error: {e}"
+    try:
+        import weekly
+        last = json.load(open(weekly.LAST, encoding="utf-8"))
+        out["weekly"] = {"date": last.get("date"), "report": last.get("report"),
+                         "errors": [k for k, v in last.items() if isinstance(v, dict) and "error" in v]}
+    except (OSError, ValueError):
+        out["weekly"] = None
+    return out
+
+
 class _TokenAuth:
-    """Bearer header or ?token= query: Claude web connectors cannot send custom headers."""
+    """Authorization: Bearer <token> on every request. A token in the URL is refused: URLs end up
+    in proxy logs and browser histories (Claude web sends the header from the connector's
+    "Request headers"). GET /status answers loopback clients without credentials."""
 
     def __init__(self, app, token: str):
         self.app, self.token = app, token.encode()
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
+            from starlette.responses import JSONResponse
+            if scope.get("path") == "/status" and scope.get("method") == "GET":
+                client = (scope.get("client") or ("", 0))[0]
+                if client in ("127.0.0.1", "::1"):
+                    await JSONResponse(_status())(scope, receive, send)
+                else:
+                    await JSONResponse({"error": "not found"}, status_code=404)(scope, receive, send)
+                return
             header = dict(scope["headers"]).get(b"authorization", b"")
             bearer = header[7:] if header[:7].lower() == b"bearer " else b""
-            query = parse_qs(scope.get("query_string", b"").decode()).get("token", [""])[0].encode()
-            if not (hmac.compare_digest(bearer, self.token) or hmac.compare_digest(query, self.token)):
-                from starlette.responses import JSONResponse
-                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+            if not hmac.compare_digest(bearer, self.token):
+                await JSONResponse({"error": "unauthorized"}, status_code=401,
+                                   headers={"WWW-Authenticate": 'Bearer realm="paper-doi-mcp"'})(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
@@ -3737,7 +3954,6 @@ def main() -> None:
     token = os.environ.get("MCP_AUTH_TOKEN", "")
     if len(token) < 32:
         raise SystemExit("MCP_AUTH_TOKEN of at least 32 characters is required in http mode")
-    # Access log off: the token travels in the query string
     uvicorn.run(_TokenAuth(mcp.streamable_http_app(), token), host="127.0.0.1",
                 port=int(os.environ.get("PORT", "3002")), access_log=False)
 

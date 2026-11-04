@@ -1,0 +1,22 @@
+[Unit]
+Description=DOI MCP weekly job: new citing works, retractions, coverage, PhilArchive harvest, backups
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=doi-mcp
+Group=doi-mcp
+SupplementaryGroups=knowledge
+StateDirectory=doi-mcp
+Environment=STATE_DIRECTORY=/var/lib/doi-mcp
+Environment=KNOWLEDGE_DIR=/var/lib/knowledge
+# the same keys as doi-mcp.service (OpenAlex, Semantic Scholar, contact email)
+EnvironmentFile=-/etc/doi-mcp/env
+WorkingDirectory=/opt/doi-mcp
+ExecStart=/opt/doi-mcp/.venv/bin/python /opt/doi-mcp/weekly.py
+ReadWritePaths=/var/lib/doi-mcp /var/lib/knowledge
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true

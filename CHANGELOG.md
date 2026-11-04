@@ -2,6 +2,21 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.6.0
+
+Incompatibile con 0.5.x
+- Trasporto HTTP: il token è accettato solo nell'header `Authorization: Bearer`; `?token=` nell'URL viene rifiutato.
+
+Novità
+- `search_everything`: un indice FTS5 (`corpus.py`, `corpus.sqlite` in `STATE_DIRECTORY`) su note Obsidian per sezione, pagine dei PDF e annotazioni, dai file che gli altri due server scrivono in `KNOWLEDGE_DIR`; si aggiorna da solo per mtime.
+- `check_draft`: citazioni Pandoc `[@citekey]` di un manoscritto risolte sulla libreria (citekey Better BibTeX, chiave item, cognome+anno univoco); segnala chiavi irrisolte o ambigue, item non verificati, citazioni letterali senza pagina, ritrattazioni a richiesta; restituisce le chiavi per la bibliografia.
+- `coverage_report`: item di un progetto senza nota, PDF o verifica; note senza item o con item sparito.
+- `weekly_report` e `weekly.py` con `deploy/doi-weekly.{service,timer}`: nuovi lavori citanti per mappa, ritrattazioni in libreria, copertura per progetto, raccolta PhilArchive, backup con rotazione; report Markdown in `KNOWLEDGE_DIR/reports` per la cartella Inbox del vault.
+- `philarchive` tra i database di `search_literature`: copia locale raccolta via OAI-PMH (`philarchive.py`), incrementale.
+- `GET /status` su loopback senza credenziali.
+- `tests/test_contract_flows.py`: i flussi tra server sui file di contratto degli altri due MCP (`tests/fixtures/contract`).
+- Skill `draft` e `argument-map`; le altre aggiornate per `search_everything`, `coverage_report` e il lavoro settimanale.
+
 ## 0.5.0
 
 - Ponte con Zotero: oltre a DOI e chiave, un lavoro viene abbinato per numero di brevetto (`P:`) e per titolo, cognome del primo autore e anno con le regole di `matching.py`; `library_match` dice quale criterio ha deciso. I nodi portano `verified` (la riga `Verified:` dell'item Zotero) e `map_export` lo mostra.

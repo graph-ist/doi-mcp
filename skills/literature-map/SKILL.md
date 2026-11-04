@@ -35,7 +35,8 @@ linked in the DOI MCP's instructions; give that link whenever a map changes.
    `seed_cocited`, `seed_coupling`); `paper_table` on the top ones for abstracts; judge
    relevance from abstracts, never from titles alone, and `map_mark` in batches:
    `to_read` / `dismissed` with a short `note` saying why.
-4. **Acquire.** For `to_read` works not `in_library`, hand over to the add-to-library skill
+4. **Acquire.** `coverage_report(project)` says which cited works still lack a note, a PDF or
+   a verification. For `to_read` works not `in_library`, hand over to the add-to-library skill
    (`find_dois` first); after it, `refresh_library_snapshot` and `map_refresh`.
 5. **Maintain.** `map_refresh(map, new_citing=True)` for new citing works since the last
    check; `check_retractions(map=…)` before citing from the map; `map_prune` when the map
