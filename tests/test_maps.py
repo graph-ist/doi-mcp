@@ -300,3 +300,19 @@ def test_resolve_crossref_first_and_budget(monkeypatch):
     assert run(s._resolve_work("Nobody", "Unknown Title Here", budget)) is None  # one paid search
     with pytest.raises(s.BudgetExhausted):
         run(s._resolve_work("Nobody", "Another Unknown Title", budget))
+
+
+def test_snapshot_schema_version_is_checked(snapshot):
+    import json, knowledge
+    assert knowledge.library() is not None and knowledge.status()["library_snapshot"] == "2026-11-01T12:00:00Z"
+    # a newer schema than this reader understands is refused, and map_get says why
+    lib = json.loads((snapshot / "library.json").read_text())
+    (snapshot / "library.json").write_text(json.dumps({**lib, "schema_version": knowledge.SUPPORTED_SCHEMA["library.json"] + 1}))
+    knowledge._cache.clear()
+    assert knowledge.library() is None and knowledge.by_doi() == {}
+    st = knowledge.status()
+    assert st["library_snapshot"] is None and "schema_version" in st["problems"]["library.json"]
+    # the current version loads again
+    (snapshot / "library.json").write_text(json.dumps({**lib, "schema_version": 1}))
+    knowledge._cache.clear()
+    assert knowledge.library() is not None and "problems" not in knowledge.status()

@@ -12,7 +12,12 @@ import os
 import re
 
 KNOWLEDGE_DIR = os.environ.get("KNOWLEDGE_DIR", "/var/lib/knowledge")
+# Highest schema_version of each snapshot this reader understands. The writers (Zotero MCP
+# snapshot.py, Obsidian MCP snapshot.ts) bump theirs when a field changes meaning or is removed;
+# a newer file is refused rather than misread. A file without the field is a pre-1 snapshot.
+SUPPORTED_SCHEMA = {"library.json": 1, "notes.json": 1}
 _cache: dict[str, tuple[float, dict]] = {}
+_problems: dict[str, str] = {}
 
 
 def _load(name: str) -> dict | None:
@@ -20,6 +25,7 @@ def _load(name: str) -> dict | None:
     try:
         mtime = os.path.getmtime(path)
     except OSError:
+        _problems[name] = "missing"
         return None
     hit = _cache.get(name)
     if hit and hit[0] == mtime:
@@ -27,7 +33,13 @@ def _load(name: str) -> dict | None:
     try:
         data = json.load(open(path, encoding="utf-8"))
     except (OSError, ValueError):
+        _problems[name] = "unreadable"
         return None
+    version = data.get("schema_version")
+    if version is not None and int(version) > SUPPORTED_SCHEMA[name]:
+        _problems[name] = f"schema_version {version} is newer than the {SUPPORTED_SCHEMA[name]} this server reads: update the DOI MCP"
+        return None
+    _problems.pop(name, None)
     _cache[name] = (mtime, data)
     return data
 
@@ -45,9 +57,14 @@ def notes() -> dict | None:
 
 
 def status() -> dict:
+    """When each snapshot was generated (None when absent or unusable), and why when unusable."""
     lib, nts = library(), notes()
-    return {"library_snapshot": lib.get("generated") if lib else None,
-            "notes_snapshot": nts.get("generated") if nts else None}
+    out = {"library_snapshot": lib.get("generated") if lib else None,
+           "notes_snapshot": nts.get("generated") if nts else None}
+    problems = {k: v for k, v in _problems.items() if v != "missing"}
+    if problems:
+        out["problems"] = problems
+    return out
 
 
 def by_doi() -> dict[str, dict]:

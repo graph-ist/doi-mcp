@@ -90,7 +90,9 @@ def _docid(el: ET.Element) -> dict:
 
 def parse_document(doc: ET.Element) -> dict:
     """One exchange-document: number, title (English first), applicants, inventors, dates,
-    classes, abstract, patent citations and NPL citations (raw text)."""
+    classes, abstract, patent citations and NPL citations (raw text, with the search phase and
+    the examiner's category: X = alone prejudices novelty or inventive step, Y = with another
+    document, A = background; None when the report gives none)."""
     bib = doc.find("ex:bibliographic-data", NS)
     titles = {t.get("lang"): " ".join("".join(t.itertext()).split()) for t in bib.findall("ex:invention-title", NS)} if bib is not None else {}
     names = lambda role: list(dict.fromkeys(
@@ -113,7 +115,7 @@ def parse_document(doc: ET.Element) -> dict:
             if n is not None:
                 t = _txt(n, "ex:text")
                 if t:
-                    npl.append({"text": t, "phase": cit.get("cited-phase")})
+                    npl.append({"text": t, "phase": cit.get("cited-phase"), "category": _txt(cit, "ex:category")})
     abstract = next((" ".join("".join(a.itertext()).split()) for a in doc.findall("ex:abstract", NS) if a.get("lang") == "en"), None) \
         or next((" ".join("".join(a.itertext()).split()) for a in doc.findall("ex:abstract", NS)), None)
     return {"number": f"{doc.get('country', '')}{doc.get('doc-number', '')}", "kind": doc.get("kind"),

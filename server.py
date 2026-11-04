@@ -28,6 +28,16 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from matching import (  # one implementation of "is this record the cited work?", shared with the Zotero MCP
+    TITLE_THRESHOLD, SHORT_TITLE_TOKENS, NON_WORK_TYPES, DERIVATIVE_RE, RETRACTED_PREFIX_RE, NAME_PARTICLES,
+    REF_STOP as _REF_STOP, REF_YEAR as _REF_YEAR,
+    strip_html as _strip_html, norm as _norm, clean_title as _clean_title, title_sim as _title_sim,
+    name_tokens as _name_tokens, surname as _surname, surname_query as _surname_query, author_ok as _author_ok,
+    assess as _assess, eligible as _eligible, is_derivative as _is_derivative,
+    ascii_fold as _ascii, title_words as _title_words, parse_ref as _parse_ref, ref_key as _ref_key,
+    title_match as _title_match)
+BOOK_TYPES = {"book", "monograph", "edited-book", "reference-book", "book-set"}
+RETRACTION_TYPES = {"retraction", "removal", "withdrawal"}
 from typing import Annotated, Any, Literal, get_args
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urlsplit
 
@@ -37,7 +47,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
 INSTRUCTIONS = (
@@ -90,21 +100,6 @@ ORCID_CLIENT_SECRET = os.environ.get("ORCID_CLIENT_SECRET", "")
 IA_ACCESS = os.environ.get("IA_ACCESS_KEY", "")
 IA_SECRET = os.environ.get("IA_SECRET_KEY", "")
 UA = f"paper-doi-mcp/{VERSION}" + (f" (mailto:{EMAIL})" if EMAIL else "")
-TITLE_THRESHOLD = 0.88
-# Titles shorter than this identify little on their own, so a match also needs the author
-SHORT_TITLE_TOKENS = 4
-BOOK_TYPES = {"book", "monograph", "edited-book", "reference-book", "book-set"}
-# Crossref/OpenAlex types that can share a title with a work without being that work
-NON_WORK_TYPES = {"peer-review", "component", "grant", "erratum", "retraction", "paratext"}
-DERIVATIVE_RE = re.compile(
-    r"^\s*(?:correction|corrigendum|erratum|addendum|retraction(?:\s+(?:note|notice))?|"
-    r"notice of retraction|expression of concern|decision letter|author response|"
-    r"reply|response|comment|review)(?:\s+(?:to|for|on|of))?\s*[:\"'“‘«]", re.I)
-RETRACTED_PREFIX_RE = re.compile(r"^\s*(?:retracted|withdrawn)(?:\s+article)?\s*:\s*", re.I)
-RETRACTION_TYPES = {"retraction", "removal", "withdrawal"}
-NAME_PARTICLES = {"van", "von", "der", "den", "de", "del", "della", "di", "da", "du", "le",
-                  "la", "dos", "das", "ten", "ter", "zu", "al", "el", "bin", "ibn"}
-
 DOI_RE = re.compile(r"10\.\d{4,9}/\S+", re.I)
 # Indexes that largely derive their records from Crossref count as one source of evidence
 SOURCE_GROUPS = {"openalex": "crossref", "semantic_scholar": "crossref", "semanticscholar": "crossref",
@@ -114,54 +109,6 @@ SOURCE_GROUPS = {"openalex": "crossref", "semantic_scholar": "crossref", "semant
 
 def _independent(sources: list[str]) -> int:
     return len({SOURCE_GROUPS.get(x, x) for x in sources})
-
-
-def _norm(s: str | None) -> str:
-    # Drop accents but keep non-Latin letters, so Cyrillic or CJK titles don't normalize to ""
-    s = unicodedata.normalize("NFKD", s or "")
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    return " ".join(re.sub(r"[\W_]+", " ", s.casefold()).split())
-
-
-def _clean_title(s: str | None) -> str:
-    return RETRACTED_PREFIX_RE.sub("", _strip_html(s) or "")
-
-
-def _title_sim(cited: str, title: str | None, subtitle: str | None = None) -> tuple[float, int]:
-    """Best similarity over subtitle variants, and the token length of the shorter compared form."""
-    c, t = _clean_title(cited), _clean_title(title)
-    pairs = [(c, t), (c, t.split(":")[0]), (c.split(":")[0], t)]
-    if subtitle:
-        pairs.append((c, f"{t} {_clean_title(subtitle)}"))
-    best = (0.0, 0)
-    for a, b in pairs:
-        a, b = _norm(a), _norm(b)
-        s = SequenceMatcher(None, a, b).ratio() if a and b else 0.0
-        if s > best[0]:
-            best = (s, min(len(a.split()), len(b.split())))
-    return round(best[0], 3), best[1]
-
-
-def _name_tokens(name: str) -> set[str]:
-    return {t for t in _norm(name).split() if len(t) > 1}
-
-
-def _surname(author: str) -> set[str]:
-    """Surname tokens of a cited author: 'Fox, M.' and 'Mark Fox' both give {'fox'}."""
-    part = author.split(",")[0] if "," in author else (author.split() or [""])[-1]
-    return _name_tokens(part) - NAME_PARTICLES
-
-
-def _surname_query(author: str) -> str:
-    return max(_surname(author), key=len, default="")
-
-
-def _author_ok(author: str | None, authors: list[str]) -> bool | None:
-    """Whether the cited surname is among the record's name tokens; None if undecidable."""
-    want = _surname(author) if author else set()
-    if not want or not authors:
-        return None
-    return bool(want & set().union(*map(_name_tokens, authors)))
 
 
 def _clean_doi(doi: str | None) -> str | None:
@@ -708,26 +655,6 @@ async def _open_library(c: httpx.AsyncClient, title: str, author: str | None) ->
          "edition_count": d.get("edition_count"), "isbn_sample": (d.get("isbn") or [])[:3]}
         for d in r.json().get("docs", [])
     ]
-
-
-def _assess(cand: dict, title: str, author: str | None, year: int | None) -> dict:
-    score, tokens = _title_sim(title, cand["title"], cand.get("subtitle"))
-    year_ok = abs(year - int(cand["year"])) <= 1 if year and cand.get("year") else None
-    return {"score": score, "title_tokens": tokens, "year_ok": year_ok,
-            "author_ok": _author_ok(author, cand["authors"])}
-
-
-def _eligible(m: dict) -> bool:
-    if m["score"] < TITLE_THRESHOLD or m["author_ok"] is False or m["year_ok"] is False:
-        return False
-    return m["title_tokens"] >= SHORT_TITLE_TOKENS or m["author_ok"] is True
-
-
-def _is_derivative(cand: dict, cited: str) -> bool:
-    """Errata, retraction notices, peer reviews and replies that carry the work's title."""
-    if cand.get("type") in NON_WORK_TYPES:
-        return True
-    return bool(DERIVATIVE_RE.match(cand["title"] or "")) and not DERIVATIVE_RE.match(cited)
 
 
 @_tool()
@@ -2157,10 +2084,6 @@ def _plain(query: str) -> str:
                     if t not in ("AND", "OR", "NOT"))
 
 
-def _strip_html(s: str | None) -> str | None:
-    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", s or "")).split()) or None
-
-
 def _rec(source: str, **kw) -> dict:
     base = {"doi": None, "arxiv_id": None, "title": None, "authors": [], "year": None,
             "venue": None, "venue_type": None, "type": None, "language": None,
@@ -3011,46 +2934,6 @@ async def _s2_reference_ids(doi: str) -> list[str]:
             for x in r["data"].get("data") or []]
     found, _ = await _oa_batch("doi", [d for d in dois if d])
     return [n["id"] for n in found]
-
-
-_REF_STOP = {"the", "and", "of", "a", "an", "in", "on", "for", "to", "its", "la", "le", "les", "di", "il",
-             "der", "die", "das", "und", "des", "du", "de", "et", "e"}
-_REF_YEAR = re.compile(r"\b(1[5-9]\d\d|20[0-3]\d)[a-z]?\b")
-
-
-def _ascii(s: str | None) -> str:
-    return re.sub(r"[^a-z0-9 ]", " ", unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower())
-
-
-def _title_words(s: str | None) -> list[str]:
-    return [w for w in _ascii(s).split() if w not in _REF_STOP and len(w) > 1]
-
-
-def _parse_ref(entry: str) -> tuple[str, int | None, str]:
-    """(first author's surname, year, title) of a bibliography entry, author-date
-    ('Surname, First. 1990. Title. Place: Publisher.') or comma style
-    ('Surname, First, Title, Place: Publisher, 1990.')."""
-    surname = re.split(r"[,.(]", entry, maxsplit=1)[0].strip()
-    m = re.match(r"^[^.]*?\.?\s*\(?(1[5-9]\d\d|20[0-3]\d)[a-z]?\)?[.,]\s*(.+)$", entry)
-    if m:
-        year, rest = int(m.group(1)), m.group(2)
-    else:
-        years = _REF_YEAR.findall(entry)
-        year = int(years[-1][:4]) if years else None
-        rest = re.sub(r"^[^,]+,\s*[^,]+?,\s*", "", entry, count=1)
-    rest = rest.strip(' "“”‘’\'')
-    title = re.split(r"(?<!\b[A-Z])\.\s|[“”\"]|, (?:in|In)\b| In: |, [A-Z][a-z]+(?:, [A-Z]{2})?: ", rest)[0]
-    return surname, year, title.strip(' ,."“”')
-
-
-def _ref_key(surname: str, title: str) -> str | None:
-    words, last = _title_words(title), _ascii(surname).split()
-    return f"{last[-1]}|{' '.join(words[:10])}" if words and last else None
-
-
-def _title_match(want: list[str], title: str | None) -> bool:
-    got, w = set(_title_words(title)), set(want)
-    return bool(got) and len(w & got) / len(got) >= 0.8 and len(w & got) / len(w) >= 0.6
 
 
 # OpenAlex title searches cost $0.001 each against a $1/day budget: capped per call, the rest is

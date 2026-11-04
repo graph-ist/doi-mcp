@@ -2,6 +2,14 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## 0.4.1
+
+- `matching.py`: il confronto bibliografico (normalizzazione dei titoli, similarità con varianti di sottotitolo, cognomi, anno, errata e repliche, analisi delle voci di bibliografia) esce da `server.py` in un modulo di sola libreria standard, incluso nel wheel. Nessun cambiamento di comportamento; l'MCP Zotero ne usa una copia identica, così `create_item_from_doi` ed `extract_references` applicano le stesse regole di `find_doi` e `verify_doi`.
+- `parse_ref` (bibliografie dai PDF): riconosce le voci APA con più iniziali prima dell'anno («Schön, D. A. (1983). Titolo») e i luoghi di edizione con lettere accentate; prima il titolo risultava «Schön, D. A. (1983)». Le chiavi della cache dei riferimenti cambiano per quelle voci, che vengono ricercate di nuovo una volta.
+- Istantanee: `knowledge.py` legge `schema_version` da `library.json` e `notes.json`, rifiuta una versione maggiore di quella supportata (1) e lo riporta in `map_get` (`snapshots.problems`).
+- `patent_get`: ogni citazione di letteratura porta `category` (X, Y, A dell'esaminatore) oltre a `phase`.
+- `skills/`: quattro skill di Claude per i flussi tra i tre MCP (`add-to-library`, `reading-note`, `literature-map`, `prior-art`).
+
 ## 0.4.0
 
 Strumenti rimossi o fusi:

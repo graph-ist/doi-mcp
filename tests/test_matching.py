@@ -102,3 +102,19 @@ def test_graph_links():
     assert nodes["C"]["seeds_linked"] == 1 and nodes["S"]["seeds_linked"] == 0
     # C cites both A and the seed S
     assert nodes["A"]["seed_cocited"] == 1 and nodes["C"]["seed_coupling"] > 0
+
+
+def test_parse_ref_apa_with_initials_and_foreign_place():
+    import matching
+    assert matching.parse_ref("Schön, D. A. (1983). The reflective practitioner: How professionals think in action. Basic Books.") \
+        == ("Schön", 1983, "The reflective practitioner: How professionals think in action")
+    assert matching.parse_ref("Cross, N. (1982). Designerly ways of knowing. Design Studies, 3(4), 221-227.") \
+        == ("Cross", 1982, "Designerly ways of knowing")
+    assert matching.parse_ref("Schön, Donald A. 1983. The Reflective Practitioner. New York: Basic Books.") \
+        == ("Schön", 1983, "The Reflective Practitioner")
+    assert matching.parse_ref("Heidegger, M., Sein und Zeit, Tübingen: Niemeyer, 1927.") == ("Heidegger", 1927, "Sein und Zeit")
+
+
+def test_server_uses_the_shared_matching_module():
+    import matching
+    assert s._assess is matching.assess and s._eligible is matching.eligible and s.TITLE_THRESHOLD is matching.TITLE_THRESHOLD

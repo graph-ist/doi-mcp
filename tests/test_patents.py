@@ -22,7 +22,7 @@ XML = """<?xml version="1.0" encoding="UTF-8"?>
      <citation cited-phase="search"><patcit num="1"><document-id document-id-type="docdb"><country>US</country><doc-number>2015123456</doc-number><kind>A1</kind></document-id>
        <document-id document-id-type="epodoc"><doc-number>US2015123456</doc-number></document-id></patcit></citation>
      <citation cited-phase="search"><nplcit num="2"><text>LEE J ET AL: "Towards more paper-like input: flexible input devices for foldable interaction styles", PROC. UIST 2008, 19 October 2008, pages 1-10, XP058000000, DOI: 10.1145/1449715.1449754</text></nplcit></citation>
-     <citation cited-phase="examination"><nplcit num="3"><text>KHALILBEIGI M ET AL: "FoldMe: interacting with double-sided foldable displays", TEI 2012, 19 February 2012, XP055000000</text></nplcit></citation>
+     <citation cited-phase="examination"><category>X</category><nplcit num="3"><text>KHALILBEIGI M ET AL: "FoldMe: interacting with double-sided foldable displays", TEI 2012, 19 February 2012, XP055000000</text></nplcit></citation>
     </references-cited>
    </bibliographic-data>
    <abstract lang="en"><p>A foldable display device includes a hinge.</p></abstract>
@@ -39,7 +39,8 @@ def test_parse_document():
     assert d["applicants"] == ["SAMSUNG ELECTRONICS CO LTD"] and d["inventors"] == ["KIM JIN [KR]"]
     assert d["published"] == "2019-06-26" and d["priority"] == "2017-12-20" and d["ipc"] == ["G06F 1/16"]
     assert d["cites_patents"] == ["US2015123456"] and len(d["cites_literature"]) == 2
-    assert d["cites_literature"][1]["phase"] == "examination"
+    assert d["cites_literature"][1]["phase"] == "examination" and d["cites_literature"][1]["category"] == "X"
+    assert d["cites_literature"][0]["category"] is None
 
 
 def test_parse_npl_and_numbers():

@@ -234,6 +234,10 @@ Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add
 
 **Grafo di citazione.** `citation_graph` parte dai lavori seed, scarica i loro riferimenti e i lavori citanti più citati, ordina i candidati per numero di seed collegati e poi per citazioni, e tiene i primi `max_nodes`. Le co-citazioni sono calcolate solo sui lavori presenti nel grafo, quindi sono un limite inferiore. L'accoppiamento usa le liste di riferimenti complete e riporta sia il numero di riferimenti condivisi sia una forza normalizzata (0–1); collega anche i lavori recenti, che non hanno ancora co-citazioni. Un accoppiamento molto alto tra due nodi può indicare due record dello stesso lavoro.
 
+## Skill: i flussi tra i tre MCP
+
+I prompt qui sopra riguardano un solo server. Il ciclo intero (trovare, verificare, acquisire in Zotero, leggere, scrivere la nota in Obsidian, ricollegare alle mappe) è descritto nelle skill in `skills/`: `add-to-library`, `reading-note`, `literature-map`, `prior-art`. Ogni skill dice l'ordine delle chiamate tra DOI, Zotero e Obsidian, che cosa scrive dove, e quando fermarsi a chiedere; `skills/README.md` spiega come installarle (Claude Code: `~/.claude/skills/`; Claude web: caricamento come skill) e raccoglie le regole che valgono in tutte.
+
 ## Limiti noti
 
 - La filosofia è coperta male da tutte le fonti; PhilPapers non ha un'API di ricerca accessibile (l'OAI-PMH di PhilArchive permette solo la raccolta per data e insieme, non la ricerca). Il database `dnb` copre le monografie e le traduzioni in tedesco, senza abstract.
@@ -268,7 +272,10 @@ La suite gira senza rete. `tests/fixtures/find_doi_cases.json` è un insieme di 
 
 | File | Contenuto |
 |---|---|
-| `server.py` | Tutto il server: strumenti, prompt, client HTTP, modalità stdio e HTTP |
+| `server.py` | Strumenti, prompt, client HTTP, modalità stdio e HTTP |
+| `matching.py` | Il confronto bibliografico (titolo, cognome, anno, errata e repliche) usato da `find_doi`, `verify_doi`, `patent_get` e dalle mappe; solo libreria standard. L'MCP Zotero ne tiene una copia identica (`zotero_mcp/matching.py`) per `create_item_from_doi` e `extract_references`: le due copie vanno aggiornate insieme |
+| `maps.py`, `knowledge.py`, `patents.py` | Mappe persistenti (SQLite), lettura delle istantanee Zotero e Obsidian, EPO OPS |
+| `skills/` | Le skill di Claude che orchestrano i flussi tra i tre MCP (vedi sotto) |
 | `tests/test_server.py` | Test offline |
 | `pyproject.toml`, `uv.lock` | Dipendenze e versioni bloccate |
 
@@ -340,7 +347,7 @@ uv export --no-dev --no-emit-project --format requirements-txt > requirements.lo
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock.txt
 ```
 
-Per aggiornare: copiare `server.py`, `maps.py`, `knowledge.py` e `patents.py` (e, se cambiano le dipendenze, rifare l'installazione), poi riavviare il servizio. Dopo modifiche a strumenti o prompt, in Claude web il connettore va disattivato e riattivato perché rilegga l'elenco.
+Per aggiornare: copiare `server.py`, `maps.py`, `knowledge.py`, `patents.py` e `matching.py` (e, se cambiano le dipendenze, rifare l'installazione), poi riavviare il servizio. Dopo modifiche a strumenti o prompt, in Claude web il connettore va disattivato e riattivato perché rilegga l'elenco.
 
 ## Variabili d'ambiente
 
@@ -365,6 +372,8 @@ Per aggiornare: copiare `server.py`, `maps.py`, `knowledge.py` e `patents.py` (e
 ## Mappe: ponte con Zotero e Obsidian
 
 Il DOI MCP non chiama Zotero e non legge il vault. Legge due istantanee in `KNOWLEDGE_DIR` (sola lettura per questo servizio), rigenerate su richiesta dagli altri due MCP: `library.json` dall'MCP Zotero (`refresh_library_snapshot`), `notes.json` dall'MCP Obsidian (`refresh_notes_snapshot`). La pagina delle mappe ha il pulsante "Refresh library and notes" che li chiama entrambi. Da lì `map_get`, `map_suggest` e `map_export` aggiungono a ogni lavoro `in_library`, `zotero_key` e le note che lo citano nel `reference`; `map_add_seeds` accetta `zotero_collection` o `zotero_tag`. Senza istantanee queste funzioni lo dicono e il resto funziona.
+
+Le due istantanee portano `schema_version` (oggi 1 per entrambe), scritto da chi le genera e letto da `knowledge.py`: un file con una versione maggiore di quella supportata viene ignorato, e `map_get` lo segnala in `snapshots.problems`, invece di essere letto male. Chi aggiunge un campo non incrementa la versione; chi ne cambia il significato o ne toglie uno sì.
 
 Quando OpenAlex non ha la bibliografia di un seed (libri, scienze umane), `map_add_seeds` la prende da Semantic Scholar se c'è; `map_suggest` usa anche `cocited_total` (co-citazione con qualsiasi lavoro della mappa) per separare i candidati quando un solo seed li collega tutti, e avvisa se nessun seed ha bibliografia.
 
