@@ -95,10 +95,29 @@ def items_where(collection: str | None = None, tag: str | None = None) -> list[d
 def annotate(nodes: list[dict]) -> None:
     """Add in_library, zotero_key and notes to map nodes (in place)."""
     lib, by_key = by_doi(), notes_by_key()
+    keys = {it["key"]: it for it in (library() or {}).get("items", [])}
     for n in nodes:
         it = lib.get(norm_doi(n.get("doi"))) if n.get("doi") else None
+        # books without DOI: the node's zotero_key (set when the seed came from Zotero) or a "Z:KEY" id
+        zk = n.get("zotero_key") or (n["id"][2:] if str(n.get("id", "")).startswith("Z:") else None)
+        it = it or (keys.get(zk) if zk else None)
         n["in_library"] = bool(it)
         n["zotero_key"] = it["key"] if it else None
         n["notes"] = by_key.get(it["key"], []) if it else []
         # only the tags that mean something on a map: core/seminal and cited/*
         n["zotero_tags"] = [t for t in it.get("tags", []) if t == "core/seminal" or t.startswith("cited/")] if it else []
+
+
+def item_by_key(key: str) -> dict | None:
+    lib = library()
+    return next((it for it in (lib or {}).get("items", []) if it["key"] == key), None)
+
+
+def references(item_key: str) -> list[str] | None:
+    """Raw bibliography entries extracted from the item's PDF by the Zotero MCP
+    (extract_references); None when not extracted yet."""
+    try:
+        data = json.load(open(os.path.join(KNOWLEDGE_DIR, "references", f"{item_key}.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data.get("entries") or []

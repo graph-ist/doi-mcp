@@ -26,7 +26,7 @@ def db(monkeypatch, tmp_path):
 
     async def expand(mode, seeds, per_seed):
         if mode == "references":
-            return [(works[r], f"references:{sd['id']}") for sd in seeds for r in sd["refs"]], []
+            return [(works[r], f"references:{sd['id']}") for sd in seeds for r in sd["refs"] if r in works], []
         return [(works["W6"], f"citing:{sd['id']}") for sd in seeds], []
 
     monkeypatch.setattr(s, "_cg_seed", seed)
@@ -80,17 +80,26 @@ def snapshot(monkeypatch, tmp_path):
     d = tmp_path / "knowledge"; d.mkdir()
     (d / "library.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "items": [
         {"key": "ZKEY0001", "doi": "10.1234/one", "title": "One", "tags": ["cited/x", "core/seminal", "sub/1"], "collections": ["Design › Theory"]},
-        {"key": "ZKEY0002", "doi": None, "title": "Book without DOI", "tags": ["cited/x"], "collections": []}]}))
+        {"key": "ZKEY0002", "doi": None, "title": "Book without DOI", "creators": ["Writer"], "year": 1999, "tags": ["cited/x"], "collections": []}]}))
     (d / "notes.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "notes": [
         {"title": "One note", "path": "Zettelkasten/Summaries/One note.md", "zotero_keys": ["ZKEY0001"]}]}))
     monkeypatch.setattr(knowledge, "KNOWLEDGE_DIR", str(d))
     knowledge._cache.clear()
 
+    async def not_in_openalex(surname, title, budget=None):
+        return None
+    monkeypatch.setattr(s, "_resolve_work", not_in_openalex)
+    return d
+
 
 def test_zotero_tag_seeds_and_bridges(db, snapshot):
     run(s.map_create("Z"))
     out = run(s.map_add_seeds("Z", zotero_tag="cited/x"))
-    assert out["seeds"] == {"W1": "added"} and "1 items have no DOI" in out["warnings"][0]
+    # the book without DOI is not in OpenAlex: it enters as a Zotero node, its bibliography not extracted yet
+    assert out["seeds"] == {"W1": "added", "Z:ZKEY0002": "added"}
+    assert any("ZKEY0002" in w and "extract_references" in w for w in out["warnings"])
+    z = next(w for w in run(s.map_get("Z"))["works"] if w["id"] == "Z:ZKEY0002")
+    assert z["in_library"] and z["zotero_key"] == "ZKEY0002" and z["title"] == "Book without DOI"
     w1 = next(w for w in run(s.map_get("Z"))["works"] if w["id"] == "W1")
     assert w1["in_library"] and w1["zotero_key"] == "ZKEY0001" and w1["notes"][0]["title"] == "One note"
     assert w1["zotero_tags"] == ["cited/x", "core/seminal"]
@@ -208,3 +217,86 @@ def test_refresh_keeps_state(db, monkeypatch):
     out = run(s.map_refresh("R"))
     w3 = next(w for w in run(s.map_get("R"))["works"] if w["id"] == "W3")
     assert out["refreshed"] == 3 and w3["cited_by"] == 999 and w3["momentum"] == 42 and w3["state"] == "read"
+
+
+def test_pdf_references_book_nodes_and_editions(db, snapshot, monkeypatch):
+    import json
+    refs = snapshot / "references"; refs.mkdir()
+    (refs / "ZKEY0002.json").write_text(json.dumps({"entries": [
+        "Smith, Ann. 1990. Known Work About Things. London: Verso.",
+        "Doe, John. 1975. A Lost Book on Design. Paris: Minuit.",
+        "Roe, Rita. 1980. Another Lost Book Here. Paris: Minuit."]}))
+    calls = []
+
+    async def resolve(surname, title, budget=None):
+        calls.append(title)
+        return dict(db["W3"]) if surname == "Smith" else None
+    monkeypatch.setattr(s, "_resolve_work", resolve)
+    run(s.map_create("P"))
+    out = run(s.map_add_seeds("P", zotero_items=["ZKEY0002"]))
+    assert out["pdf_references"]["Z:ZKEY0002"] == {"entries": 3, "openalex": 1, "book_nodes": 2, "unparsed": 0, "pending": 0}
+    book = next(w for w in run(s.map_get("P"))["works"] if w["id"] == "Z:ZKEY0002")
+    assert book["refs_source"] == "zotero_pdf"
+    # resolutions are cached: a second time nothing is looked up again
+    n = len(calls)
+    run(s.map_add_seeds("P", zotero_items=["ZKEY0002"]))
+    assert len(calls) == n
+    # a book node cited by only one work in the map stays out; W1 also citing it brings it in
+    run(s.map_expand("P"))
+    ids = {w["id"] for w in run(s.map_get("P"))["works"]}
+    assert "W3" in ids and not any(i.startswith("B:") for i in ids)
+    m, conn = s._map_db()
+    mid = m.map_row(conn, "P")["id"]
+    db["W1"]["refs"] = ["B:doe-1975-lost-book-design"]
+    run(s.map_add_seeds("P", ["W1"]))
+    run(s.map_expand("P"))
+    got = run(s.map_get("P"))
+    assert "B:doe-1975-lost-book-design" in {w["id"] for w in got["works"]}
+    assert ["W1", "B:doe-1975-lost-book-design"] in got["citation_edges"]
+
+
+def test_parse_ref_styles():
+    assert s._parse_ref("Adams, Carol. 1990. The Sexual Politics of Meat. New York: Continuum.") == \
+        ("Adams", 1990, "The Sexual Politics of Meat")
+    assert s._parse_ref("Alexander, Christopher, Notes on the Synthesis of Form, Cambridge, MA: Harvard University Press, 1964.") == \
+        ("Alexander", 1964, "Notes on the Synthesis of Form")
+    assert s._parse_ref('Becker, Howard S. 1972. "A School is a Lousy Place." In American Behavioral Scientist 16.')[2] == \
+        "A School is a Lousy Place"
+
+
+def test_merge_editions_remaps_references(db):
+    m, conn = s._map_db()
+    mid = m.create(conn, "E")
+    a = {**node("W50", [], cited=900), "title": "Science and the Modern World", "first_author": "Alfred North Whitehead", "year": 1926}
+    b = {**node("W51", [], cited=40), "title": "Science and the Modern World", "first_author": "A. N. Whitehead", "year": 1967}
+    c = node("W52", ["W51"])
+    with conn:
+        for n_, role in ((a, "candidate"), (b, "candidate"), (c, "seed")):
+            m.upsert(conn, mid, n_, role, "test")
+    merged = s._merge_duplicates(m, conn, mid)
+    assert merged and merged[0]["kept"] == "W50"
+    assert m.nodes(conn, mid)["W52"]["refs"] == ["W50"]
+
+
+def test_resolve_crossref_first_and_budget(monkeypatch):
+    calls = []
+
+    async def crossref(c, title, author):
+        return [{"doi": "10.1/x", "title": "Homo Sacer", "subtitle": "Sovereign Power and Bare Life", "authors": ["Agamben"]}]
+
+    async def oa_get(path, **params):
+        calls.append(path)
+        if path.startswith("works/doi:"):
+            return {"id": "https://openalex.org/W9", "title": "Homo Sacer", "referenced_works": []}
+        return {"results": []}
+    async def s2(path, params=None, body=None):
+        return {"status": "ok", "data": {"data": []}}
+    monkeypatch.setattr(s, "_crossref", crossref)
+    monkeypatch.setattr(s, "_oa_get", oa_get)
+    monkeypatch.setattr(s, "_s2_api", s2)
+    budget = {"searches": 0, "max": 1}
+    assert run(s._resolve_work("Agamben", "Homo Sacer: Sovereign Power and Bare Life", budget))["id"] == "W9"
+    assert budget["searches"] == 0 and calls == ["works/doi:10.1/x"]  # free path, no search
+    assert run(s._resolve_work("Nobody", "Unknown Title Here", budget)) is None  # one paid search
+    with pytest.raises(s.BudgetExhausted):
+        run(s._resolve_work("Nobody", "Another Unknown Title", budget))
