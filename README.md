@@ -281,9 +281,14 @@ La suite gira senza rete. `tests/fixtures/find_doi_cases.json` è un insieme di 
 |---|---|
 | `server.py` | Strumenti, prompt, client HTTP, modalità stdio e HTTP |
 | `matching.py` | Il confronto bibliografico (titolo, cognome, anno, errata e repliche) usato da `find_doi`, `verify_doi`, `patent_get` e dalle mappe; solo libreria standard. L'MCP Zotero ne tiene una copia identica (`zotero_mcp/matching.py`) per `create_item_from_doi` e `extract_references`: le due copie vanno aggiornate insieme |
-| `maps.py`, `knowledge.py`, `patents.py` | Mappe persistenti (SQLite), lettura delle istantanee Zotero e Obsidian, EPO OPS |
+| `maps.py`, `knowledge.py`, `patents.py` | Mappe persistenti (SQLite), lettura delle istantanee Zotero e Obsidian con copertura e citekey, EPO OPS |
+| `corpus.py`, `semantic.py` | Indice FTS5 del corpus (note, pagine, annotazioni) e strato semantico con embedding locali; `semantic.py download | embed | status` da riga di comando |
+| `philarchive.py`, `weekly.py` | Raccolta OAI-PMH di PhilArchive in copia locale; lavoro settimanale (mappe, ritrattazioni, copertura, raccolta, embedding, backup, report, ntfy) |
+| `check_creds.py` | Controllo delle credenziali del servizio sul Pi, senza stamparle |
+| `deploy/` | Unit e timer systemd del lavoro settimanale |
+| `pages/` | Sorgenti delle pagine *Literature maps* e *Knowledge views* |
 | `skills/` | Le skill di Claude che orchestrano i flussi tra i tre MCP (vedi sotto) |
-| `tests/test_server.py` | Test offline |
+| `tests/` | Test offline, per modulo; `tests/fixtures/contract/` i file di contratto degli altri due MCP |
 | `pyproject.toml`, `uv.lock` | Dipendenze e versioni bloccate |
 
 ### Uso locale (stdio), ad esempio in VS Code

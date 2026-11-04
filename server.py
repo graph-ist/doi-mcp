@@ -12,7 +12,7 @@ Env (optional):
     SEMANTIC_SCHOLAR_API_KEY authenticates requests; 1 request/s across all endpoints
   MCP_TRANSPORT            'stdio' (default) or 'http' (streamable HTTP on 127.0.0.1)
   PORT                     HTTP port, default 3002
-  MCP_AUTH_TOKEN           required in http mode, as Bearer header or ?token= query
+  MCP_AUTH_TOKEN           required in http mode, Authorization: Bearer header only
   MCP_ALLOWED_HOSTS        comma-separated public host names allowed behind a proxy
 """
 
