@@ -72,3 +72,13 @@ def test_dnb_search_adapter(monkeypatch):
     assert len(recs) == 1 and recs[0]["year"] == 2006 and recs[0]["venue"] == "Niemeyer"
     assert recs[0]["note"] == "ISBN 978-3-484-70153-6" and recs[0]["keywords"] == ["Ontologie"]
     assert out["log"]["total_hits"] == 2 and out["log"]["dropped_by_year"] == 1
+
+
+@pytest.mark.parametrize("query,expected", [
+    ('design ethics', 'tit=design AND tit=ethics'),
+    ('design ethics NOT "user study"', 'tit=design AND tit=ethics NOT tit="user study"'),
+    ('(affordance OR affordances) AND design', '( tit=affordance OR tit=affordances ) AND tit=design'),
+    ('design (ethics OR morality)', 'tit=design AND ( tit=ethics OR tit=morality )'),
+])
+def test_cql_has_explicit_conjunctions(query, expected):
+    assert s._cql(query, "tit") == expected

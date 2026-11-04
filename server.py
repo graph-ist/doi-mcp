@@ -2156,11 +2156,27 @@ async def _search_hal(query, year_from, year_to, limit, page, scope) -> dict:
                page, limit, d["response"]["numFound"], recs)
 
 
+def _cql(query: str, field: str) -> str:
+    """CQL for SRU: every term indexed on field, Boolean operators kept (NOT is binary in
+    CQL), and an explicit AND between adjacent terms, since CQL has no implicit conjunction."""
+    out: list[str] = []
+    for tok in re.findall(r'"[^"]+"|[()]|[^\s()]+', query):
+        if tok in ("AND", "OR", "NOT", "(", ")"):
+            if tok == "(" and out and out[-1] not in ("AND", "OR", "NOT", "("):
+                out.append("AND")
+            out.append(tok)
+            continue
+        if out and out[-1] not in ("AND", "OR", "NOT", "("):
+            out.append("AND")
+        out.append(f"{field}={tok}")
+    return " ".join(out)
+
+
 async def _search_dnb(query, year_from, year_to, limit, page, scope) -> dict:
     # Deutsche Nationalbibliothek SRU: German-language monographs, dissertations and
     # translations, incl. philosophy, which the other indexes cover thinly. No abstracts.
     field = "tit" if scope == "title_abstract" else "WOE"
-    q = _expand_terms(query, lambda t: f'{field}={t}')
+    q = _cql(query, field)
     params = {"version": "1.1", "operation": "searchRetrieve", "query": q,
               "recordSchema": "oai_dc", "maximumRecords": min(limit, 100),
               "startRecord": (page - 1) * limit + 1}
