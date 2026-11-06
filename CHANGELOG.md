@@ -6,6 +6,7 @@ Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: do
 
 - `MCP_ALLOW_QUERY_TOKEN=true`: il token è accettato anche come `?token=` nell'URL, per il modulo dei connettori di Claude web che ha solo nome e URL. Spento per default.
 - Pagina *Literature maps*: pulsante *Add patents* (`map_add_patents`, da 1 a 20 numeri, anche come seed).
+- Pagina *Literature maps*: il filtro degli anni si applica mentre si scrive (da quattro cifre), legge un intervallo invertito e, con sottocampo e off-topic, filtra anche la lista dei suggerimenti.
 
 ## 0.8.2
 

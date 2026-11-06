@@ -205,11 +205,21 @@ function legend(){
 
 /* ---------- data helpers ---------- */
 const relevance = (a, b) => (b.seeds_linked - a.seeds_linked) || (b.seed_cocited - a.seed_cocited) || (b.seed_coupling - a.seed_coupling) || ((b.cocited_total || 0) - (a.cocited_total || 0)) || ((b.cited_by || 0) - (a.cited_by || 0));
+// a year counts once it has four digits, so typing "19" does not empty the chart; from > to is read as to–from
+function yearRange(){
+  const y = id => { const v = $(id).value.trim(); return /^\d{4}$/.test(v) ? +v : null };
+  let lo = y('yfrom') ?? -Infinity, hi = y('yto') ?? Infinity;
+  if (lo > hi) [lo, hi] = [hi, lo];
+  return [lo, hi];
+}
+// the year, subfield and off-topic filters, shared by the chart and the reading list (seeds always stay in the chart)
+function passesFilters(w){
+  const [yf, yt] = yearRange(), sub = $('sub').value;
+  return (!w.year || (w.year >= yf && w.year <= yt)) && (!sub || w.subfield === sub) && !($('hideoff').checked && relevanceOf(w.id) === 'off');
+}
 function visibleWorks(){
   if (!data) return [];
-  const yf = +$('yfrom').value || -Infinity, yt = +$('yto').value || Infinity, sub = $('sub').value, off = $('hideoff').checked;
-  const pool = data.works.filter(w => w.role === 'seed' || (!($('hide').checked && w.state === 'dismissed')
-    && (!w.year || (w.year >= yf && w.year <= yt)) && (!sub || w.subfield === sub) && !(off && relevanceOf(w.id) === 'off')));
+  const pool = data.works.filter(w => w.role === 'seed' || (!($('hide').checked && w.state === 'dismissed') && passesFilters(w)));
   const seeds = pool.filter(w => w.role === 'seed'), rest = pool.filter(w => w.role !== 'seed').sort(relevance);
   const n = +$('topn').value, keep = rest.slice(0, Math.max(0, n));
   if (selected && byId.has(selected) && !keep.some(w => w.id === selected) && byId.get(selected).role !== 'seed') keep.push(byId.get(selected));
@@ -508,7 +518,8 @@ document.querySelector('thead').addEventListener('click', e => {
 function renderRows(){
   const tbody = $('rows');
   if (!sug.length){ tbody.innerHTML = `<tr><td colspan="6" class="fresh">${data && data.works.some(w => w.role !== 'seed') ? 'No open suggestions: everything is read or dismissed.' : 'Only seeds so far. Ask Claude to run map_expand on this map, then reload.'}</td></tr>`; return }
-  const rows = sug.slice(0, 40).map((s, i) => ({ ...(byId.get(s.id) || s), _rank: i + 1 }));
+  const rows = sug.map((s, i) => ({ ...(byId.get(s.id) || s), _rank: i + 1 })).filter(passesFilters).slice(0, 40);
+  if (!rows.length){ tbody.innerHTML = '<tr><td colspan="6" class="fresh">No suggestions in this range of years, subfield or topic: widen the filters above.</td></tr>'; return }
   const val = w => sortKey === 'rank' ? w._rank : (w[sortKey] ?? -1);
   rows.sort((a, b) => (val(a) - val(b)) * sortDir);
   tbody.innerHTML = rows.map(w => { return `<tr class="pick${w.id === selected ? ' on' : ''}" data-id="${esc(w.id)}"><td class="n">${w._rank}</td><td>${esc(w.title || w.id)}<br><span class="fresh">${esc(w.first_author)}</span><span class="chips">${chips(w)}</span></td><td class="n">${w.year || ''}</td><td class="n">${w.cited_by ?? ''}</td><td class="n">${w.seeds_linked}</td><td>${stateButtons(w)}</td></tr>` }).join('');
@@ -583,7 +594,10 @@ $('pruneCancel').onclick = () => { $('pruneForm').hidden = true };
 $('pruneForm').addEventListener('submit', async e => { e.preventDefault(); $('pruneForm').hidden = true;
   try { const r = await mcp.callTool(SERVER, 'map_prune', { map: current, keep: 300 }); $('fresh').textContent = `removed ${r.payload?.removed ?? 0} works, merged ${r.payload?.duplicates_merged ?? 0} duplicates`;
     await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) } catch (err) { say(explain(err)) } });
-['yfrom', 'yto', 'sub', 'hideoff'].forEach(id => $(id).addEventListener('change', draw));
+const refilter = () => { draw(); renderRows() };
+let yearTimer = null;
+['yfrom', 'yto'].forEach(id => $(id).addEventListener('input', () => { clearTimeout(yearTimer); yearTimer = setTimeout(refilter, 250) }));
+['yfrom', 'yto', 'sub', 'hideoff'].forEach(id => $(id).addEventListener('change', () => { clearTimeout(yearTimer); refilter() }));
 $('yaxis').addEventListener('change', draw);
 function controls(on){ ['watch', 'intents', 'patents', 'rename', 'del'].forEach(id => $(id).disabled = !on) }
 $('intents').onclick = async () => {
