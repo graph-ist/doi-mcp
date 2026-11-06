@@ -92,11 +92,13 @@ text{fill:var(--muted);font:11px var(--mono)}
 <label for="pick" class="lab">Map</label><select id="pick"><option>Loading maps…</option></select>
 <button id="watch" disabled>Check new citations</button>
 <button id="intents" disabled title="Why the works cite the seeds, from Semantic Scholar: intent, influence and the citing sentences; sentences with markers of critique are flagged">Citation intents</button>
+<button id="patents" disabled title="Patents as hexagon nodes, joined to the scientific literature their search reports cite (EPO OPS)">Add patents</button>
 <button id="snap" title="Update which works are in Zotero, which notes cite them, and citation counts">Refresh library and notes</button>
 <button id="rename" disabled>Rename</button>
 <button id="del" disabled>Delete map</button>
 <span class="fresh" id="fresh"></span></div>
 <form id="renameForm" class="panel bar" hidden><label for="newName" class="lab">New name</label><input id="newName" maxlength="80" required><button type="submit">Save name</button><button type="button" id="renameCancel">Cancel</button></form>
+<form id="patForm" class="panel bar" hidden><label for="patNums" class="lab">Patent numbers</label><input id="patNums" required placeholder="EP2462410B1, US8031172B2" style="min-width:16em;flex:1 1 16em" autocomplete="off"><label class="lab"><input type="checkbox" id="patSeed"> as seeds</label><button type="submit">Add</button><button type="button" id="patCancel">Cancel</button><span class="fresh">1 to 20 numbers, separated by commas or spaces</span></form>
 <form id="pruneForm" class="panel bar" hidden><span>Keep the seeds, the works you marked and the 300 candidates most linked to the seeds; remove the other new candidates?</span><button type="submit">Yes, reduce</button><button type="button" id="pruneCancel">No</button></form>
 <form id="delForm" class="panel bar" hidden><span id="delQ">Delete this map?</span><button type="submit" id="delGo">Yes, delete</button><button type="button" id="delCancel">No</button></form>
 <div id="msg" class="msg" hidden></div>
@@ -583,7 +585,7 @@ $('pruneForm').addEventListener('submit', async e => { e.preventDefault(); $('pr
     await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) } catch (err) { say(explain(err)) } });
 ['yfrom', 'yto', 'sub', 'hideoff'].forEach(id => $(id).addEventListener('change', draw));
 $('yaxis').addEventListener('change', draw);
-function controls(on){ ['watch', 'intents', 'rename', 'del'].forEach(id => $(id).disabled = !on) }
+function controls(on){ ['watch', 'intents', 'patents', 'rename', 'del'].forEach(id => $(id).disabled = !on) }
 $('intents').onclick = async () => {
   controls(false); $('intents').textContent = 'Asking Semantic Scholar…';
   try { const r = await mcp.callTool(SERVER, 'map_intents', { map: current }); say('');
@@ -610,6 +612,20 @@ $('watch').onclick = async () => {
   catch (err) { say(explain(err)) }
   $('watch').textContent = 'Check new citations'; controls(true);
 };
+$('patents').onclick = () => { $('patForm').hidden = false; $('patNums').focus() };
+$('patCancel').onclick = () => { $('patForm').hidden = true };
+$('patForm').addEventListener('submit', async e => { e.preventDefault(); if (!current) return;
+  const numbers = [...new Set($('patNums').value.toUpperCase().split(/[\s,;]+/).filter(Boolean))];
+  if (!numbers.length || numbers.length > 20){ say('Give 1 to 20 patent publication numbers.'); return }
+  $('patForm').hidden = true; controls(false); $('patents').textContent = 'Reading patents…';
+  try { const r = await mcp.callTool(SERVER, 'map_add_patents', { map: current, numbers, as_seed: $('patSeed').checked }); const p = r.payload || {};
+    if (p.status !== 'ok'){ say(p.detail || 'The patents were not added.') }
+    else { const res = Object.values(p.patents || {}), ok = res.filter(x => x && x.result && !x.status).length, failed = res.length - ok;
+      say(failed ? `${failed} of ${res.length} numbers not found or not readable at the EPO.` : '');
+      $('fresh').textContent = `${ok} patent(s) added, ${p.literature_added ?? 0} cited works; ${(p.unresolved || []).length} citations without a DOI (resolve them in chat)`;
+      $('patNums').value = ''; await mcp.invalidate(SERVER).catch(() => {}); await loadMap(current, true) } }
+  catch (err) { say(explain(err) + (err?.code === 'tool_error' ? ' Patents need the EPO keys on the DOI server.' : '')) }
+  $('patents').textContent = 'Add patents'; controls(true) });
 $('rename').onclick = () => { $('renameForm').hidden = false; $('newName').value = current; $('newName').focus() };
 $('renameCancel').onclick = () => { $('renameForm').hidden = true };
 $('renameForm').addEventListener('submit', async e => { e.preventDefault(); const name = $('newName').value.trim(); if (!name || name === current) return;

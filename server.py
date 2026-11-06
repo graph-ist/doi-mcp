@@ -4159,10 +4159,16 @@ def _status() -> dict:
     return out
 
 
+# Claude web's "Add custom connector" form has only a name and a URL: with this flag the token is
+# also accepted as ?token= (off by default; the access log stays off so the URL is not logged).
+_ALLOW_QUERY_TOKEN = os.environ.get("MCP_ALLOW_QUERY_TOKEN", "").lower() in ("1", "true", "yes")
+
+
 class _TokenAuth:
-    """Authorization: Bearer <token> on every request. A token in the URL is refused: URLs end up
-    in proxy logs and browser histories (Claude web sends the header from the connector's
-    "Request headers"). GET /status answers loopback clients without credentials."""
+    """Authorization: Bearer <token> on every request. A token in the URL is refused, because URLs
+    end up in proxy logs and browser histories, unless MCP_ALLOW_QUERY_TOKEN is set: Claude web's
+    connector form has only a name and a URL, so there the token can only travel as ?token=.
+    GET /status answers loopback clients without credentials."""
 
     def __init__(self, app, token: str):
         self.app, self.token = app, token.encode()
@@ -4179,6 +4185,8 @@ class _TokenAuth:
                 return
             header = dict(scope["headers"]).get(b"authorization", b"")
             bearer = header[7:] if header[:7].lower() == b"bearer " else b""
+            if not bearer and _ALLOW_QUERY_TOKEN:
+                bearer = parse_qs(scope.get("query_string", b"").decode()).get("token", [""])[0].encode()
             if not hmac.compare_digest(bearer, self.token):
                 await JSONResponse({"error": "unauthorized"}, status_code=401,
                                    headers={"WWW-Authenticate": 'Bearer realm="paper-doi-mcp"'})(scope, receive, send)

@@ -2,6 +2,11 @@
 
 Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
 
+## Non pubblicata
+
+- `MCP_ALLOW_QUERY_TOKEN=true`: il token è accettato anche come `?token=` nell'URL, per il modulo dei connettori di Claude web che ha solo nome e URL. Spento per default.
+- Pagina *Literature maps*: pulsante *Add patents* (`map_add_patents`, da 1 a 20 numeri, anche come seed).
+
 ## 0.8.2
 
 - Pagina *Literature maps* ripubblicata: brevetti (esagoni, archi punteggiati) e libri (triangoli), chip `verified` e criterio di abbinamento con Zotero, conteggio OpenCitations e `coverage_gaps` dopo il refresh, pulsanti e marcature degli intenti di citazione (`map_intents`, voce Debate); `map_watch` tolto dal manifest.

@@ -112,6 +112,10 @@ def test_http_auth_is_bearer_only_and_status_is_loopback(snap, tmp_path, monkeyp
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as c:
             assert (await c.get("/mcp?token=" + token)).status_code == 401
             assert (await c.get("/mcp", headers={"Authorization": f"Bearer {token}"})).status_code == 200
+            monkeypatch.setattr(s, "_ALLOW_QUERY_TOKEN", True)  # Claude web: the token in the URL
+            assert (await c.get("/mcp?token=" + token)).status_code == 200
+            assert (await c.get("/mcp?token=wrong")).status_code == 401
+            monkeypatch.setattr(s, "_ALLOW_QUERY_TOKEN", False)
             st = await c.get("/status")
             assert st.status_code == 200
             body = st.json()

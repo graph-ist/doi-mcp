@@ -384,6 +384,7 @@ Per aggiornare: copiare `server.py`, `maps.py`, `knowledge.py`, `patents.py`, `m
 | `MCP_TRANSPORT` | `stdio` (default) o `http` |
 | `PORT` | Porta HTTP, default 3002 |
 | `MCP_AUTH_TOKEN` | Obbligatorio in modalità HTTP, almeno 32 caratteri (`openssl rand -hex 32`) |
+| `MCP_ALLOW_QUERY_TOKEN` | `true` per accettare il token anche come `?token=` nell'URL (spento per default). Serve per Claude web, il cui modulo dei connettori ha solo nome e URL; tenere spento il log degli accessi del proxy |
 | `MCP_ALLOWED_HOSTS` | Host pubblici accettati dietro il proxy, separati da virgola |
 
 ## Mappe: ponte con Zotero e Obsidian
