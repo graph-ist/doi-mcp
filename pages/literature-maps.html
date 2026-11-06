@@ -212,14 +212,14 @@ function yearRange(){
   if (lo > hi) [lo, hi] = [hi, lo];
   return [lo, hi];
 }
-// the year, subfield and off-topic filters, shared by the chart and the reading list (seeds always stay in the chart)
+// the year, subfield and off-topic filters, shared by the chart and the reading list (seeds follow only the years)
+function inYears(w){ const [yf, yt] = yearRange(); return !w.year || (w.year >= yf && w.year <= yt) }
 function passesFilters(w){
-  const [yf, yt] = yearRange(), sub = $('sub').value;
-  return (!w.year || (w.year >= yf && w.year <= yt)) && (!sub || w.subfield === sub) && !($('hideoff').checked && relevanceOf(w.id) === 'off');
+  return inYears(w) && (!$('sub').value || w.subfield === $('sub').value) && !($('hideoff').checked && relevanceOf(w.id) === 'off');
 }
 function visibleWorks(){
   if (!data) return [];
-  const pool = data.works.filter(w => w.role === 'seed' || (!($('hide').checked && w.state === 'dismissed') && passesFilters(w)));
+  const pool = data.works.filter(w => w.role === 'seed' ? inYears(w) : (!($('hide').checked && w.state === 'dismissed') && passesFilters(w)));
   const seeds = pool.filter(w => w.role === 'seed'), rest = pool.filter(w => w.role !== 'seed').sort(relevance);
   const n = +$('topn').value, keep = rest.slice(0, Math.max(0, n));
   if (selected && byId.has(selected) && !keep.some(w => w.id === selected) && byId.get(selected).role !== 'seed') keep.push(byId.get(selected));
@@ -300,7 +300,7 @@ function drawTime(W, vis, w, h){
   // symlog: like a log scale above 10, linear near 0, so works never cited sit on a 0 line
   const yk = $('yaxis').value, val = d => d[yk] || 0;
   const top = d3.max(pts, val) || 1;
-  const y0 = d3.scaleSymlog().constant(1).domain([0, Math.pow(10, Math.ceil(Math.log10(top * 1.5)))]).range([h - m.b, m.t]);
+  const y0 = d3.scaleSymlog().constant(1).domain([0, Math.pow(10, Math.ceil(Math.log10(top * 1.5)))]).range([h - m.b - 14, m.t + 6]);
   const yTicks = Y => [0, 1, 10, 100, 1000, 10000, 100000, 1000000].filter(v => v >= Y.domain()[0] && v <= Y.domain()[1]);
   const grid = root.append('g'), gx = root.append('g').attr('transform', `translate(0,${h - m.b})`), gy = root.append('g').attr('transform', `translate(${m.l},0)`);
   root.append('text').attr('x', m.l).attr('y', 12).text(yk === 'momentum' ? 'citations, last 3 years' : 'cited by');
