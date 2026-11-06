@@ -8,6 +8,7 @@ Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: do
 - Pagina *Literature maps*: pulsante *Add patents* (`map_add_patents`, da 1 a 20 numeri, anche come seed).
 - Pagina *Literature maps*: il filtro degli anni si applica mentre si scrive (da quattro cifre), legge un intervallo invertito e, con sottocampo e off-topic, filtra anche la lista dei suggerimenti.
 - Pagina *Literature maps*: il filtro degli anni vale anche per i seed (prima restavano sempre visibili); i lavori con 0 citazioni non sono più tagliati dal bordo del grafico.
+- Pagina *Literature maps*: nella rete le etichette mantengono la dimensione quando si zooma, come nella timeline.
 
 ## 0.8.2
 
