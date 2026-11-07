@@ -54,7 +54,7 @@ from pydantic import Field
 
 VERSION = "0.8.2"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
-MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
+MAPS_PAGE = "https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s"
 INSTRUCTIONS = (
     "Citation verification: find_doi then verify_doi (verify_book for editions); format_apa "
     "or format_reference only after verification; check_citations cross-checks in-text "
@@ -4241,7 +4241,7 @@ def _map_export(maps, db, map, states) -> dict:
 async def map_list() -> dict:
     """All literature maps with counts: seeds, works, to_read, read, dismissed.
     The user sees and manages maps on the 'Literature maps' page, which reads them live
-    (timeline, network, suggestions, reading-state buttons): https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT . Give this link whenever
+    (timeline, network, suggestions, reading-state buttons): https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s . Give this link whenever
     a map is created, expanded or asked for; it is the only map page."""
     maps, db = _map_db()
     return {"status": "ok", "maps": maps.summary(db)}
