@@ -81,12 +81,42 @@ def _migrate(db: sqlite3.Connection) -> None:
                    (now(), now()))
 
 
-def connect(path: str | None = None) -> sqlite3.Connection:
+WRITES = 0  # bumped after every commit that changed something on a tracked connection (see server._view_cache)
+_WRITES_LOCK = threading.Lock()
+
+
+class _TrackedConnection(sqlite3.Connection):
+    """A connection that counts its committed writes in the module-level WRITES. `updated` has a
+    one-second resolution, so it alone cannot tell two writes in the same second apart: cached views
+    of a map are keyed on this counter as well. Any write, whichever function makes it, is counted
+    (a write that rolls back is not)."""
+    _seen = 0
+
+    def _count(self) -> None:
+        global WRITES
+        if self.total_changes != self._seen:
+            self._seen = self.total_changes
+            with _WRITES_LOCK:
+                WRITES += 1
+
+    def commit(self) -> None:
+        super().commit()
+        self._count()
+
+    def __exit__(self, exc_type, exc, tb):
+        out = super().__exit__(exc_type, exc, tb)
+        if exc_type is None:
+            self._count()
+        return out
+
+
+def connect(path: str | None = None, track: bool = True) -> sqlite3.Connection:
     """A new connection (one per request; the caller closes it). Waits up to 15 s for a lock.
+    track=False for connections that only write the jobs table (their writes do not touch maps).
     WAL and the migrations are applied the first time a process opens a database file."""
     path = os.path.abspath(path or DB_PATH)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    db = sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS / 1000)
+    db = sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS / 1000, factory=_TrackedConnection if track else sqlite3.Connection)
     db.row_factory = sqlite3.Row
     try:
         db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")

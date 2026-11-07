@@ -17,16 +17,20 @@ Env (optional):
 """
 
 import asyncio
+import collections
 import contextvars
 import functools
+import heapq
 import hmac
 import html
 import inspect
+import itertools
 import json
 import sys
 import os
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 import uuid
@@ -145,7 +149,7 @@ class _Job:
 
     def _db(self):
         import maps
-        return maps.connect(self.db_path)
+        return maps.connect(self.db_path, track=False)  # writes the jobs table only
 
     def _map_id(self, db) -> int | None:
         if not self.map_key:
@@ -227,6 +231,7 @@ def _progress(done: int | None = None, total: int | None = None, step: str | Non
 async def _run_job(job: _Job, f, args, kwargs):
     opened = _OPEN_DBS.set([])
     _CURRENT_JOB.set(job)
+    _priority.set(PRIORITY_LOW)  # this task's requests queue behind those of quick tools
     try:
         try:
             result = await f(*args, **kwargs)
@@ -353,8 +358,47 @@ def _err(name: str, e: BaseException) -> str:
     return f"{name}: {type(e).__name__}" + (f": {detail}" if detail else "")
 
 
+# Who is waiting for a request slot: 0 = a quick call (paper_table and the other tools that answer at
+# once), 1 = a long background job (map_create, map_expand, ...: set by _run_job). When a slot frees up,
+# the waiting request with the lowest number goes first, in arrival order among equals. It never
+# interrupts a request already running and does not change the intervals or the concurrency.
+PRIORITY_HIGH, PRIORITY_LOW = 0, 1
+_priority: contextvars.ContextVar = contextvars.ContextVar("request_priority", default=PRIORITY_HIGH)
+
+
+class _PrioritySemaphore:
+    """asyncio.Semaphore whose waiters are served by (priority, arrival) instead of arrival only."""
+
+    def __init__(self, value: int):
+        self._value = value
+        self._waiters: list = []  # heap of (priority, seq, future)
+        self._seq = itertools.count()
+
+    async def acquire(self, priority: int = PRIORITY_HIGH) -> None:
+        if self._value > 0:  # a free slot means nobody is waiting: the slot is handed over, never left free
+            self._value -= 1
+            return
+        fut = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (priority, next(self._seq), fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self.release()  # the slot had already been handed to this waiter
+            raise
+
+    def release(self) -> None:
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():  # skips waiters that were cancelled
+                fut.set_result(None)
+                return
+        self._value += 1
+
+
 class _PoliteTransport(httpx.AsyncHTTPTransport):
-    """Caps concurrency per host; intervals cover all endpoints, including retries."""
+    """Caps concurrency per host; intervals cover all endpoints, including retries. Quick calls pass
+    ahead of background jobs that are queued for the same host (see _priority)."""
     # Crossref: polite pool allows a few concurrent requests; beyond that it answers 429
     CONCURRENCY = {"api.semanticscholar.org": 1, "export.arxiv.org": 1,
                    "api.openalex.org": 1, "user.openalex.org": 1, "api.crossref.org": 2, "archive.org": 2,
@@ -371,18 +415,21 @@ class _PoliteTransport(httpx.AsyncHTTPTransport):
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        self._sems: dict[str, asyncio.Semaphore] = {}
+        self._sems: dict[str, _PrioritySemaphore] = {}
         self._last: dict[str, float] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
-        sem = self._sems.setdefault(host, asyncio.Semaphore(self.CONCURRENCY.get(host, 5)))
-        async with sem:
+        sem = self._sems.setdefault(host, _PrioritySemaphore(self.CONCURRENCY.get(host, 5)))
+        await sem.acquire(_priority.get())
+        try:
             wait = self._last.get(host, 0.0) + self.interval(host) - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last[host] = time.monotonic()
             return await super().handle_async_request(request)
+        finally:
+            sem.release()
 
 
 _client: httpx.AsyncClient | None = None
@@ -3501,6 +3548,45 @@ def _map_view(nodes: dict[str, dict], min_cocitation: int = 2, min_coupling: int
     return edges, cocit, coupling
 
 
+# A small per-process cache of the computed view of a map (map_get and map_suggest, which the page
+# calls one after the other). The key says whether anything in the map changed: the map's `updated`
+# stamp, the number of nodes and of edge_intents, their highest rowid, and maps.WRITES, a counter that
+# every committed write bumps (`updated` has a one-second resolution, so two writes in the same second
+# would leave it unchanged). The counter is read before the rows, so a write that lands meanwhile can
+# only make the entry unreachable, never stale.
+VIEW_CACHE_SIZE = 8
+_VIEW_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_VIEW_CACHE_LOCK = threading.Lock()
+
+
+def _view_key(maps, db, m, params: tuple) -> tuple:
+    version = maps.WRITES
+    n = db.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM nodes WHERE map_id = ?", (m["id"],)).fetchone()
+    e = db.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM edge_intents WHERE map_id = ?", (m["id"],)).fetchone()
+    return (os.path.abspath(maps.DB_PATH), m["id"], m["updated"], tuple(n), tuple(e), version, params)
+
+
+def _cached_view(maps, db, m, min_cocitation: int = 2, min_coupling: int = 3, max_pairs: int = 500):
+    """(nodes, edges, cocitation, coupling, truncation) of a map: nodes with the scores of _map_view.
+    The caller gets its own copies of the node dicts and may annotate them."""
+    key = _view_key(maps, db, m, (min_cocitation, min_coupling, max_pairs))
+    with _VIEW_CACHE_LOCK:
+        hit = _VIEW_CACHE.get(key)
+        if hit:
+            _VIEW_CACHE.move_to_end(key)
+    if hit:
+        nodes, edges, cocit, coupling, truncation = hit
+        return {k: dict(v) for k, v in nodes.items()}, edges, cocit, coupling, dict(truncation)
+    nodes = maps.nodes(db, m["id"])
+    truncation: dict = {}
+    edges, cocit, coupling = _map_view(nodes, min_cocitation, min_coupling, max_pairs, truncation)
+    with _VIEW_CACHE_LOCK:
+        _VIEW_CACHE[key] = ({k: dict(v) for k, v in nodes.items()}, edges, cocit, coupling, dict(truncation))
+        while len(_VIEW_CACHE) > VIEW_CACHE_SIZE:
+            _VIEW_CACHE.popitem(last=False)
+    return nodes, edges, cocit, coupling, truncation
+
+
 async def _s2_reference_ids(doi: str) -> list[str]:
     """OpenAlex ids of a work's references taken from Semantic Scholar, for works whose OpenAlex
     record has none (common for books and the humanities)."""
@@ -3879,8 +3965,7 @@ def _map_suggest(maps, db, map, limit, include_states) -> dict:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
-    nodes = maps.nodes(db, m["id"])
-    _map_view(nodes)
+    nodes = _cached_view(maps, db, m)[0]
     states = set(include_states or ["new", "to_read"])
     ranked = sorted((n for n in nodes.values() if n["role"] == "candidate" and n["state"] in states),
                     key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cocited_total"],
@@ -3919,7 +4004,8 @@ async def map_mark(map: str, ids: list[str], state: Literal["new", "to_read", "r
 
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_get(map: str, states: list[MapState] | None = None, min_cocitation: int = 2,
-                  min_coupling: int = 3, max_pairs: int = 500) -> dict:
+                  min_coupling: int = 3, max_pairs: int = 500, compact: bool = False,
+                  fields: list[str] | None = None) -> dict:
     """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
     and links computed on the whole map: citation_edges, cocitation, coupling (same format and
     caveats as citation_graph). states filters the works returned (links are kept only
@@ -3932,28 +4018,58 @@ async def map_get(map: str, states: list[MapState] | None = None, min_cocitation
     cocitation and coupling hold at most max_pairs pairs each (default 500, max 5000), the strongest
     first: cocitation_truncated / coupling_truncated say when weaker pairs above the minimum were
     left out. added (when the work entered) and refs_source (where its reference list came from:
-    openalex, semantic_scholar, zotero_pdf, epo; null when unknown) are informative."""
-    return await _in_thread(_map_get, map, states, min_cocitation, min_coupling, max_pairs)
+    openalex, semantic_scholar, zotero_pdf, epo; null when unknown) are informative.
+
+    To shrink the answer of a large map: compact=True drops from every work the heavy fields
+    (notes, verified, zotero_tags, found_by, note, added, refs_source); fields=[...] keeps only the
+    listed fields plus id (and takes precedence over compact). Unknown field names are ignored and
+    named in 'warnings'. Links, snapshots and edge_intents are not affected; by default nothing
+    changes."""
+    return await _in_thread(_map_get, map, states, min_cocitation, min_coupling, max_pairs, compact, fields)
 
 
-def _map_get(maps, db, map, states, min_cocitation, min_coupling, max_pairs=500) -> dict:
+_COMPACT_DROP = ("notes", "verified", "zotero_tags", "found_by", "note", "added", "refs_source")
+# every field a work can carry, for telling a typo from a field this map's works happen not to have
+_WORK_FIELDS = ("id", "kind", "role", "state", "in_library", "library_match", "cited_in_map",
+                "cited_in_map_nonseed", "cited_by_seed_citers", "cocited_total", "abstract") + _COMPACT_DROP
+
+
+def _slim_works(works: list[dict], compact: bool, fields: list[str] | None) -> list[str]:
+    """Apply compact / fields to the public works in place; returns warnings for unknown fields."""
+    warnings = []
+    if fields is not None:
+        import maps as _maps
+        known = set(_WORK_FIELDS) | set(_maps.NODE_FIELDS) | {k for w in works for k in w}
+        unknown = [f for f in dict.fromkeys(fields) if f not in known]
+        if unknown:
+            warnings.append("unknown fields ignored: " + ", ".join(map(str, unknown)))
+        keep = {f for f in fields if f in known} | {"id"}
+        works[:] = [{k: v for k, v in w.items() if k in keep} for w in works]
+    elif compact:
+        works[:] = [{k: v for k, v in w.items() if k not in _COMPACT_DROP} for w in works]
+    return warnings
+
+
+def _map_get(maps, db, map, states, min_cocitation, min_coupling, max_pairs=500, compact=False, fields=None) -> dict:
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
-    nodes = maps.nodes(db, m["id"])
-    truncation: dict = {}
-    edges, cocit, coupling = _map_view(nodes, min_cocitation, min_coupling, max_pairs, truncation)
+    nodes, edges, cocit, coupling, truncation = _cached_view(maps, db, m, min_cocitation, min_coupling, max_pairs)
     keep = {k for k, n in nodes.items() if not states or n["state"] in states or n["role"] == "seed"}
     inside = lambda pair: pair[0] in keep and pair[1] in keep
     works = [_public_node(n) for k, n in nodes.items() if k in keep]
     _knowledge().annotate(works)
-    return {"status": "ok", "map": dict(m), "works": works, "snapshots": _knowledge().status(),
-            "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
-            "coupling": [p for p in coupling if inside(p)],
-            "cocitation_truncated": truncation["cocitation"], "coupling_truncated": truncation["coupling"],
-            "patent_edges": [e for e in _patent_edges(nodes) if inside(e)],
-            "edge_intents": {k: v for k, v in maps.intents(db, m["id"]).items() if inside(k.split("->"))}}
+    warnings = _slim_works(works, compact, fields)
+    out = {"status": "ok", "map": dict(m), "works": works, "snapshots": _knowledge().status(),
+           "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
+           "coupling": [p for p in coupling if inside(p)],
+           "cocitation_truncated": truncation["cocitation"], "coupling_truncated": truncation["coupling"],
+           "patent_edges": [e for e in _patent_edges(nodes) if inside(e)],
+           "edge_intents": {k: v for k, v in maps.intents(db, m["id"]).items() if inside(k.split("->"))}}
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 def _resolve_ids(nodes: dict, ids: list[str]) -> list[str]:
@@ -3976,7 +4092,8 @@ async def _merge_async(map_id: int) -> list[dict]:
 def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
     """Merge records of the same work (same normalised title and first author's surname, years
     at most 2 apart): the most cited record stays, takes the union of found_by and references,
-    the seed role and the most advanced reading state."""
+    the seed role and the most advanced reading state. The edge_intents of the removed records move
+    to the kept id (_remap_intents), in the same transaction."""
     # The write lock is taken before the nodes are read: a map_mark landing between reading and
     # writing would otherwise be overwritten by the state computed from the old rows.
     if not db.in_transaction:
@@ -4015,8 +4132,36 @@ def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
                     other["refs"] = list(dict.fromkeys(keep["id"] if r in gone else r for r in other["refs"]))
                     db.execute("UPDATE nodes SET refs = ? WHERE map_id = ? AND work_id = ?",
                                (json.dumps(other["refs"]), map_id, other["id"]))
+            _remap_intents(db, map_id, keep["id"], gone)
             merged.append({"kept": keep["id"], "removed": [g["id"] for g in drop], "title": (keep.get("title") or "")[:80]})
     return merged
+
+
+def _remap_intents(db, map_id: int, keep_id: str, gone: set[str]) -> None:
+    """Move the citation intents of removed duplicate records onto the kept id (key citing->cited
+    with the removed id replaced). When the new key already has a record the fuller one stays (more
+    contexts; influential and contrasting are OR-ed); an edge that would cite itself is dropped.
+    The old rows go. Runs in the caller's transaction and does nothing once the ids are gone."""
+    marks = ",".join("?" * len(gone))
+    rows = db.execute(f"SELECT * FROM edge_intents WHERE map_id = ? AND (citing IN ({marks}) OR cited IN ({marks}))",
+                      (map_id, *gone, *gone)).fetchall()
+    if not rows:
+        return
+    moved: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        citing, cited = (keep_id if r[c] in gone else r[c] for c in ("citing", "cited"))
+        db.execute("DELETE FROM edge_intents WHERE map_id = ? AND citing = ? AND cited = ?", (map_id, r["citing"], r["cited"]))
+        if citing != cited:
+            moved.setdefault((citing, cited), []).append(dict(r))
+    for (citing, cited), recs in moved.items():
+        old = db.execute("SELECT * FROM edge_intents WHERE map_id = ? AND citing = ? AND cited = ?",
+                         (map_id, citing, cited)).fetchone()
+        recs = ([dict(old)] if old else []) + recs
+        best = max(recs, key=lambda x: len(json.loads(x["contexts"])))  # first of equals: the stored one
+        db.execute("INSERT OR REPLACE INTO edge_intents (map_id, citing, cited, intents, influential, contexts, contrasting, fetched)"
+                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (map_id, citing, cited, best["intents"], int(any(x["influential"] for x in recs)),
+                    best["contexts"], int(any(x["contrasting"] for x in recs)), best["fetched"]))
 
 
 async def _map_watch(maps, db, m, per_seed: int) -> dict:

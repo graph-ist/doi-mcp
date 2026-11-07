@@ -374,7 +374,9 @@ def test_views_run_off_the_event_loop_thread(db, monkeypatch):
         main = threading.get_ident()
         await s.map_create("T", ["W1", "W2"])
         await s.map_expand("T")
-        await s.map_get("T"); await s.map_suggest("T"); await s.map_export("T"); await s.map_prune("T", keep=1)
+        for call in (s.map_get("T"), s.map_suggest("T"), s.map_export("T"), s.map_prune("T", keep=1)):
+            s._VIEW_CACHE.clear()  # the view cache would otherwise answer map_suggest without computing
+            await call
         assert len(seen["threads"]) == 4 and main not in seen["threads"]
     asyncio.run(scenario())
 
@@ -723,3 +725,269 @@ def test_add_patents_retries_a_403_once_after_a_pause(db, monkeypatch):
     out = run(s.map_add_patents("P", ["EP3500000"]))
     assert out["status"] == "ok" and calls == ["EP3500000"] * 2 and sleeps == [s.PATENT_RETRY_PAUSE_S]
     assert out["patents"]["P:EP3500000"]["result"] == "added"
+
+
+# --- map_get: compact / fields --------------------------------------------------------------------
+
+def _two_works(db):
+    run(s.map_create("F", ["W1", "W2"]))
+    run(s.map_expand("F"))
+    run(s.map_mark("F", ["W3"], "to_read", "look"))
+
+
+def test_map_get_default_has_all_fields_and_no_warnings(db):
+    _two_works(db)
+    out = run(s.map_get("F"))
+    w = next(x for x in out["works"] if x["id"] == "W3")
+    assert {"notes", "verified", "zotero_tags", "found_by", "note", "added", "refs_source"} <= set(w)
+    assert "warnings" not in out
+    assert run(s.map_get("F", compact=False, fields=None)) == out
+
+
+def test_map_get_compact_drops_heavy_fields(db):
+    _two_works(db)
+    full, out = run(s.map_get("F")), run(s.map_get("F", compact=True))
+    heavy = {"notes", "verified", "zotero_tags", "found_by", "note", "added", "refs_source"}
+    for w in out["works"]:
+        assert not heavy & set(w) and {"id", "title", "state", "cited_in_map"} <= set(w)
+    assert [w["id"] for w in out["works"]] == [w["id"] for w in full["works"]]
+    assert {k: v for k, v in out.items() if k != "works"} == {k: v for k, v in full.items() if k != "works"}
+
+
+def test_map_get_fields_keeps_listed_plus_id_and_wins_over_compact(db):
+    _two_works(db)
+    out = run(s.map_get("F", fields=["title", "note"], compact=True))
+    assert all(set(w) == {"id", "title", "note"} for w in out["works"])  # note kept although compact drops it
+    assert "warnings" not in out
+
+
+def test_map_get_fields_unknown_are_ignored_with_warning(db):
+    _two_works(db)
+    out = run(s.map_get("F", fields=["state", "nope", "nope", "titel"]))
+    assert all(set(w) == {"id", "state"} for w in out["works"])
+    assert out["warnings"] == ["unknown fields ignored: nope, titel"]
+
+
+# --- duplicates: the intents of removed records move to the kept id -------------------------------
+
+def _intent(citing, cited, contexts=(), infl=False, contr=False, intents=("background",)):
+    return {"citing": citing, "cited": cited, "intents": list(intents), "influential": infl,
+            "contexts": list(contexts), "contrasting": contr}
+
+
+def test_merge_remaps_intents_of_removed_duplicates(db):
+    d = maps.connect()
+    try:
+        mid = maps.create(d, "R")
+        title = dict(title="Same long title about design research", first_author="Ann Smith")
+        recs = []
+        for i, c in (("W30", 10), ("W31", 5), ("W32", 1)):
+            n = node(i, []); n.update(title, cited=c); recs.append(n)
+        for i in ("W40", "W41"):
+            n = node(i, []); n.update(title=f"Other {i}", first_author="Bo Lee"); recs.append(n)
+        with d:
+            for n in recs:
+                maps.upsert(d, mid, n, "candidate", "x")
+        maps.save_intents(d, mid, [
+            _intent("W40", "W30", ["one"]),                       # exists on the kept id, fewer contexts
+            _intent("W40", "W31", ["a", "b"], infl=True),         # fuller: wins, flags OR-ed
+            _intent("W40", "W32", ["c"], contr=True),
+            _intent("W31", "W41", ["out"]),                       # citing side moves
+            _intent("W32", "W30", ["self"]),                      # would cite itself: dropped
+            _intent("W41", "W40", ["untouched"]),
+        ])
+        out = s._merge_duplicates(maps, d, mid)
+        assert out[0]["kept"] == "W30" and set(out[0]["removed"]) == {"W31", "W32"}
+        got = maps.intents(d, mid)
+        assert set(got) == {"W40->W30", "W30->W41", "W41->W40"}
+        e = got["W40->W30"]
+        assert e["contexts"] == ["a", "b"] and e["influential"] and e["contrasting"]
+        assert got["W30->W41"]["contexts"] == ["out"] and got["W41->W40"]["contexts"] == ["untouched"]
+        # idempotent
+        assert s._merge_duplicates(maps, d, mid) == [] and maps.intents(d, mid) == got
+    finally:
+        d.close()
+
+
+# --- cache of the map view ------------------------------------------------------------------------
+
+@pytest.fixture
+def view_counter(monkeypatch):
+    s._VIEW_CACHE.clear()
+    calls = {"n": 0}
+    real = s._map_view
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(s, "_map_view", counting)
+    yield calls
+    s._VIEW_CACHE.clear()
+
+
+def _states(name="V"):
+    return {w["id"]: w["state"] for w in run(s.map_get(name))["works"]}
+
+
+def test_view_cache_two_equal_gets_compute_once(db, view_counter):
+    _two_works(db)  # map "F"
+    view_counter["n"] = 0
+    a = run(s.map_get("F"))
+    b = run(s.map_get("F"))
+    assert a == b and view_counter["n"] == 1
+    run(s.map_get("F", min_cocitation=3))           # other parameters: another entry
+    assert view_counter["n"] == 2
+    run(s.map_suggest("F")); run(s.map_suggest("F"))
+    assert view_counter["n"] == 2                    # suggest shares the entry of map_get's default parameters
+    run(s.map_get("F", compact=True, fields=["title"]))  # only the output differs: same view
+    assert view_counter["n"] == 2
+
+
+def test_view_cache_never_serves_old_data_even_within_one_second(db, view_counter, monkeypatch):
+    monkeypatch.setattr(maps, "now", lambda: "2026-01-01T00:00:00Z")  # `updated` can no longer tell writes apart
+    run(s.map_create("V", ["W1", "W2"]))
+    run(s.map_expand("V"))
+    before = _states()
+    assert before["W3"] == "new" and _states() == before
+    run(s.map_mark("V", ["W3"], "read"))
+    assert _states()["W3"] == "read"
+    # the cached answer is not changed by what a caller did to it
+    out = run(s.map_get("V")); out["works"][0]["state"] = "tampered"; out["works"].clear()
+    assert _states()["W3"] == "read"
+    run(s.map_remove("V", ["W3"]))
+    assert "W3" not in _states()
+    # map_expand again (simulated source): the removed work comes back as new
+    run(s.map_expand("V"))
+    assert _states().get("W3") == "new"
+    run(s.map_rename("V", description="x"))
+    assert run(s.map_get("V"))["map"]["description"] == "x"
+    run(s.map_add_seeds("V", ["W4"]))
+    assert _states()["W4"] == "new" and {w["id"]: w["role"] for w in run(s.map_get("V"))["works"]}["W4"] == "seed"
+
+
+def test_view_cache_intents_prune_merge_delete_and_suggest(db, view_counter, monkeypatch):
+    monkeypatch.setattr(maps, "now", lambda: "2026-01-01T00:00:00Z")
+    run(s.map_create("V", ["W1", "W2"]))
+    run(s.map_expand("V"))
+    assert run(s.map_get("V"))["edge_intents"] == {}
+    assert "W3" in {x["id"] for x in run(s.map_suggest("V"))["suggestions"]}
+    d = maps.connect()
+    maps.save_intents(d, maps.map_row(d, "V")["id"], [_intent("W1", "W3", ["c"])])
+    assert list(run(s.map_get("V"))["edge_intents"]) == ["W1->W3"]
+    maps.mark(d, maps.map_row(d, "V")["id"], ["W3"], "dismissed", None)  # a write made outside any tool
+    d.close()
+    assert "W3" not in {x["id"] for x in run(s.map_suggest("V"))["suggestions"]}
+    run(s.map_prune("V", keep=0))
+    assert set(_states()) == {"W1", "W2", "W3"}      # seeds and the dismissed work stay, the rest is pruned
+    assert list(run(s.map_get("V"))["edge_intents"]) == ["W1->W3"]
+    run(s.map_remove("V", ["W3"]))
+    assert run(s.map_get("V"))["edge_intents"] == {}
+    run(s.map_delete("V", "V"))
+    assert run(s.map_get("V"))["status"] == "not_found"
+    run(s.map_create("V", ["W1"]))                   # same name, same id: nothing of the old map is served
+    assert set(_states()) == {"W1"}
+
+
+def test_view_cache_merge_is_visible_at_once(db, view_counter, monkeypatch):
+    monkeypatch.setattr(maps, "now", lambda: "2026-01-01T00:00:00Z")
+    d = maps.connect()
+    mid = maps.create(d, "M")
+    title = dict(title="Same long title about design research", first_author="Ann Smith")
+    for i, c in (("W50", 9), ("W51", 1)):
+        n = node(i, []); n.update(title, cited=c)
+        with d:
+            maps.upsert(d, mid, n, "candidate", "x")
+    assert {w["id"] for w in run(s.map_get("M"))["works"]} == {"W50", "W51"}
+    s._merge_duplicates(maps, d, mid)
+    d.close()
+    assert {w["id"] for w in run(s.map_get("M"))["works"]} == {"W50"}
+
+
+def test_view_cache_holds_at_most_eight_entries(db, view_counter):
+    run(s.map_create("V", ["W1"]))
+    for i in range(12):
+        run(s.map_get("V", max_pairs=100 + i))
+    assert len(s._VIEW_CACHE) == s.VIEW_CACHE_SIZE == 8
+
+
+def test_job_progress_writes_do_not_flush_the_cache(db):
+    before = maps.WRITES
+    j = s._Job("map_expand", "x", False)
+    j.persist(); j.progress(); j.finish(result={"status": "ok"})
+    assert maps.WRITES == before
+
+
+# --- request priority: quick calls pass ahead of queued jobs ---------------------------------------
+
+def _priority_env(monkeypatch):
+    import httpx
+    from types import SimpleNamespace
+    clock, sent, real_sleep = [100.0], [], asyncio.sleep
+
+    async def fake_sleep(delay):
+        clock[0] += delay
+        await real_sleep(0)
+
+    async def fake_request(transport, request):
+        sent.append((clock[0], request.url.params["q"]))
+        for _ in range(8):
+            await real_sleep(0)  # the request takes a while: others queue meanwhile
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(s, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(s.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(s, "OA_KEY", "")
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", fake_request)
+    return clock, sent, real_sleep
+
+
+def test_quick_calls_pass_ahead_of_queued_job_requests(monkeypatch):
+    import httpx
+    clock, sent, real_sleep = _priority_env(monkeypatch)
+
+    async def call(client, name, priority):
+        s._priority.set(priority)  # each task has its own copy of the context
+        await client.get("https://api.openalex.org/works", params={"q": name})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=s._PoliteTransport()) as client:
+            jobs = [asyncio.create_task(call(client, f"job{i}", s.PRIORITY_LOW)) for i in range(4)]
+            await real_sleep(0); await real_sleep(0)      # job0 holds the slot, job1..3 wait
+            quick = [asyncio.create_task(call(client, f"quick{i}", s.PRIORITY_HIGH)) for i in range(2)]
+            await asyncio.gather(*jobs, *quick)
+    asyncio.run(scenario())
+    order = [q for _, q in sent]
+    assert order == ["job0", "quick0", "quick1", "job1", "job2", "job3"]
+    # the interval and the concurrency of 1 are unchanged: one request per second
+    assert all(b[0] - a[0] >= 1.0 for a, b in zip(sent, sent[1:]))
+
+
+def test_equal_priority_keeps_arrival_order_and_cancelled_waiters_are_skipped(monkeypatch):
+    import httpx
+    clock, sent, real_sleep = _priority_env(monkeypatch)
+
+    async def call(client, name):
+        await client.get("https://api.openalex.org/works", params={"q": name})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=s._PoliteTransport()) as client:
+            tasks = [asyncio.create_task(call(client, f"r{i}")) for i in range(4)]
+            await real_sleep(0); await real_sleep(0)
+            tasks[1].cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await call(client, "after")                     # the slot was not lost
+    asyncio.run(scenario())
+    assert [q for _, q in sent] == ["r0", "r2", "r3", "after"]
+
+
+def test_jobs_run_at_low_priority_and_other_tools_at_high(db):
+    seen = {}
+
+    async def in_job():
+        async def f():
+            seen["job"] = s._priority.get()
+        seen["before"] = s._priority.get()
+        await asyncio.create_task(s._run_job(s._Job("x", None, False), f, (), {}))
+        seen["after"] = s._priority.get()
+    asyncio.run(in_job())
+    assert seen["before"] == s.PRIORITY_HIGH and seen["job"] == s.PRIORITY_LOW and seen["after"] == s.PRIORITY_HIGH
