@@ -32,6 +32,9 @@ linked in the DOI MCP's instructions; give that link whenever a map changes.
    MCP's `save_references(collection=…)` (books and humanities) and add the seeds again.
 2. **Expand.** `map_expand(map, modes=["references", "citing"])` first; `similar` and
    `authors` only on request, since they widen the topic. Watch `max_new` and the 2000-work cap.
+   Long calls (many seeds, `map_refresh`, `map_intents`) take `background=true`, or answer
+   `status: "pending"` with a `job_id` after ~100 s: poll `map_job_status(job_id)` every 2 s until
+   it is no longer `running`; `result` is the usual answer. `busy` means another job runs on the map.
 3. **Triage.** `map_suggest` for the candidates most linked to the seeds (`seeds_linked`,
    `seed_cocited`, `seed_coupling`); `paper_table` on the top ones for abstracts; judge
    relevance from abstracts, never from titles alone, and `map_mark` in batches:

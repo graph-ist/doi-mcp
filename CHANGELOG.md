@@ -4,6 +4,13 @@ Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: do
 
 ## Non pubblicata
 
+- Lavori in background: `map_create`, `map_add_seeds`, `map_expand`, `map_intents`, `map_add_patents` e `map_refresh` accettano `background` e, oltre i 100 secondi, rispondono `pending` con un `job_id`; nuovo strumento `map_job_status` (stato, avanzamento, risultato). Tabella `jobs` in `maps.sqlite` (migrazione al primo avvio; i lavori `running` diventano `interrupted` al riavvio); un lavoro per mappa alla volta (`busy`).
+- `map_create` risponde `partial` se nessun seed si può aggiungere e porta gli errori in `warnings`. `map_refresh` non fa avanzare la data del controllo se un seed va in errore o una pagina è piena (`truncated`, `watch_not_advanced`); con `no_seeds` ha anche `coverage_gaps` e `new`.
+- SQLite: WAL, attesa di 15 secondi sui blocchi, migrazioni una volta per processo, connessione chiusa a fine richiesta; un database bloccato dà `status: "busy"`. `map_get`, `map_suggest`, `map_export`, `map_prune` e la fusione dei doppioni girano in thread; la fusione legge dentro la transazione.
+- `map_get`: per ogni lavoro `cited_in_map`, `cited_in_map_nonseed`, `cited_by_seed_citers`; parametro `max_pairs` e flag `cocitation_truncated` / `coupling_truncated`.
+- `map_intents`: `works_skipped` e `truncated`, salvataggio ogni 5 lavori. Gli intenti si cancellano con `map_remove`, `map_prune`, `map_delete`.
+- `map_expand`: `works_in_map` conta tutti i record fusi. OpenCitations: tre richieste alla volta, nuovi tentativi sui 429, seed senza conteggio in `source_errors`. Con `OPENALEX_API_KEY` l'intervallo minimo verso OpenAlex scende a 0,2 secondi.
+- `map_add_patents`: `status: "error"` se nessun brevetto riesce, un nuovo tentativo sul 403 di EPO. `map_suggest` accetta `limit=None`.
 - `MCP_ALLOW_QUERY_TOKEN=true`: il token è accettato anche come `?token=` nell'URL, per il modulo dei connettori di Claude web che ha solo nome e URL. Spento per default.
 - Pagina *Literature maps*: pulsante *Add patents* (`map_add_patents`, da 1 a 20 numeri, anche come seed).
 - Pagina *Literature maps*: il filtro degli anni si applica mentre si scrive (da quattro cifre), legge un intervallo invertito e, con sottocampo e off-topic, filtra anche la lista dei suggerimenti.
