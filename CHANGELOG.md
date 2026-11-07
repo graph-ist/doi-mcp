@@ -4,7 +4,18 @@ Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: do
 
 ## Non pubblicata
 
+- Lavori in background: `map_create`, `map_add_seeds`, `map_expand`, `map_intents`, `map_add_patents` e `map_refresh` accettano `background` e, oltre i 100 secondi, rispondono `pending` con un `job_id`; nuovo strumento `map_job_status` (stato, avanzamento, risultato). Tabella `jobs` in `maps.sqlite` (migrazione al primo avvio; i lavori `running` diventano `interrupted` al riavvio); un lavoro per mappa alla volta (`busy`).
+- `map_create` risponde `partial` se nessun seed si può aggiungere e porta gli errori in `warnings`. `map_refresh` non fa avanzare la data del controllo se un seed va in errore o una pagina è piena (`truncated`, `watch_not_advanced`); con `no_seeds` ha anche `coverage_gaps` e `new`.
+- SQLite: WAL, attesa di 15 secondi sui blocchi, migrazioni una volta per processo, connessione chiusa a fine richiesta; un database bloccato dà `status: "busy"`. `map_get`, `map_suggest`, `map_export`, `map_prune` e la fusione dei doppioni girano in thread; la fusione legge dentro la transazione.
+- `map_get`: per ogni lavoro `cited_in_map`, `cited_in_map_nonseed`, `cited_by_seed_citers`; parametro `max_pairs` e flag `cocitation_truncated` / `coupling_truncated`.
+- `map_intents`: `works_skipped` e `truncated`, salvataggio ogni 5 lavori. Gli intenti si cancellano con `map_remove`, `map_prune`, `map_delete`.
+- `map_expand`: `works_in_map` conta tutti i record fusi. OpenCitations: tre richieste alla volta, nuovi tentativi sui 429, seed senza conteggio in `source_errors`. Con `OPENALEX_API_KEY` l'intervallo minimo verso OpenAlex scende a 0,2 secondi.
+- `map_add_patents`: `status: "error"` se nessun brevetto riesce, un nuovo tentativo sul 403 di EPO. `map_suggest` accetta `limit=None`.
 - `MCP_ALLOW_QUERY_TOKEN=true`: il token è accettato anche come `?token=` nell'URL, per il modulo dei connettori di Claude web che ha solo nome e URL. Spento per default.
+- `map_get`: parametri facoltativi `compact` (toglie dai lavori `notes`, `verified`, `zotero_tags`, `found_by`, `note`, `added`, `refs_source`) e `fields` (tiene solo i campi elencati più `id`, ha la precedenza su `compact`; i nomi sconosciuti sono ignorati e segnalati in `warnings`). Senza i parametri la risposta non cambia.
+- Fusione dei doppioni: gli `edge_intents` dei record eliminati passano all'id mantenuto (chiave `citante->citato` riscritta; se la nuova chiave esiste resta il record con più contesti, `influential` e `contrasting` in OR; gli archi che diventerebbero autocitazioni sono tolti). Idempotente, nella stessa transazione.
+- Cache in memoria (8 voci per processo) della vista di `map_get` e `map_suggest`, con chiave su `updated`, numero e ultimo rowid di nodi e intenti e un contatore di scritture (`maps.WRITES`) aumentato a ogni commit: `updated` ha la risoluzione di un secondo, da sola non basterebbe. Le connessioni che scrivono solo la tabella `jobs` non lo aumentano.
+- Limitatore di richieste: priorità per host. Le richieste dei lavori lunghi (contextvar `_priority`, impostato da `_run_job`) passano dopo quelle dei tool rapidi in coda sullo stesso host; stesso intervallo minimo e stessa concorrenza, nessuna interruzione di richieste già partite.
 - Pagina *Literature maps*: pulsante *Add patents* (`map_add_patents`, da 1 a 20 numeri, anche come seed).
 - Pagina *Literature maps*: il filtro degli anni si applica mentre si scrive (da quattro cifre), legge un intervallo invertito e, con sottocampo e off-topic, filtra anche la lista dei suggerimenti.
 - Pagina *Literature maps*: il filtro degli anni vale anche per i seed (prima restavano sempre visibili); i lavori con 0 citazioni non sono più tagliati dal bordo del grafico.

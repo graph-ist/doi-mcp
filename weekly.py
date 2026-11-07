@@ -36,7 +36,8 @@ def today() -> str:
 async def refresh_maps(server) -> dict:
     out = {}
     for m in (await server.map_list()).get("maps", []):
-        r = await server.map_refresh(m["name"], new_citing=True)
+        # no client waits here: the plain tool, without the 100 s answer-or-job layer
+        r = await getattr(server.map_refresh, "raw", server.map_refresh)(m["name"], new_citing=True)
         out[m["name"]] = {k: r.get(k) for k in ("status", "new_citing", "added", "updated", "retracted", "coverage_gaps") if k in r}
     return out
 

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 
 DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "maps.sqlite")
@@ -37,6 +38,10 @@ CREATE TABLE IF NOT EXISTS edge_intents (
   map_id INTEGER NOT NULL, citing TEXT NOT NULL, cited TEXT NOT NULL, intents TEXT NOT NULL,
   influential INTEGER NOT NULL DEFAULT 0, contexts TEXT NOT NULL, contrasting INTEGER NOT NULL DEFAULT 0,
   fetched TEXT NOT NULL, PRIMARY KEY (map_id, citing, cited));
+-- background jobs of the long map tools (map_job_status); result is the tool's own JSON payload
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY, tool TEXT, map_id INTEGER, status TEXT, progress_done INTEGER, progress_total INTEGER,
+  step TEXT, result TEXT, error TEXT, created TEXT, updated TEXT, finished TEXT);
 -- works cited in PDFs that OpenAlex does not have: id 'B:...', shown as book nodes
 CREATE TABLE IF NOT EXISTS ref_stubs (
   id TEXT PRIMARY KEY, title TEXT, first_author TEXT, year INTEGER);
@@ -47,20 +52,82 @@ def now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def connect(path: str | None = None) -> sqlite3.Connection:
-    path = path or DB_PATH
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys = ON")
+_READY: set[str] = set()  # database files already migrated by this process
+_READY_LOCK = threading.Lock()
+BUSY_TIMEOUT_MS = 15000
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    """Journal mode, schema and columns added after the first release: idempotent, once per process
+    and database file (see connect)."""
+    db.execute("PRAGMA journal_mode = WAL")
     db.executescript(SCHEMA)
-    # columns added after the first release
     for table, column, kind in (("nodes", "is_retracted", "INTEGER"), ("nodes", "refs_source", "TEXT"),
                                 ("maps", "watched", "TEXT"), ("nodes", "subfield", "TEXT"), ("nodes", "topic", "TEXT"),
                                 ("nodes", "momentum", "INTEGER"), ("nodes", "zotero_key", "TEXT"),
                                 ("nodes", "cited_by_oc", "INTEGER")):
         if column not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
-            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            except sqlite3.OperationalError as e:  # another process added it meanwhile
+                if "duplicate column" not in str(e):
+                    raise
+    with db:
+        # intents of deleted maps (maps.id is reused after deleting the newest map)
+        db.execute("DELETE FROM edge_intents WHERE map_id NOT IN (SELECT id FROM maps)")
+        # a job cannot be running in a process that has just started: its process died
+        db.execute("UPDATE jobs SET status = 'interrupted', finished = ?, updated = ?,"
+                   " error = COALESCE(error, 'server restarted while the job was running') WHERE status = 'running'",
+                   (now(), now()))
+
+
+WRITES = 0  # bumped after every commit that changed something on a tracked connection (see server._view_cache)
+_WRITES_LOCK = threading.Lock()
+
+
+class _TrackedConnection(sqlite3.Connection):
+    """A connection that counts its committed writes in the module-level WRITES. `updated` has a
+    one-second resolution, so it alone cannot tell two writes in the same second apart: cached views
+    of a map are keyed on this counter as well. Any write, whichever function makes it, is counted
+    (a write that rolls back is not)."""
+    _seen = 0
+
+    def _count(self) -> None:
+        global WRITES
+        if self.total_changes != self._seen:
+            self._seen = self.total_changes
+            with _WRITES_LOCK:
+                WRITES += 1
+
+    def commit(self) -> None:
+        super().commit()
+        self._count()
+
+    def __exit__(self, exc_type, exc, tb):
+        out = super().__exit__(exc_type, exc, tb)
+        if exc_type is None:
+            self._count()
+        return out
+
+
+def connect(path: str | None = None, track: bool = True) -> sqlite3.Connection:
+    """A new connection (one per request; the caller closes it). Waits up to 15 s for a lock.
+    track=False for connections that only write the jobs table (their writes do not touch maps).
+    WAL and the migrations are applied the first time a process opens a database file."""
+    path = os.path.abspath(path or DB_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    db = sqlite3.connect(path, timeout=BUSY_TIMEOUT_MS / 1000, factory=_TrackedConnection if track else sqlite3.Connection)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        db.execute("PRAGMA foreign_keys = ON")
+        if path not in _READY or not os.path.exists(path):
+            with _READY_LOCK:
+                _migrate(db)
+                _READY.add(path)
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -142,6 +209,9 @@ def remove(db: sqlite3.Connection, map_id: int, work_ids: list[str]) -> int:
     with db:
         n = sum(db.execute("DELETE FROM nodes WHERE map_id = ? AND work_id = ?", (map_id, w)).rowcount
                 for w in work_ids)
+        # the citation intents of a removed work go with it
+        db.executemany("DELETE FROM edge_intents WHERE map_id = ? AND (citing = ? OR cited = ?)",
+                       [(map_id, w, w) for w in work_ids])
         touch(db, map_id)
     return n
 
@@ -173,6 +243,8 @@ def delete(db: sqlite3.Connection, map_id: int) -> int:
     with db:
         works = db.execute("SELECT COUNT(*) FROM nodes WHERE map_id = ?", (map_id,)).fetchone()[0]
         db.execute("DELETE FROM nodes WHERE map_id = ?", (map_id,))
+        db.execute("DELETE FROM edge_intents WHERE map_id = ?", (map_id,))
+        db.execute("DELETE FROM jobs WHERE map_id = ?", (map_id,))
         db.execute("DELETE FROM maps WHERE id = ?", (map_id,))
     return works
 
@@ -224,3 +296,14 @@ def intents(db: sqlite3.Connection, map_id: int) -> dict[str, dict]:
                                                "contexts": json.loads(r["contexts"]), "contrasting": bool(r["contrasting"]),
                                                "fetched": r["fetched"]}
     return out
+
+
+def job(db: sqlite3.Connection, job_id: str) -> dict | None:
+    """A background job as map_job_status reports it, or None."""
+    r = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if r is None:
+        return None
+    return {"status": r["status"], "tool": r["tool"],
+            "progress": {"done": r["progress_done"] or 0, "total": r["progress_total"] or 0, "step": r["step"] or ""},
+            "result": json.loads(r["result"]) if r["result"] else None, "error": r["error"],
+            "created": r["created"], "updated": r["updated"], "finished": r["finished"]}

@@ -17,15 +17,23 @@ Env (optional):
 """
 
 import asyncio
+import collections
+import contextvars
 import functools
+import heapq
 import hmac
 import html
+import inspect
+import itertools
 import json
 import sys
 import os
 import re
+import sqlite3
+import threading
 import time
 import unicodedata
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -50,7 +58,7 @@ from pydantic import Field
 
 VERSION = "0.8.2"
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
-MAPS_PAGE = "https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT"
+MAPS_PAGE = "https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s"
 INSTRUCTIONS = (
     "Citation verification: find_doi then verify_doi (verify_book for editions); format_apa "
     "or format_reference only after verification; check_citations cross-checks in-text "
@@ -76,6 +84,18 @@ GATEWAY_ENABLED = os.environ.get("ENABLE_GATEWAY", "").strip().lower() == "true"
 GATEWAY_TOOLS: list[str] = []
 
 
+_OPEN_DBS: contextvars.ContextVar[list | None] = contextvars.ContextVar("open_dbs", default=None)
+
+
+def _close_dbs(token) -> None:
+    for db in _OPEN_DBS.get() or []:
+        try:
+            db.close()
+        except Exception:
+            pass
+    _OPEN_DBS.reset(token)
+
+
 def _tool(fn=None, *, gateway: bool = False, **kw):
     """Register an MCP tool. Every tool answers with a dict carrying 'status': a ValueError
     raised by input validation becomes {'status': 'invalid_input', 'detail': ...} instead of
@@ -83,16 +103,193 @@ def _tool(fn=None, *, gateway: bool = False, **kw):
     def deco(f):
         @functools.wraps(f)
         async def wrapped(*args, **kwargs):
+            opened = _OPEN_DBS.set([])  # SQLite connections of this request (see _map_db), closed at the end
             try:
                 return await f(*args, **kwargs)
             except ValueError as e:
                 return {"status": "invalid_input", "detail": str(e)}
+            except sqlite3.OperationalError as e:
+                return {"status": "busy", "detail": f"database busy or unavailable, try again shortly: {e}"}
+            finally:
+                _close_dbs(opened)
         if gateway:
             GATEWAY_TOOLS.append(f.__name__)
         if not gateway or GATEWAY_ENABLED:
             mcp.tool(**kw)(wrapped)
         return f
     return deco(fn) if fn is not None else deco
+
+# --- background jobs for the long map tools --------------------------------------------------------
+# map_create, map_add_seeds, map_expand, map_intents, map_add_patents and map_refresh can take minutes
+# (one OpenAlex/Semantic Scholar request per second), longer than a client waits. _job_tool runs them
+# as asyncio tasks: with background=True the answer is immediate ({'status': 'accepted', 'job_id'});
+# otherwise the call waits JOB_WAIT_S and, if the work is still going, answers {'status': 'pending',
+# 'job_id'} while the work goes on. map_job_status(job_id) polls progress and returns the original
+# payload as 'result'. Jobs are stored in maps.sqlite (table jobs); a restart marks running jobs as
+# interrupted. One job at a time per map: a second one answers {'status': 'busy', 'job_id'}.
+
+JOB_WAIT_S = 100.0
+JOB_POLL_AFTER_S = 2
+JOB_KEEP_DAYS = 7
+_JOB_TASKS: set = set()                 # strong references: a bare task can be garbage collected
+_JOBS: dict[str, "_Job"] = {}            # jobs of this process that are still running
+_MAP_JOBS: dict[str, str] = {}           # map name (lower case) -> id of its running job
+_CURRENT_JOB: contextvars.ContextVar = contextvars.ContextVar("current_job", default=None)
+
+
+class _Job:
+    def __init__(self, tool: str, map_key: str | None, background: bool):
+        import maps
+        self.id = uuid.uuid4().hex
+        self.tool, self.map_key, self.background = tool, map_key, background
+        self.done, self.total, self.step = 0, 0, ""
+        self.db_path = os.path.abspath(maps.DB_PATH)
+        self.persisted = False
+        self.created = maps.now()
+
+    def _db(self):
+        import maps
+        return maps.connect(self.db_path, track=False)  # writes the jobs table only
+
+    def _map_id(self, db) -> int | None:
+        if not self.map_key:
+            return None
+        row = db.execute("SELECT id FROM maps WHERE name = ?", (self.map_key,)).fetchone()
+        return row[0] if row else None
+
+    def persist(self) -> None:
+        """Write the job row (once), so map_job_status can see it."""
+        if self.persisted:
+            return
+        import maps
+        db = self._db()
+        try:
+            with db:
+                db.execute("DELETE FROM jobs WHERE finished IS NOT NULL AND finished < ?",
+                           (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - JOB_KEEP_DAYS * 86400)),))
+                db.execute("INSERT INTO jobs (id, tool, map_id, status, progress_done, progress_total, step, created, updated)"
+                           " VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)",
+                           (self.id, self.tool, self._map_id(db), self.done, self.total, self.step, self.created, maps.now()))
+        finally:
+            db.close()
+        self.persisted = True
+
+    def progress(self) -> None:
+        if not self.persisted:
+            return
+        import maps
+        try:
+            db = self._db()
+            try:
+                with db:
+                    db.execute("UPDATE jobs SET progress_done = ?, progress_total = ?, step = ?, updated = ? WHERE id = ?",
+                               (self.done, self.total, self.step, maps.now(), self.id))
+            finally:
+                db.close()
+        except sqlite3.Error:
+            pass  # progress is informative: never fail the work for it
+
+    def finish(self, result: dict | None = None, error: str | None = None) -> None:
+        _JOBS.pop(self.id, None)
+        if self.map_key and _MAP_JOBS.get(self.map_key) == self.id:
+            del _MAP_JOBS[self.map_key]
+        if not self.persisted:
+            return
+        import maps
+        try:
+            db = self._db()
+            try:
+                with db:
+                    db.execute("UPDATE jobs SET status = ?, progress_done = ?, progress_total = ?, step = ?, result = ?,"
+                               " error = ?, map_id = COALESCE(?, map_id), updated = ?, finished = ? WHERE id = ?",
+                               ("error" if error else "ok", self.done if error else max(self.done, self.total),
+                                self.total, self.step, None if result is None else json.dumps(result, default=str),
+                                error, self._map_id(db), maps.now(), maps.now(), self.id))
+            finally:
+                db.close()
+        except sqlite3.Error as e:
+            print(f"job {self.id}: could not store the result: {e}", file=sys.stderr)
+
+
+def _progress(done: int | None = None, total: int | None = None, step: str | None = None,
+              inc: int = 0, add_total: int = 0) -> None:
+    """Report progress of the running job (a no-op outside a job). done/total replace, inc/add_total add."""
+    job = _CURRENT_JOB.get()
+    if job is None:
+        return
+    if done is not None:
+        job.done = done
+    if total is not None:
+        job.total = total
+    job.done += inc
+    job.total += add_total
+    if step is not None:
+        job.step = step
+    job.progress()
+
+
+async def _run_job(job: _Job, f, args, kwargs):
+    opened = _OPEN_DBS.set([])
+    _CURRENT_JOB.set(job)
+    _priority.set(PRIORITY_LOW)  # this task's requests queue behind those of quick tools
+    try:
+        try:
+            result = await f(*args, **kwargs)
+        except ValueError as e:
+            job.finish(result={"status": "invalid_input", "detail": str(e)})
+            raise
+        except BaseException as e:
+            job.finish(error=f"{type(e).__name__}: {e}")
+            raise
+        job.finish(result=result)
+        return result
+    finally:
+        _close_dbs(opened)
+
+
+def _job_tool(fn=None, *, patent: bool = False, **kw):
+    """Like _tool, for the long map tools: adds the optional parameter background (see above). The
+    returned coroutine has the job layer; its .raw is the plain tool, for tools that call tools."""
+    def deco(f):
+        sig = inspect.signature(f)
+        names = ("map", "name")
+
+        @functools.wraps(f)
+        async def jobbed(*args, background: bool = False, **kwargs):
+            bound = sig.bind_partial(*args, **kwargs)
+            key = next((str(bound.arguments[n]).strip().lower() for n in names if bound.arguments.get(n)), None)
+            if key and key in _MAP_JOBS:
+                return {"status": "busy", "job_id": _MAP_JOBS[key],
+                        "detail": "another long operation is running on this map: poll it with map_job_status"}
+            job = _Job(f.__name__, key, bool(background))
+            _JOBS[job.id] = job
+            if key:
+                _MAP_JOBS[key] = job.id
+            task = asyncio.create_task(_run_job(job, f, args, kwargs))
+            _JOB_TASKS.add(task)
+            task.add_done_callback(lambda t: (_JOB_TASKS.discard(t), t.cancelled() or t.exception()))
+            if background:
+                job.persist()
+                return {"status": "accepted", "job_id": job.id, "poll_after_s": JOB_POLL_AFTER_S}
+            try:
+                return await asyncio.wait_for(asyncio.shield(task), JOB_WAIT_S)
+            except asyncio.TimeoutError:
+                if task.done():
+                    return task.result()
+                job.persist()
+                return {"status": "pending", "job_id": job.id, "poll_after_s": JOB_POLL_AFTER_S}
+
+        params = list(sig.parameters.values())
+        params.append(inspect.Parameter("background", inspect.Parameter.POSITIONAL_OR_KEYWORD, default=False,
+                                        annotation=Annotated[bool, Field(description=(
+                                            "True: answer at once with a job_id and run the work in the background; "
+                                            "poll map_job_status. False: wait up to ~100 s, then get a job_id if still running"))]))
+        jobbed.__signature__ = sig.replace(parameters=params)
+        jobbed.raw = f
+        register = _tool if (not patent or EPO_CONFIGURED) else (lambda **k: (lambda g: g))
+        return register(**kw)(jobbed)
+    return deco(fn) if fn is not None else deco
+
 
 EMAIL = os.environ.get("CONTACT_EMAIL", "")
 OA_KEY = os.environ.get("OPENALEX_API_KEY", "")
@@ -161,8 +358,47 @@ def _err(name: str, e: BaseException) -> str:
     return f"{name}: {type(e).__name__}" + (f": {detail}" if detail else "")
 
 
+# Who is waiting for a request slot: 0 = a quick call (paper_table and the other tools that answer at
+# once), 1 = a long background job (map_create, map_expand, ...: set by _run_job). When a slot frees up,
+# the waiting request with the lowest number goes first, in arrival order among equals. It never
+# interrupts a request already running and does not change the intervals or the concurrency.
+PRIORITY_HIGH, PRIORITY_LOW = 0, 1
+_priority: contextvars.ContextVar = contextvars.ContextVar("request_priority", default=PRIORITY_HIGH)
+
+
+class _PrioritySemaphore:
+    """asyncio.Semaphore whose waiters are served by (priority, arrival) instead of arrival only."""
+
+    def __init__(self, value: int):
+        self._value = value
+        self._waiters: list = []  # heap of (priority, seq, future)
+        self._seq = itertools.count()
+
+    async def acquire(self, priority: int = PRIORITY_HIGH) -> None:
+        if self._value > 0:  # a free slot means nobody is waiting: the slot is handed over, never left free
+            self._value -= 1
+            return
+        fut = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (priority, next(self._seq), fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self.release()  # the slot had already been handed to this waiter
+            raise
+
+    def release(self) -> None:
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():  # skips waiters that were cancelled
+                fut.set_result(None)
+                return
+        self._value += 1
+
+
 class _PoliteTransport(httpx.AsyncHTTPTransport):
-    """Caps concurrency per host; intervals cover all endpoints, including retries."""
+    """Caps concurrency per host; intervals cover all endpoints, including retries. Quick calls pass
+    ahead of background jobs that are queued for the same host (see _priority)."""
     # Crossref: polite pool allows a few concurrent requests; beyond that it answers 429
     CONCURRENCY = {"api.semanticscholar.org": 1, "export.arxiv.org": 1,
                    "api.openalex.org": 1, "user.openalex.org": 1, "api.crossref.org": 2, "archive.org": 2,
@@ -171,20 +407,29 @@ class _PoliteTransport(httpx.AsyncHTTPTransport):
                     "api.openalex.org": 1.0, "user.openalex.org": 1.0, "api.crossref.org": 0.12,
                     "ops.epo.org": 1.0}
 
+    OPENALEX_KEYED_INTERVAL = 0.2  # with an OpenAlex API key the rate limit is far higher than 1 request/s
+
+    def interval(self, host: str) -> float:
+        base = self.MIN_INTERVAL.get(host, 0.0)
+        return min(base, self.OPENALEX_KEYED_INTERVAL) if (OA_KEY and host == "api.openalex.org") else base
+
     def __init__(self, **kw):
         super().__init__(**kw)
-        self._sems: dict[str, asyncio.Semaphore] = {}
+        self._sems: dict[str, _PrioritySemaphore] = {}
         self._last: dict[str, float] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
-        sem = self._sems.setdefault(host, asyncio.Semaphore(self.CONCURRENCY.get(host, 5)))
-        async with sem:
-            wait = self._last.get(host, 0.0) + self.MIN_INTERVAL.get(host, 0.0) - time.monotonic()
+        sem = self._sems.setdefault(host, _PrioritySemaphore(self.CONCURRENCY.get(host, 5)))
+        await sem.acquire(_priority.get())
+        try:
+            wait = self._last.get(host, 0.0) + self.interval(host) - time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last[host] = time.monotonic()
             return await super().handle_async_request(request)
+        finally:
+            sem.release()
 
 
 _client: httpx.AsyncClient | None = None
@@ -1616,7 +1861,10 @@ async def patent_get(number: str, resolve_literature: int = 20, citing: bool = T
     return out
 
 
-@_patent_tool()
+PATENT_RETRY_PAUSE_S = 20.0
+
+
+@_job_tool(patent=True)
 async def map_add_patents(map: str, numbers: list[str], as_seed: bool = False) -> dict:
     """Add patents to a literature map as 'P:<number>' nodes. Each cites the scientific literature
     its search report lists with a printed DOI, resolved to OpenAlex works that enter the map as
@@ -1624,7 +1872,9 @@ async def map_add_patents(map: str, numbers: list[str], as_seed: bool = False) -
     with their raw text: resolve them with find_doi and verify_doi and add the works with
     map_add_seeds; they are never guessed from a title. Patent nodes appear in map_get
     'patent_edges' but take no part in co-citation, coupling or duplicate merging: an examiner's
-    citation establishes prior art, it is not a scholarly citation. 1 to 20 numbers per call."""
+    citation establishes prior art, it is not a scholarly citation. 1 to 20 numbers per call.
+    status 'error' (with detail) when no patent could be added; a 403 from EPO is retried once
+    after a pause. Long: use background=True and poll map_job_status."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -1633,9 +1883,14 @@ async def map_add_patents(map: str, numbers: list[str], as_seed: bool = False) -
     if not numbers or len(numbers) > 20:
         raise ValueError("numbers: give 1 to 20 patent publication numbers")
     out = {"status": "ok", "map": m["name"], "patents": {}, "literature_added": 0, "unresolved": [], "source_errors": []}
-    for number in numbers:
+    _progress(done=0, total=len(numbers), step="reading patents")
+    for i, number in enumerate(numbers):
+        _progress(done=i, step=f"patent {number}")
         try:
             p = await patent_get(number, resolve_literature=0, citing=True)
+            if p.get("http_status") == 403:  # EPO fair-use throttling: one pause and one more try
+                await asyncio.sleep(PATENT_RETRY_PAUSE_S)
+                p = await patent_get(number, resolve_literature=0, citing=True)
         except ValueError as e:
             out["patents"][number] = {"status": "invalid_input", "detail": str(e)}
             continue
@@ -1662,6 +1917,10 @@ async def map_add_patents(map: str, numbers: list[str], as_seed: bool = False) -
         out["patents"][pid] = {"result": result, "title": p["title"], "literature_with_doi": len(dois),
                                "resolved": len(found), "unresolved": len(unresolved), "cited_by_total": p.get("cited_by_total"),
                                "url": p["url"]}
+    if not any("result" in v for v in out["patents"].values()):
+        out["status"] = "error"
+        out["detail"] = "no patent could be added: " + "; ".join(
+            f"{k}: {v.get('status')} {v.get('detail') or ''}".strip() for k, v in out["patents"].items())
     return out
 
 
@@ -1678,7 +1937,7 @@ def _contrasting(contexts: list[str]) -> bool:
     return any(CONTRAST_RE.search(c or "") for c in contexts)
 
 
-@_tool()
+@_job_tool()
 async def map_intents(map: str, works: list[str] | None = None, max_works: int = 20) -> dict:
     """Why works in a map cite each other, from Semantic Scholar: for each selected work (the
     seeds by default, or the given ids/DOIs, up to max_works) the citation intents on its
@@ -1687,7 +1946,10 @@ async def map_intents(map: str, works: list[str] | None = None, max_works: int =
     or critique are flagged 'contrasting': candidates for the Objections of a thesis note, to be
     read in the text before use. Stored with the map; map_get returns them as 'edge_intents'
     keyed 'citing->cited'. One request per work and direction (Semantic Scholar allows one per
-    second): twenty works take about a minute."""
+    second): twenty works take about a minute (use background=True and map_job_status). Edges are
+    saved every 5 works, so an interrupted run keeps what it did. 'works_skipped' lists the selected
+    works left out (no DOI, or beyond max_works: call again with them); 'truncated' is true when a
+    request hit Semantic Scholar's limit of 1000 citations."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -1699,12 +1961,19 @@ async def map_intents(map: str, works: list[str] | None = None, max_works: int =
         chosen = [w for w in _resolve_ids(nodes, works) if w in nodes]
     else:
         chosen = [k for k, n in nodes.items() if n["role"] == "seed"]
-    chosen = [k for k in chosen if nodes[k].get("doi")][:max(1, min(int(max_works), 50))]
+    selected = list(dict.fromkeys(chosen))
+    chosen = [k for k in selected if nodes[k].get("doi")][:max(1, min(int(max_works), 50))]
+    works_skipped = [k for k in selected if k not in chosen]  # no DOI, or beyond max_works
     if not chosen:
         return {"status": "invalid_input", "detail": "no selected work has a DOI (Semantic Scholar needs one)"}
-    rows, errors, fetched = [], [], 0
+    rows, errors, fetched, saved, truncated = [], [], 0, 0, False
     fields = "intents,isInfluential,contexts,{side}.externalIds"
-    for k in chosen:
+    _progress(done=0, total=len(chosen), step="citation intents")
+    for done, k in enumerate(chosen):
+        if done and done % 5 == 0:  # an interruption keeps the work done so far
+            maps.save_intents(db, m["id"], rows[saved:])
+            saved = len(rows)
+        _progress(done=done, step=f"citation intents {k}")
         doi = nodes[k]["doi"]
         for direction, side in (("citations", "citingPaper"), ("references", "citedPaper")):
             r = await _s2_api(f"graph/v1/paper/DOI:{_doi_path(doi)}/{direction}",
@@ -1713,7 +1982,10 @@ async def map_intents(map: str, works: list[str] | None = None, max_works: int =
             if r.get("status") != "ok":
                 errors.append(f"{k} {direction}: {r.get('detail') or r.get('http_status')}")
                 continue
-            for x in (r.get("data") or {}).get("data") or []:
+            page = (r.get("data") or {}).get("data") or []
+            if len(page) >= 1000:  # the request limit: Semantic Scholar may hold more citations
+                truncated = True
+            for x in page:
                 other_doi = _clean_doi(((x.get(side) or {}).get("externalIds") or {}).get("DOI"))
                 other = by_doi.get(other_doi) if other_doi else None
                 if not other or other == k:
@@ -1723,11 +1995,12 @@ async def map_intents(map: str, works: list[str] | None = None, max_works: int =
                 rows.append({"citing": citing, "cited": cited, "intents": x.get("intents") or [],
                              "influential": bool(x.get("isInfluential")), "contexts": contexts,
                              "contrasting": _contrasting(contexts)})
-    maps.save_intents(db, m["id"], rows)
+    maps.save_intents(db, m["id"], rows[saved:])
     maps.touch(db, m["id"])
     contrasting = [{"citing": r["citing"], "cited": r["cited"], "context": (r["contexts"] or [""])[0][:300]}
                    for r in rows if r["contrasting"]]
-    return {"status": "ok", "map": m["name"], "works": chosen, "requests": fetched, "edges_annotated": len(rows),
+    return {"status": "ok", "map": m["name"], "works": chosen, "works_skipped": works_skipped, "truncated": truncated,
+            "requests": fetched, "edges_annotated": len(rows),
             "influential": sum(1 for r in rows if r["influential"]), "contrasting": contrasting,
             "source_errors": errors,
             "note": "intents and influence from Semantic Scholar; 'contrasting' is a wording heuristic on the "
@@ -2786,14 +3059,31 @@ async def _cg_seed(s: str) -> dict:
 
 
 def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: int,
-                 min_coupling: int) -> tuple[list, list, list]:
-    """Citation edges, co-citation and coupling pairs; also sets each node's 'seeds_linked'."""
+                 min_coupling: int, max_pairs: int = 500, truncation: dict | None = None,
+                 map_counts: bool = False) -> tuple[list, list, list]:
+    """Citation edges, co-citation and coupling pairs (the strongest max_pairs of each; when given,
+    truncation gets 'cocitation' and 'coupling' = True if pairs above the minimum were cut); also sets
+    each node's 'seeds_linked' and, with map_counts, how it is cited inside the map: 'cited_in_map'
+    (works of the map citing it, seeds included, patents not), 'cited_in_map_nonseed' (the same,
+    candidates only) and 'cited_by_seed_citers' (of the citing works, those that cite at least one
+    other seed)."""
     edges, cocit, citers = [], {}, {}
+    seeds = set(seed_ids)
+    in_map = {k: 0 for k in nodes}
+    in_map_nonseed = dict(in_map)
+    by_seed_citer = dict(in_map)
     for n in nodes.values():
         if _is_patent(n["id"]):
             continue  # examiner citations: shown as patent_edges, never as co-citation or coupling
         inside = sorted({r for r in n["refs"] if r in nodes and r != n["id"]})
         edges += [[n["id"], r] for r in inside]
+        cited_seeds = seeds.intersection(inside)
+        for r in inside:
+            in_map[r] += 1
+            if n["id"] not in seeds:
+                in_map_nonseed[r] += 1
+            if cited_seeds - {r}:
+                by_seed_citer[r] += 1
         for i, a in enumerate(inside):
             for b in inside[i + 1:]:
                 cocit[(a, b)] = cocit.get((a, b), 0) + 1
@@ -2806,12 +3096,16 @@ def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: in
             for b in ids[i + 1:]:
                 shared[(a, b)] = shared.get((a, b), 0) + 1
     size = {k: len(set(n["refs"])) for k, n in nodes.items()}
+    max_pairs = max(1, min(int(max_pairs), 5000))
     coupling = sorted(([a, b, w, round(w / (size[a] * size[b]) ** 0.5, 3)]
                        for (a, b), w in shared.items() if w >= min_coupling),
-                      key=lambda p: -p[3])[:500]
+                      key=lambda p: -p[3])
     cocitation = sorted(([a, b, w] for (a, b), w in cocit.items() if w >= min_cocitation),
-                        key=lambda p: -p[2])[:500]
-    seeds, linked = set(seed_ids), {k: set() for k in nodes}
+                        key=lambda p: -p[2])
+    if truncation is not None:
+        truncation.update(cocitation=len(cocitation) > max_pairs, coupling=len(coupling) > max_pairs)
+    coupling, cocitation = coupling[:max_pairs], cocitation[:max_pairs]
+    linked = {k: set() for k in nodes}
     for a, b in edges:
         if a in seeds:
             linked[b].add(a)
@@ -2819,6 +3113,8 @@ def _graph_links(nodes: dict[str, dict], seed_ids: list[str], min_cocitation: in
             linked[a].add(b)
     for k, n in nodes.items():
         n["seeds_linked"] = len(linked[k] - {k})
+        if map_counts:
+            n["cited_in_map"], n["cited_in_map_nonseed"], n["cited_by_seed_citers"] = in_map[k], in_map_nonseed[k], by_seed_citer[k]
         pairs = [tuple(sorted((k, s))) for s in seeds if s != k]
         n["seed_cocited"] = sum(cocit.get(p, 0) for p in pairs)
         n["seed_coupling"] = max((round(shared.get(p, 0) / ((size[p[0]] * size[p[1]]) ** 0.5 or 1), 3)
@@ -2843,13 +3139,19 @@ def _coverage_verdict(openalex: int, other: int, other_name: str = "semantic_sch
 # and more, independent of OpenAlex's own processing: the one count that is not derived from
 # the same pipeline. A free token (opencitations.net/accesstoken) is polite, not required.
 OC_TOKEN = os.environ.get("OPENCITATIONS_TOKEN", "")
+OC_RETRY_DELAYS = (1.0, 2.0)  # seconds to wait after a 429, one retry each
+OC_CONCURRENCY = 3
 
 
 async def _oc_count(doi: str, kind: str) -> int | None:
     """Citation or reference count of a DOI in the OpenCitations Index; None when unknown."""
     path = "citation-count" if kind == "citations" else "reference-count"
     headers = {"authorization": OC_TOKEN} if OC_TOKEN else {}
-    r = await _http().get(f"https://api.opencitations.net/index/v2/{path}/doi:{_doi_path(doi)}", headers=headers)
+    for delay in (*OC_RETRY_DELAYS, None):
+        r = await _http().get(f"https://api.opencitations.net/index/v2/{path}/doi:{_doi_path(doi)}", headers=headers)
+        if r.status_code != 429 or delay is None:
+            break
+        await asyncio.sleep(delay)  # rate limited: wait and ask again
     if r.status_code != 200:
         return None
     try:
@@ -3094,9 +3396,33 @@ ExpandMode = Literal["references", "citing", "similar", "authors"]
 MapState = Literal["new", "to_read", "read", "dismissed"]
 
 
+def _raw(fn):
+    """The tool coroutine without the background-job layer (see _job_tool): tools calling tools."""
+    return getattr(fn, "raw", fn)
+
+
 def _map_db():
+    """(maps module, a new connection). Inside a tool call the connection is closed when the call
+    ends; each call to _map_db gets its own, never shared between threads."""
     import maps
-    return maps, maps.connect()
+    db = maps.connect()
+    if (opened := _OPEN_DBS.get()) is not None:
+        opened.append(db)
+    return maps, db
+
+
+async def _in_thread(fn, *args):
+    """Run fn(maps, db, *args) in a worker thread with its own SQLite connection (closed afterwards):
+    the CPU work of the map views and the database reads then do not freeze the event loop for
+    the other tools. Connections are never shared between threads."""
+    def work():
+        import maps
+        db = maps.connect()
+        try:
+            return fn(maps, db, *args)
+        finally:
+            db.close()
+    return await asyncio.to_thread(work)
 
 
 async def _oa_batch(filter_key: str, values: list[str]) -> tuple[list[dict], list[str]]:
@@ -3128,6 +3454,19 @@ def _patent_edges(nodes: dict[str, dict]) -> list[list[str]]:
     return [[k, r] for k, n in nodes.items() if _is_patent(k) for r in sorted(set(n["refs"])) if r in nodes]
 
 
+async def _ticked(coro, step: str):
+    """Await a request and count it in the job's progress."""
+    try:
+        return await coro
+    finally:
+        _progress(inc=1, step=step)
+
+
+def _expand_steps(mode: str, n_seeds: int) -> int:
+    """Requests _expand counts as progress, known in advance (authors adds one per author later)."""
+    return {"references": 1, "similar": 1}.get(mode, n_seeds)
+
+
 async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tuple[dict, str]], list[str]]:
     """(node, found_by) pairs for one expansion mode."""
     out, errors = [], []
@@ -3138,11 +3477,12 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
                 owner.setdefault(rid, sd["id"])
         found, errors = await _oa_batch("openalex", list(owner))
         out = [(n, f"references:{owner[n['id']]}") for n in found if n["id"] in owner]
+        _progress(inc=1, step="references")
     elif mode == "citing":
         seeds = [sd for sd in seeds if _is_oa(sd["id"])]
-        res = await asyncio.gather(*(
+        res = await asyncio.gather(*(_ticked(
             _oa_get("works", filter=f"cites:{sd['id']}", sort="cited_by_count:desc", select=CG_SELECT,
-                    **{"per-page": per_seed}) for sd in seeds), return_exceptions=True)
+                    **{"per-page": per_seed}), "citing") for sd in seeds), return_exceptions=True)
         for sd, r in zip(seeds, res):
             if isinstance(r, Exception):
                 errors.append(_err(f"citing {sd['id']}", r))
@@ -3161,6 +3501,7 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
                 return [], ["similar: no seed is in Semantic Scholar"]
         r = await _s2_api("recommendations/v1/papers/", {"fields": "externalIds", "limit": min(per_seed * len(ids), 500)},
                           {"positivePaperIds": ids})
+        _progress(inc=1, step="similar")
         if r["status"] != "ok":
             return [], [f"similar: semantic_scholar {r.get('http_status') or r.get('detail')}"]
         dois = [_clean_doi((p.get("externalIds") or {}).get("DOI")) for p in r["data"].get("recommendedPapers", [])]
@@ -3168,8 +3509,8 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
         out = [(n, "similar:semantic_scholar") for n in found]
     elif mode == "authors":
         seeds = [sd for sd in seeds if _is_oa(sd["id"])]
-        res = await asyncio.gather(*(_oa_get(f"works/{sd['id']}", select="id,authorships") for sd in seeds),
-                                   return_exceptions=True)
+        res = await asyncio.gather(*(_ticked(_oa_get(f"works/{sd['id']}", select="id,authorships"), "authors")
+                                     for sd in seeds), return_exceptions=True)
         authors = {}
         for sd, r in zip(seeds, res):
             if isinstance(r, Exception):
@@ -3178,9 +3519,10 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
             for a in (r.get("authorships") or [])[:3]:
                 if aid := _oa_id((a.get("author") or {}).get("id")):
                     authors.setdefault(aid, sd["id"])
-        res = await asyncio.gather(*(
+        _progress(add_total=len(authors))
+        res = await asyncio.gather(*(_ticked(
             _oa_get("works", filter=f"authorships.author.id:{aid}", sort="cited_by_count:desc",
-                    select=CG_SELECT, **{"per-page": per_seed}) for aid in authors), return_exceptions=True)
+                    select=CG_SELECT, **{"per-page": per_seed}), "authors") for aid in authors), return_exceptions=True)
         for aid, r in zip(authors, res):
             if isinstance(r, Exception):
                 errors.append(_err(f"works of {aid}", r))
@@ -3189,9 +3531,10 @@ async def _expand(mode: str, seeds: list[dict], per_seed: int) -> tuple[list[tup
     return out, errors
 
 
-def _map_view(nodes: dict[str, dict], min_cocitation: int = 2, min_coupling: int = 3) -> tuple[list, list, list]:
+def _map_view(nodes: dict[str, dict], min_cocitation: int = 2, min_coupling: int = 3,
+              max_pairs: int = 500, truncation: dict | None = None) -> tuple[list, list, list]:
     seeds = [k for k, n in nodes.items() if n["role"] == "seed"]
-    edges, cocit, coupling = _graph_links(nodes, seeds, min_cocitation, min_coupling)
+    edges, cocit, coupling = _graph_links(nodes, seeds, min_cocitation, min_coupling, max_pairs, truncation, map_counts=True)
     # co-cited with anything in the map: separates candidates when one seed links them all
     total = {k: 0 for k in nodes}
     for n in nodes.values():
@@ -3203,6 +3546,45 @@ def _map_view(nodes: dict[str, dict], min_cocitation: int = 2, min_coupling: int
     for k, n in nodes.items():
         n["cocited_total"] = total[k]
     return edges, cocit, coupling
+
+
+# A small per-process cache of the computed view of a map (map_get and map_suggest, which the page
+# calls one after the other). The key says whether anything in the map changed: the map's `updated`
+# stamp, the number of nodes and of edge_intents, their highest rowid, and maps.WRITES, a counter that
+# every committed write bumps (`updated` has a one-second resolution, so two writes in the same second
+# would leave it unchanged). The counter is read before the rows, so a write that lands meanwhile can
+# only make the entry unreachable, never stale.
+VIEW_CACHE_SIZE = 8
+_VIEW_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_VIEW_CACHE_LOCK = threading.Lock()
+
+
+def _view_key(maps, db, m, params: tuple) -> tuple:
+    version = maps.WRITES
+    n = db.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM nodes WHERE map_id = ?", (m["id"],)).fetchone()
+    e = db.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM edge_intents WHERE map_id = ?", (m["id"],)).fetchone()
+    return (os.path.abspath(maps.DB_PATH), m["id"], m["updated"], tuple(n), tuple(e), version, params)
+
+
+def _cached_view(maps, db, m, min_cocitation: int = 2, min_coupling: int = 3, max_pairs: int = 500):
+    """(nodes, edges, cocitation, coupling, truncation) of a map: nodes with the scores of _map_view.
+    The caller gets its own copies of the node dicts and may annotate them."""
+    key = _view_key(maps, db, m, (min_cocitation, min_coupling, max_pairs))
+    with _VIEW_CACHE_LOCK:
+        hit = _VIEW_CACHE.get(key)
+        if hit:
+            _VIEW_CACHE.move_to_end(key)
+    if hit:
+        nodes, edges, cocit, coupling, truncation = hit
+        return {k: dict(v) for k, v in nodes.items()}, edges, cocit, coupling, dict(truncation)
+    nodes = maps.nodes(db, m["id"])
+    truncation: dict = {}
+    edges, cocit, coupling = _map_view(nodes, min_cocitation, min_coupling, max_pairs, truncation)
+    with _VIEW_CACHE_LOCK:
+        _VIEW_CACHE[key] = ({k: dict(v) for k, v in nodes.items()}, edges, cocit, coupling, dict(truncation))
+        while len(_VIEW_CACHE) > VIEW_CACHE_SIZE:
+            _VIEW_CACHE.popitem(last=False)
+    return nodes, edges, cocit, coupling, truncation
 
 
 async def _s2_reference_ids(doi: str) -> list[str]:
@@ -3293,12 +3675,16 @@ async def _pdf_reference_ids(maps, db, entries: list[str], budget: dict) -> tupl
             todo[k] = (sur, title)
     sem = asyncio.Semaphore(2)
 
+    _progress(add_total=len(todo), step="looking up PDF references")
+
     async def one(k, sur, title):
         async with sem:
             try:
                 return k, await _resolve_work(sur, title, budget)
             except Exception:
                 return k, False  # source error or budget used up: not cached, retried next time
+            finally:
+                _progress(inc=1)
     for k, node in await asyncio.gather(*(one(k, *v) for k, v in todo.items())):
         if node is not False:
             maps.cache_ref(db, k, node["id"] if node else "")
@@ -3333,11 +3719,14 @@ def _public_node(n: dict) -> dict:
     return out
 
 
-@_tool()
+@_job_tool()
 async def map_create(name: str, seeds: list[str] | None = None, description: str | None = None) -> dict:
     """Create a persistent literature map, optionally with seed works (DOIs or OpenAlex ids).
     Maps are stored by the server (SQLite) and keep seeds, candidates and reading state across chats;
     the state never goes into the notes. Then: map_expand, map_suggest, map_mark, map_get.
+    status 'partial' means the map was created but no seed could be added (see detail, warnings,
+    source_errors); with some seeds failing the status stays 'ok' and warnings name them.
+    With many seeds use background=True and poll map_job_status.
     """
     maps, db = _map_db()
     try:
@@ -3350,13 +3739,24 @@ async def map_create(name: str, seeds: list[str] | None = None, description: str
         raise
     out = {"status": "ok", "map": name.strip()}
     if seeds:
-        out.update(await map_add_seeds(name, seeds))
+        res = await _raw(map_add_seeds)(name, seeds)
+        out.update(res)
         out["status"] = "ok"
+        # the map exists even when no seed could be added: say so instead of hiding the failure
+        warnings = list(res.get("warnings") or [])
+        if res.get("status") != "ok":
+            out["status"] = "partial"
+            out["detail"] = res.get("detail") or "map created, but no seed could be added: " + \
+                ("; ".join(res.get("source_errors") or []) or "none was found")
+            warnings.append(out["detail"])
+        warnings += [f"seed not added: {e}" for e in res.get("source_errors") or []]
+        out["warnings"] = warnings
+        out.setdefault("source_errors", [])
     _log_event("map_create", map=name.strip(), description=description, seeds=len(seeds or []))
     return out
 
 
-@_tool()
+@_job_tool()
 async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collection: str | None = None,
                         zotero_tag: str | None = None, zotero_items: list[str] | None = None) -> dict:
     """Add seed works to a map: DOIs or OpenAlex ids, and/or every item with a DOI in a Zotero
@@ -3372,7 +3772,9 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
     nodes. Their references come from the bibliography in their PDF when the Zotero MCP's
     extract_references has been run on them (also added to OpenAlex's own list); references
     OpenAlex does not have become 'B:' book nodes. 'pdf_references' reports how many were
-    found per seed; 'warnings' names items whose PDF bibliography is not extracted yet."""
+    found per seed; 'warnings' names items whose PDF bibliography is not extracted yet.
+    duplicates_merged lists the merged groups ({kept, removed: [ids], title}). Long with many
+    seeds: use background=True and poll map_job_status."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
@@ -3397,6 +3799,8 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
         books = books[:50 - len(wanted)]
     if not wanted and not books:
         return {"status": "invalid_input", "detail": "give seeds, zotero_collection, zotero_tag or zotero_items"}
+    n_seeds = len(wanted) + len(books)  # progress: resolve each seed, then read each one's references
+    _progress(done=0, total=2 * n_seeds, step="resolving seeds")
     res = await asyncio.gather(*(_cg_seed(x) for x in wanted), return_exceptions=True)
     found, errors = [], []
     for x, r in zip(wanted, res):
@@ -3404,6 +3808,7 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
             errors.append(_err(x, r))
         else:
             found.append(r)
+    _progress(done=len(wanted), step="resolving books")
     lib_by_doi = k.by_doi()
     for r in found:
         it = lib_by_doi.get(_clean_doi(r.get("doi")) or "")
@@ -3426,8 +3831,11 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
                         "cited_by": None, "refs": []}
         node["zotero_key"] = it["key"]
         found.append(node)
+        _progress(inc=1)
     pdf_counts = {}
+    _progress(done=n_seeds, step="reading reference lists")
     for r in found:
+        _progress(inc=1)
         r["refs_source"] = "openalex" if r["refs"] else None
         if not r["refs"] and r.get("doi"):
             r["refs"] = await _s2_reference_ids(r["doi"])
@@ -3447,18 +3855,19 @@ async def map_add_seeds(map: str, seeds: list[str] | None = None, zotero_collect
         if not r["refs"]:
             warnings.append(f"no reference list for {r['id']} ({(r.get('title') or '')[:60]}): expect a sparse map")
     added = {}
+    _progress(done=2 * n_seeds, step="saving")
     with db:
         for r in found:
             added[r["id"]] = maps.upsert(db, m["id"], r, "seed", "seed")
         maps.touch(db, m["id"])
-    merged = _merge_duplicates(maps, db, m["id"])
+    merged = await _merge_async(m["id"])
     return {"status": "ok" if added else "not_found", "map": m["name"], "seeds": added, "duplicates_merged": merged,
             "references_from_semantic_scholar": [r["id"] for r in found if r.get("refs_source") == "semantic_scholar"],
             "pdf_references": pdf_counts,
             "warnings": warnings, "source_errors": errors}
 
 
-@_tool()
+@_job_tool()
 async def map_expand(map: str, modes: list[ExpandMode] | None = None, per_seed: int = 20,
                      seeds: list[str] | None = None, max_new: int = 150) -> dict:
     """Grow a map from its seeds (or from the given seed ids): 'references' (works the seeds
@@ -3469,7 +3878,9 @@ async def map_expand(map: str, modes: list[ExpandMode] | None = None, per_seed: 
     citing/similar/authors per seed (max 100). seeds may name any works in the map (not only
     seeds) to expand from them. At most max_new new works enter per call (default 150; a map
     holds at most 2000): those linked to most starting works first, then the most cited.
-    Duplicate records of one work (preprint and published version) are merged afterwards.
+    Duplicate records of one work (preprint and published version) are merged afterwards:
+    duplicates_merged lists the groups ({kept, removed: [ids], title}); works_in_map is the size
+    of the map after the merge. Long: use background=True and poll map_job_status.
     """
     maps, db = _map_db()
     try:
@@ -3489,6 +3900,7 @@ async def map_expand(map: str, modes: list[ExpandMode] | None = None, per_seed: 
     if not chosen:
         return {"status": "no_seeds", "detail": "add seeds with map_add_seeds first, or give ids of works in the map"}
     found, errors = [], []
+    _progress(done=0, total=sum(_expand_steps(x, len(chosen)) for x in modes) + 1, step="expanding")
     for mode, (pairs, errs) in zip(modes, await asyncio.gather(*(_expand(x, chosen, per_seed) for x in modes))):
         found += pairs
         errors += errs
@@ -3513,6 +3925,7 @@ async def map_expand(map: str, modes: list[ExpandMode] | None = None, per_seed: 
     for node, how in found:
         links.setdefault(node["id"], set()).add(how.split(":", 1)[-1])
     found.sort(key=lambda p: (p[0]["id"] in current, len(links[p[0]["id"]]), p[0].get("cited_by") or 0), reverse=True)
+    _progress(step="saving")
     counts, skipped = {"added": 0, "updated": 0, "promoted": 0}, 0
     max_new = max(1, min(int(max_new), MAP_MAX_NODES))
     new_ids: set[str] = set()
@@ -3529,32 +3942,35 @@ async def map_expand(map: str, modes: list[ExpandMode] | None = None, per_seed: 
                 size += 1
             counts[result] += 1
         maps.touch(db, m["id"])
-    merged = _merge_duplicates(maps, db, m["id"])
+    merged = await _merge_async(m["id"])
     return {"status": "ok", "map": m["name"], "modes": modes, "started_from": [n["id"] for n in chosen],
-            **counts, "skipped": skipped, "duplicates_merged": merged, "works_in_map": size - len(merged),
+            **counts, "skipped": skipped, "duplicates_merged": merged,
+            "works_in_map": size - sum(len(x["removed"]) for x in merged),
             "source_errors": errors}
 
 
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
-async def map_suggest(map: str, limit: int = 20, include_states: list[MapState] | None = None) -> dict:
+async def map_suggest(map: str, limit: int | None = 20, include_states: list[MapState] | None = None) -> dict:
     """Candidates most likely missing from the reading, ranked like citation_graph: by how many
     seeds they cite or are cited by (seeds_linked), then how often works in the map cite them
     together with a seed (seed_cocited), then the strongest coupling with a seed, then citation
     count. Dismissed and read works are left out unless include_states asks for them. Each
     suggestion says why (found_by, the three scores). The map is a sample: scores are lower
     bounds, and humanities and older works often lack reference lists in OpenAlex."""
-    maps, db = _map_db()
+    return await _in_thread(_map_suggest, map, 20 if limit is None else limit, include_states)
+
+
+def _map_suggest(maps, db, map, limit, include_states) -> dict:
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
-    nodes = maps.nodes(db, m["id"])
-    _map_view(nodes)
+    nodes = _cached_view(maps, db, m)[0]
     states = set(include_states or ["new", "to_read"])
     ranked = sorted((n for n in nodes.values() if n["role"] == "candidate" and n["state"] in states),
                     key=lambda n: (n["seeds_linked"], n["seed_cocited"], n["seed_coupling"], n["cocited_total"],
                                    n["cited_by"] or 0), reverse=True)
-    top = ranked[:max(1, min(limit, 200))]
+    top = ranked[:max(1, min(int(limit), 200))]
     _knowledge().annotate(top)
     keep = ("id", "doi", "title", "first_author", "year", "cited_by", "state", "found_by", "seeds_linked",
             "seed_cocited", "seed_coupling", "cocited_total", "is_retracted", "in_library", "zotero_key", "notes", "zotero_tags")
@@ -3588,28 +4004,72 @@ async def map_mark(map: str, ids: list[str], state: Literal["new", "to_read", "r
 
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_get(map: str, states: list[MapState] | None = None, min_cocitation: int = 2,
-                  min_coupling: int = 3) -> dict:
+                  min_coupling: int = 3, max_pairs: int = 500, compact: bool = False,
+                  fields: list[str] | None = None) -> dict:
     """Everything in a map for reading or visualizing: works (role, state, found_by, scores)
     and links computed on the whole map: citation_edges, cocitation, coupling (same format and
     caveats as citation_graph). states filters the works returned (links are kept only
     between returned works). To SHOW a map, give the user the 'Literature maps' page (link in
-    the server instructions and map_list), not a new artifact, unless the user asks for one."""
-    maps, db = _map_db()
+    the server instructions and map_list), not a new artifact, unless the user asks for one.
+
+    Each work also carries, computed on the whole map (patents never count): cited_in_map (works
+    of the map citing it, seeds included), cited_in_map_nonseed (the same, candidates only) and
+    cited_by_seed_citers (of its citing works, how many cite at least one seed other than the work).
+    cocitation and coupling hold at most max_pairs pairs each (default 500, max 5000), the strongest
+    first: cocitation_truncated / coupling_truncated say when weaker pairs above the minimum were
+    left out. added (when the work entered) and refs_source (where its reference list came from:
+    openalex, semantic_scholar, zotero_pdf, epo; null when unknown) are informative.
+
+    To shrink the answer of a large map: compact=True drops from every work the heavy fields
+    (notes, verified, zotero_tags, found_by, note, added, refs_source); fields=[...] keeps only the
+    listed fields plus id (and takes precedence over compact). Unknown field names are ignored and
+    named in 'warnings'. Links, snapshots and edge_intents are not affected; by default nothing
+    changes."""
+    return await _in_thread(_map_get, map, states, min_cocitation, min_coupling, max_pairs, compact, fields)
+
+
+_COMPACT_DROP = ("notes", "verified", "zotero_tags", "found_by", "note", "added", "refs_source")
+# every field a work can carry, for telling a typo from a field this map's works happen not to have
+_WORK_FIELDS = ("id", "kind", "role", "state", "in_library", "library_match", "cited_in_map",
+                "cited_in_map_nonseed", "cited_by_seed_citers", "cocited_total", "abstract") + _COMPACT_DROP
+
+
+def _slim_works(works: list[dict], compact: bool, fields: list[str] | None) -> list[str]:
+    """Apply compact / fields to the public works in place; returns warnings for unknown fields."""
+    warnings = []
+    if fields is not None:
+        import maps as _maps
+        known = set(_WORK_FIELDS) | set(_maps.NODE_FIELDS) | {k for w in works for k in w}
+        unknown = [f for f in dict.fromkeys(fields) if f not in known]
+        if unknown:
+            warnings.append("unknown fields ignored: " + ", ".join(map(str, unknown)))
+        keep = {f for f in fields if f in known} | {"id"}
+        works[:] = [{k: v for k, v in w.items() if k in keep} for w in works]
+    elif compact:
+        works[:] = [{k: v for k, v in w.items() if k not in _COMPACT_DROP} for w in works]
+    return warnings
+
+
+def _map_get(maps, db, map, states, min_cocitation, min_coupling, max_pairs=500, compact=False, fields=None) -> dict:
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
-    nodes = maps.nodes(db, m["id"])
-    edges, cocit, coupling = _map_view(nodes, min_cocitation, min_coupling)
+    nodes, edges, cocit, coupling, truncation = _cached_view(maps, db, m, min_cocitation, min_coupling, max_pairs)
     keep = {k for k, n in nodes.items() if not states or n["state"] in states or n["role"] == "seed"}
     inside = lambda pair: pair[0] in keep and pair[1] in keep
     works = [_public_node(n) for k, n in nodes.items() if k in keep]
     _knowledge().annotate(works)
-    return {"status": "ok", "map": dict(m), "works": works, "snapshots": _knowledge().status(),
-            "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
-            "coupling": [p for p in coupling if inside(p)],
-            "patent_edges": [e for e in _patent_edges(nodes) if inside(e)],
-            "edge_intents": {k: v for k, v in maps.intents(db, m["id"]).items() if inside(k.split("->"))}}
+    warnings = _slim_works(works, compact, fields)
+    out = {"status": "ok", "map": dict(m), "works": works, "snapshots": _knowledge().status(),
+           "citation_edges": [e for e in edges if inside(e)], "cocitation": [p for p in cocit if inside(p)],
+           "coupling": [p for p in coupling if inside(p)],
+           "cocitation_truncated": truncation["cocitation"], "coupling_truncated": truncation["coupling"],
+           "patent_edges": [e for e in _patent_edges(nodes) if inside(e)],
+           "edge_intents": {k: v for k, v in maps.intents(db, m["id"]).items() if inside(k.split("->"))}}
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 def _resolve_ids(nodes: dict, ids: list[str]) -> list[str]:
@@ -3624,10 +4084,20 @@ def _dup_key(n: dict) -> str | None:
     return f"{title[:120]}|{author}" if len(title) >= 12 else None
 
 
+async def _merge_async(map_id: int) -> list[dict]:
+    """_merge_duplicates in a worker thread, on its own connection."""
+    return await _in_thread(_merge_duplicates, map_id)
+
+
 def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
     """Merge records of the same work (same normalised title and first author's surname, years
     at most 2 apart): the most cited record stays, takes the union of found_by and references,
-    the seed role and the most advanced reading state."""
+    the seed role and the most advanced reading state. The edge_intents of the removed records move
+    to the kept id (_remap_intents), in the same transaction."""
+    # The write lock is taken before the nodes are read: a map_mark landing between reading and
+    # writing would otherwise be overwritten by the state computed from the old rows.
+    if not db.in_transaction:
+        db.execute("BEGIN IMMEDIATE")
     nodes = maps.nodes(db, map_id)
     groups: dict[str, list[dict]] = {}
     for n in nodes.values():
@@ -3662,8 +4132,36 @@ def _merge_duplicates(maps, db, map_id: int) -> list[dict]:
                     other["refs"] = list(dict.fromkeys(keep["id"] if r in gone else r for r in other["refs"]))
                     db.execute("UPDATE nodes SET refs = ? WHERE map_id = ? AND work_id = ?",
                                (json.dumps(other["refs"]), map_id, other["id"]))
+            _remap_intents(db, map_id, keep["id"], gone)
             merged.append({"kept": keep["id"], "removed": [g["id"] for g in drop], "title": (keep.get("title") or "")[:80]})
     return merged
+
+
+def _remap_intents(db, map_id: int, keep_id: str, gone: set[str]) -> None:
+    """Move the citation intents of removed duplicate records onto the kept id (key citing->cited
+    with the removed id replaced). When the new key already has a record the fuller one stays (more
+    contexts; influential and contrasting are OR-ed); an edge that would cite itself is dropped.
+    The old rows go. Runs in the caller's transaction and does nothing once the ids are gone."""
+    marks = ",".join("?" * len(gone))
+    rows = db.execute(f"SELECT * FROM edge_intents WHERE map_id = ? AND (citing IN ({marks}) OR cited IN ({marks}))",
+                      (map_id, *gone, *gone)).fetchall()
+    if not rows:
+        return
+    moved: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        citing, cited = (keep_id if r[c] in gone else r[c] for c in ("citing", "cited"))
+        db.execute("DELETE FROM edge_intents WHERE map_id = ? AND citing = ? AND cited = ?", (map_id, r["citing"], r["cited"]))
+        if citing != cited:
+            moved.setdefault((citing, cited), []).append(dict(r))
+    for (citing, cited), recs in moved.items():
+        old = db.execute("SELECT * FROM edge_intents WHERE map_id = ? AND citing = ? AND cited = ?",
+                         (map_id, citing, cited)).fetchone()
+        recs = ([dict(old)] if old else []) + recs
+        best = max(recs, key=lambda x: len(json.loads(x["contexts"])))  # first of equals: the stored one
+        db.execute("INSERT OR REPLACE INTO edge_intents (map_id, citing, cited, intents, influential, contexts, contrasting, fetched)"
+                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (map_id, citing, cited, best["intents"], int(any(x["influential"] for x in recs)),
+                    best["contexts"], int(any(x["contrasting"] for x in recs)), best["fetched"]))
 
 
 async def _map_watch(maps, db, m, per_seed: int) -> dict:
@@ -3672,28 +4170,36 @@ async def _map_watch(maps, db, m, per_seed: int) -> dict:
     current = maps.nodes(db, m["id"])
     seeds = [k for k, n in current.items() if n["role"] == "seed" and _is_oa(k)]
     if not seeds:
-        return {"status": "no_seeds"}
+        return {"status": "no_seeds", "coverage_gaps": [], "new": []}
+    page = max(1, min(per_seed, 100))
     res = await asyncio.gather(*(
         _oa_get("works", filter=f"cites:{sid},from_created_date:{since}", sort="publication_date:desc",
-                select=CG_SELECT, **{"per-page": max(1, min(per_seed, 100))}) for sid in seeds),
+                select=CG_SELECT, **{"per-page": page}) for sid in seeds),
         return_exceptions=True)
-    today, new, errors = maps.now()[:10], [], []
+    today, new, errors, capped = maps.now()[:10], [], [], False
     with db:
         for sid, r in zip(seeds, res):
             if isinstance(r, Exception):
                 errors.append(_err(f"citing {sid}", r))
                 continue
+            capped = capped or len(r.get("results", [])) >= page
             for it in r.get("results", []):
                 n = _cg_node(it)
                 if n["id"] not in current and maps.upsert(db, m["id"], n, "candidate", f"watch:{today}") == "added":
                     current[n["id"]] = n
                     new.append({k: n.get(k) for k in ("id", "doi", "title", "first_author", "year")})
         maps.touch(db, m["id"])
-    maps.set_watched(db, m["id"], maps.now())
-    return {"status": "ok", "map": m["name"], "since": since, "new": new, "source_errors": errors}
+    out = {"status": "ok", "map": m["name"], "since": since, "new": new, "source_errors": errors}
+    if errors or capped:
+        # a seed failed or returned a full page: citing works may be missing, so the next check must
+        # start from the same date or they would never show up
+        out.update(truncated=True, watch_not_advanced=True)
+    else:
+        maps.set_watched(db, m["id"], maps.now())
+    return out
 
 
-@_tool()
+@_job_tool()
 async def map_refresh(map: str, new_citing: bool = False, per_seed: int = 25) -> dict:
     """Fetch fresh metadata from OpenAlex for every work in a map (citation counts, momentum,
     topic, retraction flag, reference lists), 50 works per request. States, roles and notes are
@@ -3702,16 +4208,22 @@ async def map_refresh(map: str, new_citing: bool = False, per_seed: int = 25) ->
     OpenCitations does, where citing works may be missing from the map. With new_citing=True it first adds, as candidates with
     state 'new' and found_by 'watch:<date>', the works citing the seeds since the last such
     check (or since the map was created), up to per_seed per seed: 'new' and 'since' report
-    them. Run it when you come back to a map; it is a check on demand, not an alert."""
+    them. If a seed failed or returned a full page (per_seed), the check date does not advance and
+    the answer carries truncated=true and watch_not_advanced=true: run it again, possibly with a
+    larger per_seed. duplicates_merged is a number here (groups merged), unlike map_expand and
+    map_add_seeds, which list them. source_errors also says how many seeds OpenCitations had no count
+    for. Long: use background=True and poll map_job_status. It is a check on demand, not an alert."""
     maps, db = _map_db()
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
         return {"status": "not_found", "detail": str(e)}
+    _progress(done=0, total=2, step="watching new citing works" if new_citing else "refreshing metadata")
     watched = await _map_watch(maps, db, m, per_seed) if new_citing else {}
     if watched.get("status") == "no_seeds":
         return watched
     nodes = maps.nodes(db, m["id"])
+    _progress(done=1, step="refreshing metadata")
     found, errors = await _oa_batch("openalex", list(nodes))
     with db:
         for n in found:
@@ -3722,26 +4234,39 @@ async def map_refresh(map: str, new_citing: bool = False, per_seed: int = 25) ->
                     n["refs_source"] = old["refs_source"]
                 maps.upsert(db, m["id"], n, old["role"], old["found_by"][0] if old["found_by"] else "refresh")
         maps.touch(db, m["id"])
-    merged = _merge_duplicates(maps, db, m["id"])
+    merged = await _merge_async(m["id"])
     # the OpenCitations count for every seed with a DOI: a gap shows where OpenAlex misses citations
     gaps, seeds = [], [k for k, n in nodes.items() if n["role"] == "seed" and n.get("doi")][:25]
-    for sid in seeds:
-        try:
-            oc = await _oc_count(nodes[sid]["doi"], "citations")
-        except httpx.HTTPError as e:
-            errors.append(_err("opencitations", e))
+    _progress(done=2, add_total=len(seeds), step="OpenCitations counts")
+    sem = asyncio.Semaphore(OC_CONCURRENCY)
+
+    async def count(sid):
+        async with sem:
+            try:
+                return sid, await _oc_count(nodes[sid]["doi"], "citations")
+            except httpx.HTTPError as e:
+                errors.append(_err("opencitations", e))
+                return sid, False
+            finally:
+                _progress(inc=1)
+    unknown = 0
+    for sid, oc in await asyncio.gather(*(count(x) for x in seeds)):
+        if oc is False:
             continue
         if oc is None:
+            unknown += 1
             continue
         with db:
             db.execute("UPDATE nodes SET cited_by_oc = ? WHERE map_id = ? AND work_id = ?", (oc, m["id"], sid))
         oa = next((n["cited_by"] for n in found if n["id"] == sid), nodes[sid].get("cited_by")) or 0
         if oc >= 10 and oc >= 1.25 * oa:
             gaps.append({"id": sid, "title": nodes[sid].get("title"), "openalex_cited_by": oa, "opencitations_cited_by": oc})
+    if unknown:
+        errors.append(f"opencitations: no citation count for {unknown} of {len(seeds)} seeds (unknown DOI, rate limit or error)")
     return {"status": "ok", "map": m["name"], "refreshed": len(found), "works": len(nodes),
             "duplicates_merged": len(merged), "coverage_gaps": gaps,
             "source_errors": errors + watched.get("source_errors", []),
-            **{k: watched[k] for k in ("since", "new") if k in watched}}
+            **{k: watched[k] for k in ("since", "new", "truncated", "watch_not_advanced") if k in watched}}
 
 
 @_tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
@@ -3749,7 +4274,10 @@ async def map_prune(map: str, keep: int = 300) -> dict:
     """Shrink a map: keep the seeds, every work marked to_read, read or dismissed (so a dismissed
     work stays dismissed), and the `keep` candidates most linked to the seeds; remove the other
     new candidates. Also merges duplicate records. Ask the user before calling."""
-    maps, db = _map_db()
+    return await _in_thread(_map_prune, map, keep)
+
+
+def _map_prune(maps, db, map, keep) -> dict:
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
@@ -3817,7 +4345,10 @@ async def map_export(map: str, states: list[MapState] | None = None) -> dict:
     whether each is in Zotero or has a note), to save in Obsidian with the Obsidian MCP's
     write_note outside the schema scope, e.g. 'Maps/<map name>.md'. states defaults to
     to_read and read."""
-    maps, db = _map_db()
+    return await _in_thread(_map_export, map, states)
+
+
+def _map_export(maps, db, map, states) -> dict:
     try:
         m = maps.map_row(db, map)
     except KeyError as e:
@@ -3855,10 +4386,26 @@ async def map_export(map: str, states: list[MapState] | None = None) -> dict:
 async def map_list() -> dict:
     """All literature maps with counts: seeds, works, to_read, read, dismissed.
     The user sees and manages maps on the 'Literature maps' page, which reads them live
-    (timeline, network, suggestions, reading-state buttons): https://claude.ai/artifact/34ALXDYU74t27u6qmYnfUT . Give this link whenever
+    (timeline, network, suggestions, reading-state buttons): https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s . Give this link whenever
     a map is created, expanded or asked for; it is the only map page."""
     maps, db = _map_db()
     return {"status": "ok", "maps": maps.summary(db)}
+
+
+@_tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def map_job_status(job_id: str) -> dict:
+    """State of a background job started by map_create, map_add_seeds, map_expand, map_intents,
+    map_add_patents or map_refresh (background=True, or answered with status 'pending' after ~100 s).
+    status: 'running', 'ok' (done: 'result' is exactly what the tool itself would have returned),
+    'error' (the tool raised: see 'error'), 'interrupted' (the server restarted while it ran: the
+    work already saved stays, run the tool again) or 'not_found' (unknown or older than 7 days).
+    'progress' is {done, total, step}. Poll every poll_after_s seconds (2) while running."""
+    maps, db = _map_db()
+    j = maps.job(db, job_id.strip().lower())
+    if j is None:
+        return {"status": "not_found", "progress": {"done": 0, "total": 0, "step": ""}, "result": None, "error": None}
+    return {"status": j["status"], "progress": j["progress"], "result": j["result"], "error": j["error"],
+            "tool": j["tool"], "created": j["created"], "updated": j["updated"], "finished": j["finished"]}
 
 
 # --- the three archives together: search, drafts, coverage, weekly report ---------------------
@@ -4127,8 +4674,12 @@ def _status() -> dict:
     last weekly run. No credentials, no secrets."""
     out: dict = {"service": "paper-doi-mcp", "version": VERSION, "gateway": GATEWAY_ENABLED, "patents": EPO_CONFIGURED}
     try:
-        maps, db = _map_db()
-        out["maps"] = len(maps.summary(db))
+        import maps
+        db = maps.connect()
+        try:
+            out["maps"] = len(maps.summary(db))
+        finally:
+            db.close()
     except Exception as e:  # noqa: BLE001
         out["maps"] = f"error: {e}"
     out["snapshots"] = _knowledge().status()

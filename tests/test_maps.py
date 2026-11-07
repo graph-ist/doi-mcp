@@ -164,6 +164,10 @@ def test_watch_adds_new_citing(db, monkeypatch, snapshot):
     async def batch_none(key, values):
         return [], []
     monkeypatch.setattr(s, "_oa_batch", batch_none)
+
+    async def no_oc(doi, kind):  # no real network from tests
+        return None
+    monkeypatch.setattr(s, "_oc_count", no_oc)
     out = run(s.map_refresh("W", new_citing=True))
     assert [n["id"] for n in out["new"]] == ["W99"] and calls[0].startswith("cites:W1,from_created_date:")
     assert run(s.map_refresh("W", new_citing=True))["new"] == []
