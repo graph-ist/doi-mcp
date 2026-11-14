@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-import server as s
+from paper_doi_mcp import server as s
 
 
 @pytest.mark.parametrize("api_key", ["", "test-key"])

@@ -1,4 +1,4 @@
-import server as s
+from paper_doi_mcp import server as s
 
 
 def cand(title, authors=("Smith",), year=2010, **kw):
@@ -105,7 +105,7 @@ def test_graph_links():
 
 
 def test_parse_ref_apa_with_initials_and_foreign_place():
-    import matching
+    from paper_doi_mcp import matching
     assert matching.parse_ref("Schön, D. A. (1983). The reflective practitioner: How professionals think in action. Basic Books.") \
         == ("Schön", 1983, "The reflective practitioner: How professionals think in action")
     assert matching.parse_ref("Cross, N. (1982). Designerly ways of knowing. Design Studies, 3(4), 221-227.") \
@@ -116,5 +116,5 @@ def test_parse_ref_apa_with_initials_and_foreign_place():
 
 
 def test_server_uses_the_shared_matching_module():
-    import matching
+    from paper_doi_mcp import matching
     assert s._assess is matching.assess and s._eligible is matching.eligible and s.TITLE_THRESHOLD is matching.TITLE_THRESHOLD

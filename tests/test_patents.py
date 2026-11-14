@@ -3,8 +3,8 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-import patents
-import server as s
+from paper_doi_mcp import patents
+from paper_doi_mcp import server as s
 
 XML = """<?xml version="1.0" encoding="UTF-8"?>
 <ops:world-patent-data xmlns:ops="http://ops.epo.org" xmlns="http://www.epo.org/exchange">

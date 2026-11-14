@@ -37,7 +37,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from matching import (  # one implementation of "is this record the cited work?", shared with the Zotero MCP
+from .matching import (  # one implementation of "is this record the cited work?", shared with the Zotero MCP
     TITLE_THRESHOLD, SHORT_TITLE_TOKENS, NON_WORK_TYPES, DERIVATIVE_RE, RETRACTED_PREFIX_RE, NAME_PARTICLES,
     REF_STOP as _REF_STOP, REF_YEAR as _REF_YEAR,
     strip_html as _strip_html, norm as _norm, clean_title as _clean_title, title_sim as _title_sim,
@@ -55,17 +55,22 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
+from .paths import state_dir
 
-VERSION = "0.8.2"
+from . import __version__ as VERSION
 _PUBLIC_HOSTS = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
-MAPS_PAGE = "https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s"
+# Optional URL of a page that shows the maps live (e.g. pages/literature-maps.html published as an artifact).
+MAPS_PAGE = os.environ.get("MAPS_PAGE_URL", "").strip()
 INSTRUCTIONS = (
     "Citation verification: find_doi then verify_doi (verify_book for editions); format_apa "
     "or format_reference only after verification; check_citations cross-checks in-text "
     "citations with a reference list offline. Literature search: search_literature; "
-    "paper_table for details on a list of ids. Persistent literature maps (map_* tools) are "
-    "viewed by the user on the 'Literature maps' page, the only map page: " + MAPS_PAGE +
-    " . Give that link whenever a map is created, expanded or asked for. Raw API passthroughs "
+    "paper_table for details on a list of ids. " + (
+    "Persistent literature maps (map_* tools) are viewed by the user on the 'Literature maps' "
+    "page, the only map page: " + MAPS_PAGE + " . Give that link whenever a map is created, "
+    "expanded or asked for. " if MAPS_PAGE else
+    "Persistent literature maps (map_* tools): map_export renders one as Markdown. ") +
+    "Raw API passthroughs "
     "(openalex_*, semantic_scholar*, orcid, google_books) return native JSON: keep per_page "
     "and limit small and use select/fields where the API offers them. search_everything looks "
     "through the user's own notes, PDF texts and highlights (not the web); check_draft checks a "
@@ -139,7 +144,7 @@ _CURRENT_JOB: contextvars.ContextVar = contextvars.ContextVar("current_job", def
 
 class _Job:
     def __init__(self, tool: str, map_key: str | None, background: bool):
-        import maps
+        from . import maps
         self.id = uuid.uuid4().hex
         self.tool, self.map_key, self.background = tool, map_key, background
         self.done, self.total, self.step = 0, 0, ""
@@ -148,7 +153,7 @@ class _Job:
         self.created = maps.now()
 
     def _db(self):
-        import maps
+        from . import maps
         return maps.connect(self.db_path, track=False)  # writes the jobs table only
 
     def _map_id(self, db) -> int | None:
@@ -161,7 +166,7 @@ class _Job:
         """Write the job row (once), so map_job_status can see it."""
         if self.persisted:
             return
-        import maps
+        from . import maps
         db = self._db()
         try:
             with db:
@@ -177,7 +182,7 @@ class _Job:
     def progress(self) -> None:
         if not self.persisted:
             return
-        import maps
+        from . import maps
         try:
             db = self._db()
             try:
@@ -195,7 +200,7 @@ class _Job:
             del _MAP_JOBS[self.map_key]
         if not self.persisted:
             return
-        import maps
+        from . import maps
         try:
             db = self._db()
             try:
@@ -1764,7 +1769,7 @@ def _patent_brief(p: dict) -> dict:
 
 
 def _patent_error(e: Exception) -> dict:
-    import patents
+    from . import patents
     if isinstance(e, patents.NotConfigured):
         return {"status": "not_configured", "detail": str(e)}
     if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 403:
@@ -1781,7 +1786,7 @@ async def patent_search(query: str, limit: int = 25, page: int = 1) -> dict:
     pa=samsung and pd>=2018', 'ic=G06F1/16', 'ct=EP1000000' (patents citing it), 'in=smith'
     (inventor). Returns number, title, applicants, dates, IPC classes, a short abstract and how
     many scientific works each cites. Use patent_get for the cited literature."""
-    import patents
+    from . import patents
     if not query.strip():
         raise ValueError("query must not be empty")
     limit = max(1, min(int(limit), 100))
@@ -1809,7 +1814,7 @@ async def patent_get(number: str, resolve_literature: int = 20, citing: bool = T
     a Crossref lookup with find_doi's acceptance rules may add 'doi_candidate' with its title
     score: a candidate to confirm with verify_doi, not a verified DOI.
     citing=True adds the patents that cite it (up to 25, with the total)."""
-    import patents
+    from . import patents
     num = patents.number(number)
     try:
         root = await patents.get(_http(), f"published-data/publication/epodoc/{num}/biblio")
@@ -2727,7 +2732,7 @@ async def _search_s2(query, year_from, year_to, limit, page, scope) -> dict:
 async def _search_philarchive(query, year_from, year_to, limit, page, scope) -> dict:
     # Local copy of PhilArchive (philosophy preprints), harvested over OAI-PMH by the weekly job:
     # no network here. Empty until the first harvest; the log says when it was last refreshed.
-    import philarchive
+    from . import philarchive
     db = philarchive.connect()
     try:
         info = philarchive.count(db)
@@ -2749,7 +2754,7 @@ async def _search_philarchive(query, year_from, year_to, limit, page, scope) -> 
 
 DATABASES = ["openalex", "europepmc", "semanticscholar", "hal", "doaj", "arxiv", "osf", "zenodo", "dnb", "philarchive"]
 
-SEARCH_LOG = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "searches.jsonl")
+SEARCH_LOG = os.path.join(state_dir(), "searches.jsonl")
 
 
 def _log_event(kind: str, **fields) -> None:
@@ -3404,7 +3409,7 @@ def _raw(fn):
 def _map_db():
     """(maps module, a new connection). Inside a tool call the connection is closed when the call
     ends; each call to _map_db gets its own, never shared between threads."""
-    import maps
+    from . import maps
     db = maps.connect()
     if (opened := _OPEN_DBS.get()) is not None:
         opened.append(db)
@@ -3416,7 +3421,7 @@ async def _in_thread(fn, *args):
     the CPU work of the map views and the database reads then do not freeze the event loop for
     the other tools. Connections are never shared between threads."""
     def work():
-        import maps
+        from . import maps
         db = maps.connect()
         try:
             return fn(maps, db, *args)
@@ -3709,7 +3714,7 @@ async def _pdf_reference_ids(maps, db, entries: list[str], budget: dict) -> tupl
 
 
 def _knowledge():
-    import knowledge
+    from . import knowledge
     return knowledge
 
 
@@ -4038,7 +4043,7 @@ def _slim_works(works: list[dict], compact: bool, fields: list[str] | None) -> l
     """Apply compact / fields to the public works in place; returns warnings for unknown fields."""
     warnings = []
     if fields is not None:
-        import maps as _maps
+        from . import maps as _maps
         known = set(_WORK_FIELDS) | set(_maps.NODE_FIELDS) | {k for w in works for k in w}
         unknown = [f for f in dict.fromkeys(fields) if f not in known]
         if unknown:
@@ -4372,7 +4377,7 @@ def _map_export(maps, db, map, states) -> dict:
 
     title = {"to_read": "To read", "read": "Read", "new": "New", "dismissed": "Dismissed"}
     parts = [f"# {m['name']}", "", m["description"] or "", "",
-             f"Literature map exported {maps.now()[:10]}; live view: {MAPS_PAGE}", "", "## Seeds", ""]
+             f"Literature map exported {maps.now()[:10]}" + (f"; live view: {MAPS_PAGE}" if MAPS_PAGE else ""), "", "## Seeds", ""]
     parts += [line(n) for n in works if n["role"] == "seed"]
     for st in states:
         rows = sorted((n for n in works if n["role"] == "candidate" and n["state"] == st),
@@ -4385,11 +4390,11 @@ def _map_export(maps, db, map, states) -> dict:
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def map_list() -> dict:
     """All literature maps with counts: seeds, works, to_read, read, dismissed.
-    The user sees and manages maps on the 'Literature maps' page, which reads them live
-    (timeline, network, suggestions, reading-state buttons): https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s . Give this link whenever
-    a map is created, expanded or asked for; it is the only map page."""
+    `page`, when set, is the page where the user sees and manages the maps live (timeline,
+    network, suggestions, reading-state buttons): give that link whenever a map is created,
+    expanded or asked for; it is the only map page."""
     maps, db = _map_db()
-    return {"status": "ok", "maps": maps.summary(db)}
+    return {"status": "ok", "maps": maps.summary(db), "page": MAPS_PAGE or None}
 
 
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -4414,7 +4419,7 @@ CorpusScope = Literal["all", "notes", "library", "annotations"]
 
 
 def _corpus_db():
-    import corpus
+    from . import corpus
     db = corpus.connect()
     corpus.sync(db)
     return corpus, db
@@ -4424,7 +4429,7 @@ SEMANTIC_EMBEDDER = None  # tests inject an embedder here; otherwise semantic.lo
 
 
 def _embedder():
-    import semantic
+    from . import semantic
     return SEMANTIC_EMBEDDER or semantic.load_embedder()
 
 
@@ -4448,7 +4453,7 @@ async def search_everything(query: str, scope: CorpusScope = "all", limit: int =
     corpus, db = _corpus_db()
     try:
         if semantic:
-            import semantic as sem
+            from . import semantic as sem
             emb = _embedder()
             if emb is None:
                 return {"status": "semantic_unavailable", "detail": sem.available()[1],
@@ -4564,7 +4569,7 @@ async def weekly_report(run_now: bool = False) -> dict:
     library, coverage per project, maintenance) as Markdown, with the date it was generated.
     run_now=True runs the job immediately (minutes: it calls OpenAlex and Crossref for every map
     and DOI; no backup, no harvest) instead of waiting for the timer."""
-    import weekly
+    from . import weekly
     if run_now:
         results = await weekly.run(sys.modules[__name__], _knowledge(), do_backup=False, do_harvest=False)
         path = results["report"]
@@ -4674,7 +4679,7 @@ def _status() -> dict:
     last weekly run. No credentials, no secrets."""
     out: dict = {"service": "paper-doi-mcp", "version": VERSION, "gateway": GATEWAY_ENABLED, "patents": EPO_CONFIGURED}
     try:
-        import maps
+        from . import maps
         db = maps.connect()
         try:
             out["maps"] = len(maps.summary(db))
@@ -4684,24 +4689,24 @@ def _status() -> dict:
         out["maps"] = f"error: {e}"
     out["snapshots"] = _knowledge().status()
     try:
-        import corpus
+        from . import corpus
         cdb = corpus.connect()
         out["corpus"] = corpus.stats(cdb)
         cdb.close()
-        import semantic
+        from . import semantic
         ok, why = semantic.available()
         out["semantic"] = {"available": ok, "detail": why, "model_dir": semantic.MODEL_DIR}
     except Exception as e:  # noqa: BLE001
         out["corpus"] = f"error: {e}"
     try:
-        import philarchive
+        from . import philarchive
         pdb = philarchive.connect()
         out["philarchive"] = philarchive.count(pdb)
         pdb.close()
     except Exception as e:  # noqa: BLE001
         out["philarchive"] = f"error: {e}"
     try:
-        import weekly
+        from . import weekly
         last = json.load(open(weekly.LAST, encoding="utf-8"))
         out["weekly"] = {"date": last.get("date"), "report": last.get("report"),
                          "errors": [k for k, v in last.items() if isinstance(v, dict) and "error" in v]}

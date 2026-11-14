@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-import maps
-import server as s
+from paper_doi_mcp import maps
+from paper_doi_mcp import server as s
 
 
 def node(i, refs=(), doi=None, cited=0):
@@ -76,7 +76,8 @@ def test_map_errors(db):
 
 @pytest.fixture
 def snapshot(monkeypatch, tmp_path):
-    import json, knowledge
+    import json
+    from paper_doi_mcp import knowledge
     d = tmp_path / "knowledge"; d.mkdir()
     (d / "library.json").write_text(json.dumps({"generated": "2026-11-01T12:00:00Z", "items": [
         {"key": "ZKEY0001", "doi": "10.1234/one", "title": "One", "tags": ["cited/x", "core/seminal", "sub/1"], "collections": ["Design › Theory"]},
@@ -319,7 +320,8 @@ def test_resolve_crossref_first_and_budget(monkeypatch):
 
 
 def test_snapshot_schema_version_is_checked(snapshot):
-    import json, knowledge
+    import json
+    from paper_doi_mcp import knowledge
     assert knowledge.library() is not None and knowledge.status()["library_snapshot"] == "2026-11-01T12:00:00Z"
     # a newer schema than this reader understands is refused, and map_get says why
     lib = json.loads((snapshot / "library.json").read_text())
@@ -335,7 +337,7 @@ def test_snapshot_schema_version_is_checked(snapshot):
 
 
 def test_bridge_matches_by_title_patent_and_shows_verification(snapshot):
-    import knowledge
+    from paper_doi_mcp import knowledge
     nodes = [
         # OpenAlex has a DOI for the book, the Zotero record has none: matched by title, author and year
         {"id": "W10", "doi": "10.5555/oa-book", "title": "Designerly Ways of Knowing", "first_author": "Nigel Cross", "year": 1982},

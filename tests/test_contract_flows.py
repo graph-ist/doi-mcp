@@ -9,10 +9,10 @@ import shutil
 
 import pytest
 
-import corpus
-import knowledge
-import maps
-import server as s
+from paper_doi_mcp import corpus
+from paper_doi_mcp import knowledge
+from paper_doi_mcp import maps
+from paper_doi_mcp import server as s
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "contract")
 

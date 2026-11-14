@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check doi-mcp service and API credentials. Run: sudo python3 ~/doi-mcp/check_creds.py
+"""Check doi-mcp service and API credentials. Run: sudo python3 deploy/check_creds.py
 
 Prints only outcomes and HTTP codes, never credential values.
 """

@@ -22,8 +22,9 @@ import re
 import struct
 import sys
 import time
+from .paths import state_dir
 
-STATE = os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0]
+STATE = state_dir()
 DEFAULT_MODEL = "multilingual-e5-small"
 MODEL_DIR = os.environ.get("SEMANTIC_MODEL_DIR", os.path.join(STATE, "models", DEFAULT_MODEL))
 MODEL_FILES = {
@@ -148,7 +149,7 @@ def download(model_dir: str = MODEL_DIR, fetch=None) -> dict:
 
 
 def main() -> None:
-    import corpus
+    from . import corpus
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     if cmd == "download":
         print(json.dumps(download(), indent=1))

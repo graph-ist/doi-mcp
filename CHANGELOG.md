@@ -2,8 +2,17 @@
 
 Renames and merges of tools break compatibility with clients: after the update the client must re-read the tool list (in Claude web, disable and re-enable the connector).
 
-## Unreleased
+## 0.9.0
 
+Incompatible for server installs
+- The modules now live in the `paper_doi_mcp` package; the commands are `paper-doi-mcp`, `paper-doi-weekly`, `paper-doi-semantic` and `paper-doi-philarchive` (or `python -m paper_doi_mcp`). A server that ran `python server.py` or `weekly.py` from a copy of the files installs the package (README, *Remote use*) and points its units at the commands; `deploy/doi-weekly.service` is updated. `check_creds.py` moved to `deploy/`.
+- The maps page link is no longer built in: set `MAPS_PAGE_URL` to keep giving it to Claude. `map_list` returns it as `page`.
+
+What's new
+- Published on PyPI as `paper-doi-mcp`, MIT licence; `uvx paper-doi-mcp` runs it without a clone.
+- Without `STATE_DIRECTORY` and without `/var/lib/doi-mcp`, the state goes to `~/.local/state/paper-doi-mcp` (or `$XDG_STATE_HOME`), so a desktop install works without root.
+
+Maps and jobs
 - Background jobs: `map_create`, `map_add_seeds`, `map_expand`, `map_intents`, `map_add_patents` and `map_refresh` accept `background` and, beyond 100 seconds, answer `pending` with a `job_id`; new tool `map_job_status` (status, progress, result). `jobs` table in `maps.sqlite` (migration at first start; `running` jobs become `interrupted` at restart); one job per map at a time (`busy`).
 - `map_create` answers `partial` if no seed can be added and carries the errors in `warnings`. `map_refresh` does not advance the check date if a seed errors or a page is full (`truncated`, `watch_not_advanced`); with `no_seeds` it also has `coverage_gaps` and `new`.
 - SQLite: WAL, 15-second wait on locks, migrations once per process, connection closed at the end of the request; a locked database gives `status: "busy"`. `map_get`, `map_suggest`, `map_export`, `map_prune` and the merging of duplicates run in threads; the merge reads inside the transaction.

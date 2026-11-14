@@ -11,8 +11,9 @@ import re
 import sqlite3
 import threading
 import time
+from .paths import state_dir
 
-DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "maps.sqlite")
+DB_PATH = os.path.join(state_dir(), "maps.sqlite")
 STATES = ("new", "to_read", "read", "dismissed")
 NODE_FIELDS = ("doi", "title", "first_author", "year", "cited_by", "field", "is_retracted", "subfield", "topic", "momentum", "zotero_key", "cited_by_oc")
 

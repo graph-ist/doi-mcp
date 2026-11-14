@@ -921,7 +921,6 @@ wheels = [
 
 [[package]]
 name = "paper-doi-mcp"
-version = "0.8.2"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

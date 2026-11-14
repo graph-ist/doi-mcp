@@ -22,8 +22,9 @@ import sqlite3
 import sys
 import tarfile
 import time
+from .paths import state_dir
 
-STATE = os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0]
+STATE = state_dir()
 BACKUP_DIR = os.environ.get("BACKUP_DIR", os.path.join(STATE, "backups"))
 BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "8"))
 LAST = os.path.join(STATE, "weekly-last.json")
@@ -59,7 +60,7 @@ def coverage(knowledge) -> dict:
 
 
 def harvest() -> dict:
-    import philarchive
+    from . import philarchive
     db = philarchive.connect()
     try:
         return philarchive.harvest(db)
@@ -69,8 +70,8 @@ def harvest() -> dict:
 
 def embed(minutes: float = 30.0) -> dict:
     """Embed the passages still without a vector, within a time budget (the rest next week)."""
-    import corpus
-    import semantic
+    from . import corpus
+    from . import semantic
     emb = semantic.load_embedder()
     if emb is None:
         return {"status": "disabled", "detail": semantic.available()[1]}
@@ -232,9 +233,8 @@ async def run(server, knowledge, do_backup: bool = True, do_harvest: bool = True
 
 
 def main() -> None:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import knowledge
-    import server
+    from . import knowledge
+    from . import server
     out = asyncio.run(run(server, knowledge, do_backup="--no-backup" not in sys.argv, do_harvest="--no-harvest" not in sys.argv))
     print(json.dumps({k: (v if k in ("date", "report") else ("error" if isinstance(v, dict) and "error" in v else "ok")) for k, v in out.items()}))
 

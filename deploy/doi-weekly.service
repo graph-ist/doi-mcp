@@ -15,7 +15,7 @@ Environment=KNOWLEDGE_DIR=/var/lib/knowledge
 # NTFY_URL=https://ntfy.sh/<topic> (and NTFY_TOKEN) for a push notification when the report is ready
 EnvironmentFile=-/etc/doi-mcp/env
 WorkingDirectory=/opt/doi-mcp
-ExecStart=/opt/doi-mcp/.venv/bin/python /opt/doi-mcp/weekly.py
+ExecStart=/opt/doi-mcp/.venv/bin/paper-doi-weekly
 ReadWritePaths=/var/lib/doi-mcp /var/lib/knowledge
 ProtectSystem=strict
 ProtectHome=true

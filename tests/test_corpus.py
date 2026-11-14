@@ -3,8 +3,8 @@ import os
 
 import pytest
 
-import corpus
-import knowledge
+from paper_doi_mcp import corpus
+from paper_doi_mcp import knowledge
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ def test_index_follows_the_files_and_search_locates_passages(kdir):
 
 def test_search_everything_tool(kdir):
     import asyncio
-    import server as s
+    from paper_doi_mcp import server as s
     out = asyncio.run(s.search_everything("Schön", scope="notes"))
     assert out["status"] == "ok" and out["results"][0]["locator"] == "My Observations" and out["index"]["sources"] == 2
     assert asyncio.run(s.search_everything("x", scope="all", limit=500))["returned"] == 0

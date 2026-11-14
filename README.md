@@ -1,6 +1,48 @@
 # paper-doi-mcp
 
+[![PyPI](https://img.shields.io/pypi/v/paper-doi-mcp.svg)](https://pypi.org/project/paper-doi-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 An MCP server for verifying academic citations and searching the literature. It resolves and checks DOIs, verifies book editions, searches several open databases and builds citation graphs to visualise. The guiding principle is precision: when a match is not certain, the tool says so instead of proposing a plausible DOI.
+
+## Installation
+
+The package is on PyPI as [`paper-doi-mcp`](https://pypi.org/project/paper-doi-mcp/) and needs Python 3.10 or later. The simplest way to run it is [uv](https://docs.astral.sh/uv/): `uvx paper-doi-mcp` downloads it into an isolated environment and starts the stdio server. No key is required; `CONTACT_EMAIL` is recommended, since Crossref and OpenAlex give faster service to requests that carry one. The optional keys are listed under [Environment variables](#environment-variables).
+
+### Claude Desktop
+
+In `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`):
+
+```json
+{
+  "mcpServers": {
+    "paper-doi": {
+      "command": "uvx",
+      "args": ["paper-doi-mcp"],
+      "env": { "CONTACT_EMAIL": "you@example.org" }
+    }
+  }
+}
+```
+
+If Claude Desktop does not find `uvx`, use its absolute path (`which uvx`).
+
+### Claude Code
+
+```sh
+claude mcp add paper-doi --env CONTACT_EMAIL=you@example.org -- uvx paper-doi-mcp
+```
+
+### pip
+
+```sh
+pip install paper-doi-mcp            # or: pip install "paper-doi-mcp[semantic]" for local embeddings
+paper-doi-mcp                        # stdio; MCP_TRANSPORT=http for Streamable HTTP
+```
+
+The package installs four commands: `paper-doi-mcp` (the server), `paper-doi-weekly` (the weekly job), `paper-doi-semantic` (`download | embed | status` for the embedding model) and `paper-doi-philarchive` (`harvest`). Maps, the corpus index and the search log are kept in `STATE_DIRECTORY`; when it is not set, the server uses `/var/lib/doi-mcp` if that folder exists and `~/.local/state/paper-doi-mcp` otherwise.
+
+The tools that read your Zotero library and Obsidian notes (`search_everything`, `check_draft`, `coverage_report`, the library columns of the maps) need the snapshots written by the companion servers [zotero-mcp](https://github.com/graph-ist/zotero-mcp) and [obsidian-mcp](https://github.com/graph-ist/obsidian-mcp) in a shared `KNOWLEDGE_DIR`. Without them those tools say so and everything else works.
 
 ## Architecture
 
@@ -68,7 +110,7 @@ The server has two layers. The verification and search tools (from `find_doi` to
 | `format_reference` | Reference of a DOI in BibTeX, RIS, CSL-JSON or in any CSL style (`chicago-author-date`, `modern-language-association`, `ieee`…), through content negotiation. Same warning as `format_apa`: the metadata is not verified. | doi.org |
 | `check_retractions` | Retractions, expressions of concern and corrections for a list of DOIs (up to 1000, e.g. a whole Zotero library) or, with `map`, for all the works with a DOI in a map, which are marked; from Crossref with Retraction Watch data. DataCite DOIs end up in `not_checked`. At most 2 parallel requests to Crossref, with retries on 429s. | Crossref |
 | `check_citations` | Cross-check, without network, between the author-date citations in the text and the APA bibliography: citations without an entry, uncited entries, discordant years, ambiguous entries (same author and year without a suffix). It matches only the first author's surname and the year: the entries must then be verified with `find_doi` and `verify_doi`. | Local computation |
-| `search_literature` | Search with boolean syntax on one or more databases, with abstracts and keywords, deduplication and a reproducible log of the queries. `philarchive` queries the local copy of PhilArchive harvested via OAI-PMH by the weekly job (`philarchive.py harvest`). | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo, DNB, PhilArchive (local copy) |
+| `search_literature` | Search with boolean syntax on one or more databases, with abstracts and keywords, deduplication and a reproducible log of the queries. `philarchive` queries the local copy of PhilArchive harvested via OAI-PMH by the weekly job (`paper-doi-philarchive harvest`). | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo, DNB, PhilArchive (local copy) |
 | `citation_graph` | Citation graph around one or more works: references, most-cited citing works, citation edges, co-cited pairs and bibliographic coupling (shared references). For each node it says how many seeds it is linked to. Designed for D3 visualisations (year/citations timeline, similarity network). With `check_coverage` (default) it compares for each seed with a DOI the counts of references and citations between OpenAlex and Semantic Scholar (`coverage_check`), to tell a real absence from a coverage gap. | OpenAlex, Semantic Scholar (check only) |
 | `map_create`, `map_add_seeds` | Creates a persistent literature map (SQLite in `STATE_DIRECTORY`) and adds the seeds (DOI or OpenAlex id); a candidate already in the map becomes a seed. If no seed can be added, `map_create` answers `status: "partial"` (map created) with `detail` and the errors in `warnings`; with seeds only partly successful it stays `ok` but with `warnings`. | OpenAlex |
 | `map_expand` | Grows the map from the seeds: `references`, `citing`, `similar` (Semantic Scholar recommendations), `authors` (most-cited works of the first three authors). New works enter as candidates with state `new`: at most `max_new` per call (150), the most linked first; you can expand from any work in the map; duplicates are merged; at most 2000 works per map. | OpenAlex, Semantic Scholar |
@@ -248,7 +290,7 @@ The prompts above concern a single server. The whole cycle (find, verify, acquir
 
 ## Known limits
 
-- Philosophy is poorly covered by all the sources; PhilPapers has no accessible search API. PhilArchive's OAI-PMH allows only harvesting: the weekly job keeps a local copy of it (`philarchive.py`), queryable as the `philarchive` database, which covers the preprints and not the whole index. The `dnb` database covers monographs and translations in German, without abstracts.
+- Philosophy is poorly covered by all the sources; PhilPapers has no accessible search API. PhilArchive's OAI-PMH allows only harvesting: the weekly job keeps a local copy of it (`paper-doi-philarchive`), queryable as the `philarchive` database, which covers the preprints and not the whole index. The `dnb` database covers monographs and translations in German, without abstracts.
 - OpenAlex has incomplete reference lists for many humanities and older works.
 - In `search_literature` the filters `doc_types`, `open_access_only` and `exclude_retracted` apply only to OpenAlex; the other databases report them in `ignored_filters`. Deduplication applies to a single page.
 - Without an API key Semantic Scholar often answers 429.
@@ -280,17 +322,17 @@ The suite runs without network. `tests/fixtures/find_doi_cases.json` is a refere
 
 | File | Contents |
 |---|---|
-| `server.py` | Tools, prompts, HTTP client, stdio and HTTP modes |
-| `matching.py` | The bibliographic comparison (title, surname, year, errata and replies) used by `find_doi`, `verify_doi`, `patent_get` and the maps; standard library only. The Zotero MCP keeps an identical copy (`zotero_mcp/matching.py`) for `create_item_from_doi` and `extract_references`: the two copies must be updated together |
-| `maps.py`, `knowledge.py`, `patents.py` | Persistent maps (SQLite), reading of the Zotero and Obsidian snapshots with coverage and citekeys, EPO OPS |
-| `corpus.py`, `semantic.py` | FTS5 index of the corpus (notes, pages, annotations) and semantic layer with local embeddings; `semantic.py download | embed | status` from the command line |
-| `philarchive.py`, `weekly.py` | OAI-PMH harvest of PhilArchive into a local copy; weekly job (maps, retractions, coverage, harvest, embeddings, backup, report, ntfy) |
-| `check_creds.py` | Check of the service's credentials on the Pi, without printing them |
-| `deploy/` | systemd units and timer of the weekly job |
+| `paper_doi_mcp/server.py` | Tools, prompts, HTTP client, stdio and HTTP modes |
+| `paper_doi_mcp/paths.py` | Default state folder |
+| `paper_doi_mcp/matching.py` | The bibliographic comparison (title, surname, year, errata and replies) used by `find_doi`, `verify_doi`, `patent_get` and the maps; standard library only. The Zotero MCP keeps an identical copy (`zotero_mcp/matching.py`) for `create_item_from_doi` and `extract_references`: the two copies must be updated together |
+| `paper_doi_mcp/maps.py`, `knowledge.py`, `patents.py` | Persistent maps (SQLite), reading of the Zotero and Obsidian snapshots with coverage and citekeys, EPO OPS |
+| `paper_doi_mcp/corpus.py`, `semantic.py` | FTS5 index of the corpus (notes, pages, annotations) and semantic layer with local embeddings; `paper-doi-semantic download | embed | status` from the command line |
+| `paper_doi_mcp/philarchive.py`, `weekly.py` | OAI-PMH harvest of PhilArchive into a local copy; weekly job (maps, retractions, coverage, harvest, embeddings, backup, report, ntfy) |
+| `deploy/` | systemd units and timer of the weekly job; `check_creds.py`, a check of the service's credentials on the server, without printing them |
 | `pages/` | Sources of the *Literature maps* and *Knowledge views* pages |
 | `skills/` | The Claude skills that orchestrate the flows between the three MCPs (see below) |
 | `tests/` | Offline tests, per module; `tests/fixtures/contract/` the contract files of the other two MCPs |
-| `pyproject.toml`, `uv.lock` | Dependencies and locked versions |
+| `pyproject.toml`, `uv.lock` | Package metadata, dependencies and locked versions |
 
 ### Local use (stdio), for example in VS Code
 
@@ -299,8 +341,8 @@ The suite runs without network. `tests/fixtures/find_doi_cases.json` is a refere
   "servers": {
     "paper-doi": {
       "type": "stdio",
-      "command": "uv",
-      "args": ["--directory", "/path/to/doi-mcp", "run", "server.py"],
+      "command": "uvx",
+      "args": ["paper-doi-mcp"],
       "env": {
         "CONTACT_EMAIL": "you@example.org",
         "OPENALEX_API_KEY": "${input:openalex-api-key}",
@@ -345,7 +387,7 @@ The suite runs without network. `tests/fixtures/find_doi_cases.json` is a refere
 }
 ```
 
-In VS Code, open the configuration with **MCP: Open User Configuration** and merge the server entry and the inputs with those already present. At first start VS Code asks for the keys in protected fields, without saving them in the JSON. After changes to the code or the variables, restart `paper-doi` from **MCP: List Servers**. To use the sources without a key, omit the corresponding variable and its input.
+In VS Code, open the configuration with **MCP: Open User Configuration** and merge the server entry and the inputs with those already present. At first start VS Code asks for the keys in protected fields, without saving them in the JSON. To run a local checkout instead of the published package, use `"command": "uv"` with `"args": ["--directory", "/path/to/doi-mcp", "run", "paper-doi-mcp"]`. After changes to the code or the variables, restart `paper-doi` from **MCP: List Servers**. To use the sources without a key, omit the corresponding variable and its input.
 
 ### Remote use (HTTP), for example for Claude web
 
@@ -353,21 +395,23 @@ With `MCP_TRANSPORT=http` the server exposes Streamable HTTP on `127.0.0.1` and 
 
 The keys `OPENALEX_API_KEY` and `SEMANTIC_SCHOLAR_API_KEY` must be set in the remote service's environment, not in the HTTP client's configuration. The protected VS Code inputs of the stdio example do not configure a remote server. Restart the service after adding or changing them.
 
-On a server without uv you can install with pip from the locked versions:
+On a server, install the dependencies from the locked versions and then the package itself without resolving dependencies again:
 
 ```sh
 uv export --no-dev --no-emit-project --format requirements-txt > requirements.lock.txt
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock.txt
+.venv/bin/pip install --no-deps paper-doi-mcp==0.9.0     # or --no-deps /path/to/doi-mcp
 ```
 
-To update: copy `server.py`, `maps.py`, `knowledge.py`, `patents.py`, `matching.py`, `corpus.py`, `philarchive.py`, `weekly.py` and `semantic.py` (and, if the dependencies change, redo the installation), then restart the service. After changes to tools or prompts, in Claude web the connector must be disabled and re-enabled so that it re-reads the list.
+The service then runs `.venv/bin/paper-doi-mcp` (with `MCP_TRANSPORT=http`). To update, install the new version the same way (redo the first step if the dependencies changed) and restart the service. After changes to tools or prompts, in Claude web the connector must be disabled and re-enabled so that it re-reads the list.
 
 ## Environment variables
 
 | Variable | Use |
 |---|---|
 | `CONTACT_EMAIL` | Email for the Crossref and OpenAlex polite pool (recommended) |
-| `STATE_DIRECTORY` | Folder of the maps (`maps.sqlite`); default `/var/lib/doi-mcp`, which systemd sets with `StateDirectory=doi-mcp` |
+| `STATE_DIRECTORY` | Folder of the maps, corpus index, PhilArchive copy and search log; systemd sets it with `StateDirectory=doi-mcp`. Default: `/var/lib/doi-mcp` if it exists, otherwise `$XDG_STATE_HOME/paper-doi-mcp` (`~/.local/state/paper-doi-mcp`) |
+| `MAPS_PAGE_URL` | Optional: URL of the page that shows the maps live (see [Maps](#maps-bridge-with-zotero-and-obsidian)); the server gives it to Claude whenever a map is created or listed |
 | `IA_ACCESS_KEY`, `IA_SECRET_KEY` | archive.org S3 keys (optional): search works without them too; if present they are sent as `Authorization: LOW` |
 | `OPENALEX_API_KEY` | OpenAlex key: `api_key` parameter on `api.openalex.org`, Bearer header on `user.openalex.org` for corrections |
 | `OPENALEX_ENABLE_WRITES` | Enables the confirmed OpenAlex account writes only if set to `true`; default off |
@@ -398,9 +442,9 @@ The *Knowledge views* page (source `pages/knowledge-views.html`, `mcp` capabilit
 
 ### Weekly job and corpus
 
-`weekly.py` (units and timer in `deploy/`: `doi-weekly.service`, `doi-weekly.timer`, Monday morning) runs `map_refresh` with `new_citing` on every map, `check_retractions` on all the library's DOIs, coverage for each project (tags `cited/*`), the incremental harvest of PhilArchive and the backups with rotation; it writes `KNOWLEDGE_DIR/reports/weekly-<date>.md`, which the Obsidian MCP copies into the vault's Inbox folder within an hour. Each step fails by itself without stopping the others; the outcome is in `STATE_DIRECTORY/weekly-last.json` and in `GET /status`. The weekly job's service writes in `KNOWLEDGE_DIR/reports`, while the server stays read-only on `KNOWLEDGE_DIR`: the folder must be created writable for its user, for example `install -d -o doi-mcp -g knowledge -m 2750 /var/lib/knowledge/reports`.
+`paper-doi-weekly` (units and timer in `deploy/`: `doi-weekly.service`, `doi-weekly.timer`, Monday morning) runs `map_refresh` with `new_citing` on every map, `check_retractions` on all the library's DOIs, coverage for each project (tags `cited/*`), the incremental harvest of PhilArchive and the backups with rotation; it writes `KNOWLEDGE_DIR/reports/weekly-<date>.md`, which the Obsidian MCP copies into the vault's Inbox folder within an hour. Each step fails by itself without stopping the others; the outcome is in `STATE_DIRECTORY/weekly-last.json` and in `GET /status`. The weekly job's service writes in `KNOWLEDGE_DIR/reports`, while the server stays read-only on `KNOWLEDGE_DIR`: the folder must be created writable for its user, for example `install -d -o doi-mcp -g knowledge -m 2750 /var/lib/knowledge/reports`.
 
-The semantic layer (`semantic.py`) uses multilingual-e5-small in ONNX (Xenova export, quantised, 384 dimensions) with onnxruntime, locally: it is installed with `uv sync --extra semantic` and `semantic.py download` downloads `model_quantized.onnx` and `tokenizer.json` into `SEMANTIC_MODEL_DIR` (default `STATE_DIRECTORY/models/multilingual-e5-small`); check the Hugging Face page and the file sizes yourself. The vectors are in `corpus.sqlite` (table `embeddings`, float32) and the comparison is an exact cosine in numpy over all the passages. Indexing is incremental: `search_everything(semantic=true)` does five seconds per call, the weekly job thirty minutes, `semantic.py embed --minutes N` as much as you want; on the Pi 4 the first pass on a large corpus takes hours. Without the model or dependencies the tool answers `semantic_unavailable` and lexical search remains available. The Zotero MCP's `check_claims` stays lexical: to look for evidence across languages use `search_everything(semantic=true, zotero_key=…)`.
+The semantic layer (`paper_doi_mcp/semantic.py`) uses multilingual-e5-small in ONNX (Xenova export, quantised, 384 dimensions) with onnxruntime, locally: it is installed with `uv sync --extra semantic` and `paper-doi-semantic download` downloads `model_quantized.onnx` and `tokenizer.json` into `SEMANTIC_MODEL_DIR` (default `STATE_DIRECTORY/models/multilingual-e5-small`); check the Hugging Face page and the file sizes yourself. The vectors are in `corpus.sqlite` (table `embeddings`, float32) and the comparison is an exact cosine in numpy over all the passages. Indexing is incremental: `search_everything(semantic=true)` does five seconds per call, the weekly job thirty minutes, `paper-doi-semantic embed --minutes N` as much as you want; on the Pi 4 the first pass on a large corpus takes hours. Without the model or dependencies the tool answers `semantic_unavailable` and lexical search remains available. The Zotero MCP's `check_claims` stays lexical: to look for evidence across languages use `search_everything(semantic=true, zotero_key=…)`.
 
 The corpus of `search_everything` comes from the files of the other two servers: `notes_text.json` (every note, without frontmatter) from the Obsidian MCP at every snapshot, `fulltext/KEY.json` (pages of the PDF or EPUB and annotations) from the Zotero MCP with `index_fulltext`. The index is lexical (FTS5, diacritics ignored): a search in Italian does not find a passage in German. A semantic index (embeddings) is not there: it requires a model on the Pi or an external computation, and remains a choice to be made.
 
@@ -419,7 +463,7 @@ When OpenAlex does not have a seed's bibliography (books, humanities), `map_add_
 
 `map_job_status(job_id)` returns `running`, `ok` (with `result`, the original response), `error`, `interrupted` (the server was restarted while it was running: what was already saved stays, it must be relaunched) or `not_found`, with progress in `progress`. Jobs are in the `jobs` table of `maps.sqlite` and are deleted after 7 days. One job runs at a time on a map: a second call receives `{"status": "busy", "job_id": …}`. If the database is locked for more than 15 seconds the tools answer `{"status": "busy"}` instead of a protocol error.
 
-The *Literature maps* page (https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s) reads the maps live through the DOI connector. The source is `pages/literature-maps.html`: it is republished at the same link with the `mcp` capability (DOI connector, tools `map_list`, `map_get`, `map_suggest`, `map_mark`, `map_remove`, `map_rename`, `map_delete`, `map_add_seeds`, `map_expand`, `map_prune`, `map_refresh`, `map_intents`, `paper_table`, and `map_job_status` for background jobs) and `sample` (to propose group names); it also declares the Zotero (`refresh_library_snapshot`) and Obsidian (`refresh_notes_snapshot`) connectors for the refresh button. It has a timeline (vertical axis: citations or momentum) and a network (co-citation or coupling, with a threshold); filters for years, OpenAlex subfield, works most linked to the seeds and off-topic works; core / non-core colour (filled = in Zotero), by recency, state, field or group; a work panel with Abstract, Make seed, Expand from here, Add to Zotero (with open-access PDF), "Cites / Cited by" and group; "Check relevance" (Claude judges from the abstracts whether a candidate is on topic); "Reduce map" (`map_prune`); network groups with names proposed by Claude; a sortable list with To read / Read / Dismiss. The Refresh button updates snapshots and metadata (`map_refresh`) and flags the seeds with many more citations in OpenCitations than in OpenAlex. Patents are hexagons with dotted edges (examiner's citations), books absent from OpenAlex triangles; the chips show `in Zotero` (with the matching criterion) and `verified`; "Citation intents" (`map_intents`, for the seeds or for the selected work) annotates the edges: in the Cites / Cited by list a `!` marks the citing sentences with markers of criticism and a `★` the influential citations, and the Debate entry of the panel reports the sentences themselves.
+The *Literature maps* page reads the maps live through the DOI connector. The source is `pages/literature-maps.html`: publish it as a Claude artifact and set its link in `MAPS_PAGE_URL`. It is published with the `mcp` capability (DOI connector, tools `map_list`, `map_get`, `map_suggest`, `map_mark`, `map_remove`, `map_rename`, `map_delete`, `map_add_seeds`, `map_expand`, `map_prune`, `map_refresh`, `map_intents`, `paper_table`, and `map_job_status` for background jobs) and `sample` (to propose group names); it also declares the Zotero (`refresh_library_snapshot`) and Obsidian (`refresh_notes_snapshot`) connectors for the refresh button. It has a timeline (vertical axis: citations or momentum) and a network (co-citation or coupling, with a threshold); filters for years, OpenAlex subfield, works most linked to the seeds and off-topic works; core / non-core colour (filled = in Zotero), by recency, state, field or group; a work panel with Abstract, Make seed, Expand from here, Add to Zotero (with open-access PDF), "Cites / Cited by" and group; "Check relevance" (Claude judges from the abstracts whether a candidate is on topic); "Reduce map" (`map_prune`); network groups with names proposed by Claude; a sortable list with To read / Read / Dismiss. The Refresh button updates snapshots and metadata (`map_refresh`) and flags the seeds with many more citations in OpenCitations than in OpenAlex. Patents are hexagons with dotted edges (examiner's citations), books absent from OpenAlex triangles; the chips show `in Zotero` (with the matching criterion) and `verified`; "Citation intents" (`map_intents`, for the seeds or for the selected work) annotates the edges: in the Cites / Cited by list a `!` marks the citing sentences with markers of criticism and a `★` the influential citations, and the Debate entry of the panel reports the sentences themselves.
 
 Example systemd drop-in (`/etc/systemd/system/doi-mcp.service.d/state.conf`):
 
