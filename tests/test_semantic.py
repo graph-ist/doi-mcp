@@ -4,10 +4,10 @@ import os
 
 import pytest
 
-import corpus
-import knowledge
-import semantic
-import server as s
+from paper_doi_mcp import corpus
+from paper_doi_mcp import knowledge
+from paper_doi_mcp import semantic
+from paper_doi_mcp import server as s
 
 
 @pytest.fixture

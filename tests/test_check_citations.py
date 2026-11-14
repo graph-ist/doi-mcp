@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-import server as s
+from paper_doi_mcp import server as s
 
 TEXT = """Affordances were introduced by Gibson (1979) and reinterpreted later (Norman, 2013).
 Think-aloud is limited (Ericsson & Simon, 1993; Fox et al., 2011), see also Gaver (1991, p. 80).

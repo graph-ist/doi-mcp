@@ -3,8 +3,8 @@ import asyncio
 
 import pytest
 
-import maps
-import server as s
+from paper_doi_mcp import maps
+from paper_doi_mcp import server as s
 from test_maps import db, node, run  # noqa: F401  (db is a fixture)
 
 

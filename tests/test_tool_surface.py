@@ -2,11 +2,10 @@
 import asyncio
 import json
 import re
-import tomllib
 
 import pytest
 
-import server as s
+from paper_doi_mcp import server as s
 
 TOOLS = {t.name: t for t in asyncio.run(s.mcp.list_tools())}
 MAX_DESCRIPTION_CHARS = 1800
@@ -25,7 +24,11 @@ def test_tool_names_are_snake_case_and_prefixed_by_family():
 def test_every_tool_has_a_bounded_description(name):
     tool = TOOLS[name]
     assert tool.description and tool.description.strip()
-    assert len(tool.description) <= MAX_DESCRIPTION_CHARS, (name, len(tool.description))
+    # Python 3.13+ strips docstring indentation at compile time, older versions do not:
+    # measure the dedented text so the limit means the same on every supported version.
+    import inspect
+    text = inspect.cleandoc(tool.description)
+    assert len(text) <= MAX_DESCRIPTION_CHARS, (name, len(text))
 
 
 @pytest.mark.parametrize("name", sorted(TOOLS))
@@ -68,21 +71,20 @@ def test_direct_calls_still_raise_for_tests():
         asyncio.run(s.check_retractions())
 
 
-def test_wheel_includes_every_module_server_imports():
-    with open("pyproject.toml", "rb") as f:
-        included = set(tomllib.load(f)["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"])
-    src = open("server.py", encoding="utf-8").read()
+def test_wheel_ships_the_package():
+    """Every module lives in paper_doi_mcp/, which the wheel ships whole: no stray top-level module."""
     import os
-    here = {f[:-3] for f in os.listdir(".") if f.endswith(".py") and f != "server.py"}
-    local = {m + ".py" for m in re.findall(r"^\s*import (\w+)\b", src, re.M) if m in here}
-    assert local and local <= included
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+
+    with open("pyproject.toml", "rb") as f:
+        assert tomllib.load(f)["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["paper_doi_mcp"]
+    assert not [f for f in os.listdir(".") if f.endswith(".py")]
 
 
 def test_no_top_level_name_is_defined_twice():
     """A later def silently shadows an earlier one (this broke the Boolean query expansion
     of four search adapters once); the server module must define each name once."""
     import ast
-    tree = ast.parse(open("server.py", encoding="utf-8").read())
+    tree = ast.parse(open(s.__file__, encoding="utf-8").read())
     names = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
     dupes = {n for n in names if names.count(n) > 1}
     assert not dupes, dupes

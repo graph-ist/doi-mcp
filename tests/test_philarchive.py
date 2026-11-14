@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-import philarchive
-import server as s
+from paper_doi_mcp import philarchive
+from paper_doi_mcp import server as s
 
 PAGE1 = """<?xml version="1.0"?>
 <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/"><ListRecords>

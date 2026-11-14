@@ -15,9 +15,10 @@ import re
 import sqlite3
 import time
 
-import knowledge
+from . import knowledge
+from .paths import state_dir
 
-DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "corpus.sqlite")
+DB_PATH = os.path.join(state_dir(), "corpus.sqlite")
 CHUNK = 1200
 SCOPES = ("notes", "library", "annotations")
 
@@ -163,7 +164,7 @@ def embed_pending(db: sqlite3.Connection, embedder, budget_seconds: float = 20.0
     """Embed passages that have no vector yet, oldest first, until the time budget is spent;
     the rest waits for the next call (search_everything spends a few seconds, the weekly job
     and semantic.py embed spend as long as needed)."""
-    import semantic
+    from . import semantic
     started, done = time.monotonic(), 0
     while time.monotonic() - started < budget_seconds:
         rows = db.execute("SELECT rowid, title, text FROM passages WHERE rowid NOT IN (SELECT passage FROM embeddings)"

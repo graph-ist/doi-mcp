@@ -5,8 +5,8 @@ import os
 import httpx
 import pytest
 
-import knowledge
-import server as s
+from paper_doi_mcp import knowledge
+from paper_doi_mcp import server as s
 
 
 @pytest.fixture
@@ -61,7 +61,7 @@ def test_coverage_report(snap):
 
 
 def test_weekly_job_writes_a_report_and_survives_a_failing_step(snap, tmp_path, monkeypatch):
-    import weekly
+    from paper_doi_mcp import weekly
     monkeypatch.setattr(weekly, "STATE", str(tmp_path / "state"))
     monkeypatch.setattr(weekly, "LAST", str(tmp_path / "state" / "weekly-last.json"))
     monkeypatch.setattr(weekly, "BACKUP_DIR", str(tmp_path / "backups"))
@@ -96,7 +96,7 @@ def test_weekly_job_writes_a_report_and_survives_a_failing_step(snap, tmp_path, 
 
 
 def test_http_auth_is_bearer_only_and_status_is_loopback(snap, tmp_path, monkeypatch):
-    import maps, corpus, philarchive, weekly
+    from paper_doi_mcp import maps, corpus, philarchive, weekly
     monkeypatch.setattr(maps, "DB_PATH", str(tmp_path / "maps.sqlite"))
     monkeypatch.setattr(corpus, "DB_PATH", str(tmp_path / "corpus.sqlite"))
     monkeypatch.setattr(philarchive, "DB_PATH", str(tmp_path / "philarchive.sqlite"))
@@ -152,7 +152,7 @@ def test_search_register_and_search_log(tmp_path, monkeypatch):
 
 
 def test_weekly_report_lists_searches_and_notifies(snap, tmp_path, monkeypatch):
-    import weekly
+    from paper_doi_mcp import weekly
     monkeypatch.setattr(weekly, "STATE", str(tmp_path / "state"))
     monkeypatch.setattr(weekly, "LAST", str(tmp_path / "state" / "weekly-last.json"))
     monkeypatch.setattr(s, "SEARCH_LOG", str(tmp_path / "searches.jsonl"))

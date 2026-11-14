@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-import server as s
+from paper_doi_mcp import server as s
 
 CASES = json.load(open(os.path.join(os.path.dirname(__file__), "fixtures", "find_doi_cases.json"),
                        encoding="utf-8"))["cases"]

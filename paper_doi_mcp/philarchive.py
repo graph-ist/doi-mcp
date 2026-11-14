@@ -12,9 +12,10 @@ import sqlite3
 import sys
 import time
 import xml.etree.ElementTree as ET
+from .paths import state_dir
 
 OAI_URL = os.environ.get("PHILARCHIVE_OAI_URL", "https://philarchive.org/oai.pl")
-DB_PATH = os.path.join(os.environ.get("STATE_DIRECTORY", "/var/lib/doi-mcp").split(":")[0], "philarchive.sqlite")
+DB_PATH = os.path.join(state_dir(), "philarchive.sqlite")
 NS = {"oai": "http://www.openarchives.org/OAI/2.0/", "dc": "http://purl.org/dc/elements/1.1/",
       "oai_dc": "http://www.openarchives.org/OAI/2.0/oai_dc/"}
 SCHEMA = """

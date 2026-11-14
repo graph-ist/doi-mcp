@@ -11,7 +11,7 @@ import json
 import os
 import re
 
-import matching
+from . import matching
 
 KNOWLEDGE_DIR = os.environ.get("KNOWLEDGE_DIR", "/var/lib/knowledge")
 # Highest schema_version of each snapshot this reader understands. The writers (Zotero MCP
