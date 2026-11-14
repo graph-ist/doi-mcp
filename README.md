@@ -1,121 +1,121 @@
 # paper-doi-mcp
 
-Server MCP per verificare citazioni accademiche e cercare letteratura. Risolve e controlla DOI, verifica edizioni di libri, cerca su più database aperti e costruisce grafi di citazione da visualizzare. Il principio guida è la precisione: quando una corrispondenza non è sicura, lo strumento lo dice invece di proporre un DOI plausibile.
+An MCP server for verifying academic citations and searching the literature. It resolves and checks DOIs, verifies book editions, searches several open databases and builds citation graphs to visualise. The guiding principle is precision: when a match is not certain, the tool says so instead of proposing a plausible DOI.
 
-## Architettura
+## Architecture
 
-Il client invia una richiesta MCP; il server la instrada allo strumento corrispondente. Gli strumenti bibliografici interrogano le fonti pertinenti, mentre quelli dedicati inoltrano le operazioni alle API di OpenAlex o Semantic Scholar. Le richieste HTTP condividono trasporto, limiti e gestione degli errori.
+The client sends an MCP request; the server routes it to the matching tool. The bibliographic tools query the relevant sources, while the dedicated ones forward operations to the OpenAlex or Semantic Scholar APIs. HTTP requests share transport, limits and error handling.
 
 ```mermaid
 flowchart TD
-  Client["Client MCP"] --> Trasporto{"Trasporto"}
-  Trasporto -->|stdio| Server["paper-doi-mcp"]
-  Trasporto -->|HTTP con token| Server
+  Client["MCP client"] --> Transport{"Transport"}
+  Transport -->|stdio| Server["paper-doi-mcp"]
+  Transport -->|HTTP with token| Server
 
-  Server --> Strumento{"Strumento MCP"}
-  Strumento -->|find_doi, verify_doi, verify_book, format_apa, format_reference, check_retractions| Riferimenti["Risoluzione e verifica dei riferimenti"]
-  Strumento -->|google_books, orcid| Registri["Libri e identità degli autori"]
-  Strumento -->|search_literature, paper_table| Ricerca["Ricerca e dettagli dei paper"]
-  Strumento -->|citation_graph| Grafo["Grafo delle citazioni"]
-  Strumento -->|semantic_scholar, semantic_scholar_datasets| SS["Operazioni Semantic Scholar"]
-  Strumento -->|openalex_*| OA["Ricerca, classificazione e account OpenAlex"]
+  Server --> Tool{"MCP tool"}
+  Tool -->|find_doi, verify_doi, verify_book, format_apa, format_reference, check_retractions| References["Reference resolution and verification"]
+  Tool -->|google_books, orcid| Registries["Books and author identity"]
+  Tool -->|search_literature, paper_table| Search["Paper search and details"]
+  Tool -->|citation_graph| Graph["Citation graph"]
+  Tool -->|semantic_scholar, semantic_scholar_datasets| SS["Semantic Scholar operations"]
+  Tool -->|openalex_*| OA["OpenAlex search, classification and account"]
 
-  Riferimenti --> HTTP["Client HTTP condiviso"]
-  Registri --> HTTP
-  Ricerca --> HTTP
-  Grafo --> HTTP
+  References --> HTTP["Shared HTTP client"]
+  Registries --> HTTP
+  Search --> HTTP
+  Graph --> HTTP
   SS --> HTTP
   OA --> HTTP
-  HTTP --> Gestione["Limiti per host; retry selettivi per Semantic Scholar e alcune operazioni OpenAlex"]
+  HTTP --> Handling["Per-host limits; selective retries for Semantic Scholar and some OpenAlex operations"]
 
-  Gestione --> Fonti{"Fonti selezionate in base allo strumento"}
-  Fonti -->|find_doi| Candidati["Crossref · Semantic Scholar · OpenAlex · Open Library · Google Books (libri)"]
-  Fonti -->|verify_doi / format_apa| DOI["Crossref · DataCite · doi.org"]
-  Fonti -->|verify_book| Libri["Open Library · Crossref · Google Books · Deutsche Nationalbibliothek"]
-  Fonti -->|google_books / orcid| Registro["Google Books API · ORCID Public API"]
-  Fonti -->|search_literature / paper_table| Letteratura["OpenAlex · Europe PMC · Semantic Scholar · HAL · DOAJ · arXiv · OSF · Zenodo"]
-  Fonti -->|citation_graph| Citazioni["OpenAlex; Semantic Scholar solo per il controllo di copertura"]
-  Fonti -->|semantic_scholar*| SSAPI["Academic Graph · Recommendations · Datasets"]
-  Fonti -->|openalex_*| OAAPI["OpenAlex API · OpenAlex Users"]
+  Handling --> Sources{"Sources selected according to the tool"}
+  Sources -->|find_doi| Candidates["Crossref · Semantic Scholar · OpenAlex · Open Library · Google Books (books)"]
+  Sources -->|verify_doi / format_apa| DOI["Crossref · DataCite · doi.org"]
+  Sources -->|verify_book| Books["Open Library · Crossref · Google Books · Deutsche Nationalbibliothek"]
+  Sources -->|google_books / orcid| Registry["Google Books API · ORCID Public API"]
+  Sources -->|search_literature / paper_table| Literature["OpenAlex · Europe PMC · Semantic Scholar · HAL · DOAJ · arXiv · OSF · Zenodo"]
+  Sources -->|citation_graph| Citations["OpenAlex; Semantic Scholar only for the coverage check"]
+  Sources -->|semantic_scholar*| SSAPI["Academic Graph · Recommendations · Datasets"]
+  Sources -->|openalex_*| OAAPI["OpenAlex API · OpenAlex Users"]
 
-  Candidati --> Risposta["Risultato MCP"]
-  DOI --> Risposta
-  Libri --> Risposta
-  Registro --> Risposta
-  Letteratura --> Risposta
-  Citazioni --> Risposta
-  SSAPI --> Risposta
-  OAAPI --> Risposta
-  Risposta --> Client
+  Candidates --> Response["MCP result"]
+  DOI --> Response
+  Books --> Response
+  Registry --> Response
+  Literature --> Response
+  Citations --> Response
+  SSAPI --> Response
+  OAAPI --> Response
+  Response --> Client
 
-  Fonti -. "errori parziali, quando previsti" .-> Errori["source_errors"]
-  Errori --> Risposta
+  Sources -. "partial errors, where foreseen" .-> Errors["source_errors"]
+  Errors --> Response
 ```
 
-## Strumenti
+## Tools
 
-Il server ha due strati. Gli strumenti di verifica e ricerca (da `find_doi` a `paper_table`) incrociano le fonti e restituiscono stati espliciti. Lo strato gateway (`openalex_*`, `semantic_scholar*`, `google_books`, `orcid`) inoltra le chiamate alle API e restituisce il JSON nativo: si registra solo con `ENABLE_GATEWAY=true`, perché aggiunge undici definizioni al contesto di ogni sessione. Tutti gli strumenti rispondono con un dizionario con `status`; un argomento non valido dà `status: invalid_input` con un `detail` che nomina il parametro e i valori ammessi.
+The server has two layers. The verification and search tools (from `find_doi` to `paper_table`) cross-check the sources and return explicit states. The gateway layer (`openalex_*`, `semantic_scholar*`, `google_books`, `orcid`) forwards calls to the APIs and returns the native JSON: it is registered only with `ENABLE_GATEWAY=true`, because it adds eleven definitions to the context of every session. All tools answer with a dictionary with `status`; an invalid argument gives `status: invalid_input` with a `detail` that names the parameter and the allowed values.
 
-| Tool | Cosa fa | Fonti |
+| Tool | What it does | Sources |
 |---|---|---|
-| `find_doi` | Trova il DOI di un articolo o libro a partire da titolo, primo autore e anno. Restituisce `match` solo se titolo, autore e anno concordano; altrimenti `no_confident_match`. Per i libri (`is_book=true`) l'anno deve coincidere con l'edizione citata; i dati di edizione e ISBN di Open Library e Google Books sono restituiti come identificativi alternativi (`book_info`, `book_info_google_books`). | Crossref, Semantic Scholar, OpenAlex, Open Library, Google Books (libri) |
-| `verify_doi` | Controlla che un DOI esista e appartenga al lavoro atteso (titolo, autore, anno, volume, numero, pagine). Instrada per agenzia di registrazione: Crossref, oppure DataCite (Zenodo, arXiv, OSF, dataset); per gli altri registri restituisce `registered_unsupported_agency` invece di «non trovato». Segnala ritrattazioni, correzioni ed expressions of concern (solo Crossref). Con `expected_orcid` confronta l'ORCID iD con quelli depositati per gli autori (`author_orcids`): `match`; `mismatch` solo se tutti gli autori hanno un iD e nessuno è quello atteso; altrimenti `not_in_source`, perché il deposito è facoltativo. Per le agenzie non supportate l'iD compare in `unchecked`. | Crossref (con dati Retraction Watch), DataCite, doi.org |
-| `verify_book` | Verifica un'edizione (anno, editore, ISBN) confrontando quattro cataloghi. `verified` se almeno due concordano. Il campo `agreement` conta i gruppi di cataloghi indipendenti (Open Library e Google Books condividono i feed degli editori e valgono come uno) e riporta il livello (`high` con almeno due gruppi e nessun conflitto, `medium` con un conflitto, `low` con un solo gruppo, `none`). In `conflicts` segnala anno o editore su cui due fonti confermanti non hanno nulla in comune (edizioni diverse, oppure marchio e gruppo editoriale), senza escludere il risultato. | Open Library, Crossref, Google Books, Deutsche Nationalbibliothek |
-| `google_books` | Ricerca (`search`, con le parole chiave native `intitle:`, `inauthor:`, `isbn:`...) e lettura di un volume (`volume`): titolo, autori, editore, data, ISBN. Parametri nativi inoltrati in `params`; restituisce il JSON originale. | Google Books API |
-| `internet_archive` | Libri e testi digitalizzati su Internet Archive (anche scansioni Open Library): per titolo, autore, anno, ISBN o query Lucene. Per ogni record l'accesso: `public` (lettura e PDF liberi), `borrowable` (prestito con account archive.org), `print_disabled_only`. | Internet Archive |
-| `orcid` | Ricerca nel registro (`search`, sintassi Solr, con ORCID iD, nomi e istituzioni) e lettura dei dati pubblici di un record (`person`, `works`). L'iD viene validato col checksum prima della richiesta. Funziona senza credenziali; con `ORCID_CLIENT_ID` e `ORCID_CLIENT_SECRET` usa un token `/read-public`. Una corrispondenza di nome è un candidato, non un'identità. | ORCID Public API |
-| `format_apa` | Restituisce il riferimento APA di un DOI tramite content negotiation, con i campi strutturati del record. Segnala con `title_case_suspected` i titoli che sembrano in title case (APA vuole il sentence case) senza convertirli. `unsupported` se l'agenzia di registrazione non lo offre. | doi.org |
-| `format_reference` | Riferimento di un DOI in BibTeX, RIS, CSL-JSON o in qualsiasi stile CSL (`chicago-author-date`, `modern-language-association`, `ieee`…), tramite content negotiation. Stessa avvertenza di `format_apa`: i metadati non sono verificati. | doi.org |
-| `check_retractions` | Ritrattazioni, expression of concern e correzioni per una lista di DOI (fino a 1000, es. tutta la libreria Zotero) oppure, con `map`, per tutti i lavori con DOI di una mappa, che vengono segnati; da Crossref con i dati Retraction Watch. I DOI DataCite finiscono in `not_checked`. Al massimo 2 richieste parallele verso Crossref, con nuovi tentativi sui 429. | Crossref |
-| `check_citations` | Controllo incrociato, senza rete, tra le citazioni autore-data nel testo e la bibliografia APA: citazioni senza voce, voci non citate, anni discordanti, voci ambigue (stesso autore e anno senza suffisso). Abbina solo cognome del primo autore e anno: le voci vanno poi verificate con `find_doi` e `verify_doi`. | Calcolo locale |
-| `search_literature` | Ricerca con sintassi booleana su uno o più database, con abstract e keyword, deduplicazione e log riproducibile delle query. `philarchive` interroga la copia locale di PhilArchive raccolta via OAI-PMH dal lavoro settimanale (`philarchive.py harvest`). | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo, DNB, PhilArchive (copia locale) |
-| `citation_graph` | Grafo di citazione attorno a uno o più lavori: riferimenti, lavori citanti più citati, archi di citazione, coppie co-citate e accoppiamento bibliografico (riferimenti in comune). Per ogni nodo indica a quanti seed è collegato. Pensato per visualizzazioni D3 (timeline anno/citazioni, rete di somiglianza). Con `check_coverage` (predefinito) confronta per ogni seed con DOI i conteggi di riferimenti e citazioni tra OpenAlex e Semantic Scholar (`coverage_check`), per distinguere un'assenza reale da una lacuna di copertura. | OpenAlex, Semantic Scholar (solo controllo) |
-| `map_create`, `map_add_seeds` | Crea una mappa della letteratura persistente (SQLite in `STATE_DIRECTORY`) e aggiunge i seed (DOI o id OpenAlex); un candidato già nella mappa diventa seed. Se nessun seed si può aggiungere, `map_create` risponde `status: "partial"` (mappa creata) con `detail` e gli errori in `warnings`; con seed solo in parte riusciti resta `ok` ma con `warnings`. | OpenAlex |
-| `map_expand` | Fa crescere la mappa dai seed: `references`, `citing`, `similar` (raccomandazioni Semantic Scholar), `authors` (lavori più citati dei primi tre autori). I nuovi lavori entrano come candidati con stato `new`: al massimo `max_new` per chiamata (150), i più collegati per primi; si può espandere da qualsiasi lavoro della mappa; i doppioni vengono fusi; massimo 2000 lavori per mappa. | OpenAlex, Semantic Scholar |
-| `map_suggest` | Candidati più probabilmente mancanti, ordinati per `seeds_linked`, `seed_cocited`, `seed_coupling`, citazioni; esclude letti e scartati. Dice perché (`found_by`). | Calcolo locale |
-| `map_mark` | Stato di lettura: `to_read`, `read`, `dismissed`, `new`, con una nota facoltativa. Lo stato vive nella mappa, non nelle note. | Calcolo locale |
-| `map_get`, `map_list` | Contenuto di una mappa (lavori e collegamenti ricalcolati: citazioni, co-citazione, coupling) e elenco delle mappe con i conteggi. Ogni lavoro porta `cited_in_map`, `cited_in_map_nonseed` e `cited_by_seed_citers` (quanti lavori della mappa lo citano, quanti tra i candidati, quanti di questi citano anche un altro seed); co-citazione e coupling sono limitati a `max_pairs` coppie (500, massimo 5000) e `cocitation_truncated` / `coupling_truncated` dicono se ne restano fuori. `added` e `refs_source` restano nei lavori come informazione. Per le mappe grandi `compact=true` toglie dai lavori `notes`, `verified`, `zotero_tags`, `found_by`, `note`, `added` e `refs_source`, e `fields=[…]` tiene solo i campi elencati più `id` (ha la precedenza su `compact`; i nomi sconosciuti sono ignorati e segnalati in `warnings`); senza i due parametri la risposta non cambia. Il calcolo gira in un thread, senza fermare gli altri tool; la vista calcolata (collegamenti e punteggi) resta in una piccola cache in memoria (al massimo 8 voci per processo, condivisa con `map_suggest`) e ogni scrittura sul database la invalida, quindi non serve mai dati vecchi. | Calcolo locale |
-| `map_job_status` | Stato di un lavoro in background (vedi *Operazioni lunghe*): `running`, `ok`, `error`, `interrupted`, `not_found`, con `progress` (`done`, `total`, `step`) e, a lavoro finito, `result` = la risposta che lo strumento avrebbe dato. | Calcolo locale |
-| `map_rename`, `map_remove`, `map_delete` | Rinomina una mappa o ne cambia la descrizione; toglie singoli lavori; elimina una mappa intera (serve ripetere il nome esatto in `confirm_name`). | Calcolo locale |
-| `map_prune`, `map_refresh` | Riduce una mappa (seed, lavori con uno stato e i primi N candidati più collegati); riscarica da OpenAlex citazioni, momentum, topic e ritrattazioni di tutti i lavori; con `new_citing` aggiunge prima i nuovi lavori che citano i seed dall'ultimo controllo (controllo su richiesta, non un avviso). Entrambi fondono i doppioni (stesso titolo e primo autore, anni vicini); `duplicates_merged` è un numero qui, un elenco di gruppi in `map_expand` e `map_add_seeds`. Se un seed va in errore o restituisce una pagina piena (`per_seed`), la data del controllo non avanza e la risposta ha `truncated` e `watch_not_advanced`. I conteggi OpenCitations si chiedono tre alla volta, con nuovi tentativi sui 429. | OpenAlex, OpenCitations |
-| `map_export` | La mappa come lista di lettura in Markdown (seed, poi lavori per stato, con link DOI, Zotero e note), da salvare in Obsidian fuori dallo schema, es. `Maps/<nome>.md`. | Calcolo locale |
-| `map_add_patents` | Aggiunge brevetti a una mappa come nodi `P:<numero>`, ciascuno con la letteratura che il rapporto di ricerca cita con DOI stampato (risolta in OpenAlex, entra come candidata `patent:P:…`); le citazioni senza DOI tornano in `unresolved` da risolvere con `find_doi` e `verify_doi`. I brevetti compaiono in `patent_edges` di `map_get`, mai in co-citazione, coupling o fusione dei doppioni: la citazione dell'esaminatore stabilisce anteriorità, non un debito intellettuale. Se nessun brevetto si può aggiungere risponde `status: "error"` con `detail`; un 403 di EPO (fair use) viene ritentato una volta dopo una pausa. Registrato solo con le credenziali EPO. | EPO OPS 3.2, OpenAlex |
-| `search_everything` | Ricerca nel corpus dell'utente, non sul web: note Obsidian per sezione, testi dei PDF ed EPUB in Zotero per pagina, evidenziazioni e commenti. Indice FTS5 locale (`corpus.sqlite` in `STATE_DIRECTORY`) costruito dai file che gli altri due server scrivono in `KNOWLEDGE_DIR` (`notes_text.json`, `fulltext/KEY.json`) e aggiornato a ogni chiamata per mtime. Lessicale, nella lingua della query; `zotero_key` restringe a un item. Con `semantic=true` cerca per significato con embedding locali multilingue (vedi sotto): una query in italiano trova un passo in tedesco; `score` è la similarità del coseno. | Calcolo locale |
-| `map_intents` | Perché i lavori di una mappa si citano, da Semantic Scholar: intenti (`background`, `methodology`, `result`), citazione influente e frasi attorno alla citazione, per i seed o per i lavori indicati; gli archi le cui frasi portano marcatori di contrasto o critica sono segnati `contrasting`, candidati per le Objections di una nota di tesi da leggere nel testo. Salvati con la mappa (ogni 5 lavori); `map_get` li restituisce in `edge_intents` (`citante->citato`). Quando la fusione dei doppioni elimina un record, gli intenti dei suoi archi passano all'id mantenuto (se esiste già un record per lo stesso arco resta il più completo, con `influential` e `contrasting` in OR). `works_skipped` elenca i lavori scelti e lasciati fuori (senza DOI o oltre `max_works`), `truncated` dice se una richiesta ha toccato il limite di 1000 citazioni. | Semantic Scholar |
-| `check_draft` | Le citazioni `[@citekey, p. N]` di un manoscritto contro la libreria: chiave risolta per citekey Better BibTeX (`Citation Key:` in Extra), chiave item o cognome+anno se univoco; chiavi irrisolte o ambigue, item senza riga `Verified: … match`, citazioni letterali senza pagina, con `retractions=True` i DOI ritrattati; `bibliography_keys` per `export_items`. | Crossref (solo ritrattazioni) |
-| `coverage_report` | Che cosa manca a un progetto (tag `cited/<progetto>` o collezione): item senza nota, senza PDF, non verificati; note senza item nel `reference`; note che puntano a item spariti. | Calcolo locale |
-| `search_log` | Il registro delle ricerche e delle mappe (`STATE_DIRECTORY/searches.jsonl`, scritto da ogni `search_literature` e `map_create`): con `query` dice se e quando la stessa ricerca, o una simile, è già stata fatta e con quanti risultati; senza, le ultime voci. Il report settimanale elenca le ricerche della settimana. | Calcolo locale |
-| `weekly_report` | L'ultimo report settimanale (nuovi lavori citanti per mappa, ritrattazioni in libreria, copertura per progetto, manutenzione); `run_now=True` lo esegue subito. | OpenAlex, Crossref |
-| `patent_search`, `patent_get` | Brevetti da EPO Open Patent Services (circa 140 milioni di documenti): ricerca a parole libere su titolo e abstract o in CQL nativo; per un brevetto dati bibliografici, brevetti citati, brevetti citanti e la letteratura scientifica citata nel rapporto di ricerca. Un DOI compare solo se stampato nella citazione; per le prime `resolve_literature` citazioni senza DOI (20 di default) una ricerca Crossref con le regole di `find_doi` può proporre un `doi_candidate` con punteggio, da confermare con `verify_doi`. Registrati solo se `EPO_OPS_KEY` e `EPO_OPS_SECRET` sono impostate. | EPO OPS 3.2, Crossref |
-| `paper_table` | Righe di dettaglio per una lista di DOI, id OpenAlex o id arXiv (fino a 300): abstract, keyword, topic, TL;DR, sede, accesso aperto, ritrattazione. | OpenAlex (a blocchi di 50), arXiv come riserva, Semantic Scholar (una richiesta batch) |
-| `semantic_scholar` | Academic Graph e Recommendations in uno strumento con 16 azioni: paper (dettagli, autori, citazioni, riferimenti, batch, ricerca per rilevanza, bulk booleana, match, autocompletamento), autori (dettagli, pubblicazioni, ricerca, batch), estratti testuali, raccomandazioni da un paper (`recommend_single`) o da liste di esempi positivi e negativi (`recommend_multi`). Le azioni che restituiscono liste hanno `limit` 20 di default. | Semantic Scholar Academic Graph e Recommendations |
-| `semantic_scholar_datasets` | Release e link firmati dei dataset (`releases`, `release`, `files`, `diffs`). Non scarica i file. | Semantic Scholar Datasets |
-| `openalex_entity` | Liste e dettagli di tutte le 26 risorse del catalogo, con filtri, ricerca, aggregazioni, campi e cursori liberi; con `autocomplete` i suggerimenti e la risoluzione rapida di identificatori per tipo di entità. Le liste hanno `per_page` 25 di default. | OpenAlex |
-| `openalex_text` | Classifica titolo e abstract per topic e keyword, tramite GET o POST. | OpenAlex |
-| `openalex_query` | Esegue una query OQL (stringa) o OQO (oggetto); consuma il budget. | OpenAlex |
-| `openalex_query_inspect` | Traduce (anche da URL classico), valida, consulta contesto grammaticale, proprietà e specifiche del linguaggio senza eseguire. | OpenAlex |
-| `openalex_status` | Consulta quota e metadati/link dei changefiles; questi ultimi richiedono un piano abilitato. | OpenAlex |
-| `openalex_account_read` | Legge collezioni, membri, importazioni e ricerche salvate, senza modificarli. | OpenAlex |
-| `openalex_account_write` | Crea, aggiorna o elimina collezioni e ricerche salvate, gestisce membri/importazioni e invia correzioni. Anteprima predefinita; richiede conferma esplicita per inviare. | OpenAlex, OpenAlex Users |
+| `find_doi` | Finds the DOI of an article or book from title, first author and year. Returns `match` only if title, author and year agree; otherwise `no_confident_match`. For books (`is_book=true`) the year must match the cited edition; the edition and ISBN data from Open Library and Google Books are returned as alternative identifiers (`book_info`, `book_info_google_books`). | Crossref, Semantic Scholar, OpenAlex, Open Library, Google Books (books) |
+| `verify_doi` | Checks that a DOI exists and belongs to the expected work (title, author, year, volume, issue, pages). Routes by registration agency: Crossref, or DataCite (Zenodo, arXiv, OSF, datasets); for other registries it returns `registered_unsupported_agency` instead of "not found". Flags retractions, corrections and expressions of concern (Crossref only). With `expected_orcid` it compares the ORCID iD with those deposited for the authors (`author_orcids`): `match`; `mismatch` only if all authors have an iD and none is the expected one; otherwise `not_in_source`, because the deposit is optional. For unsupported agencies the iD appears in `unchecked`. | Crossref (with Retraction Watch data), DataCite, doi.org |
+| `verify_book` | Verifies an edition (year, publisher, ISBN) by comparing four catalogues. `verified` if at least two agree. The `agreement` field counts the groups of independent catalogues (Open Library and Google Books share publishers' feeds and count as one) and reports the level (`high` with at least two groups and no conflict, `medium` with one conflict, `low` with a single group, `none`). In `conflicts` it flags a year or publisher on which two confirming sources have nothing in common (different editions, or imprint and publishing group), without excluding the result. | Open Library, Crossref, Google Books, Deutsche Nationalbibliothek |
+| `google_books` | Search (`search`, with the native keywords `intitle:`, `inauthor:`, `isbn:`...) and reading of a volume (`volume`): title, authors, publisher, date, ISBN. Native parameters forwarded in `params`; returns the original JSON. | Google Books API |
+| `internet_archive` | Digitised books and texts on the Internet Archive (also Open Library scans): by title, author, year, ISBN or Lucene query. For each record the access: `public` (free reading and PDF), `borrowable` (lending with an archive.org account), `print_disabled_only`. | Internet Archive |
+| `orcid` | Search in the registry (`search`, Solr syntax, with ORCID iD, names and institutions) and reading of the public data of a record (`person`, `works`). The iD is validated with the checksum before the request. Works without credentials; with `ORCID_CLIENT_ID` and `ORCID_CLIENT_SECRET` it uses a `/read-public` token. A name match is a candidate, not an identity. | ORCID Public API |
+| `format_apa` | Returns the APA reference of a DOI through content negotiation, with the record's structured fields. Flags with `title_case_suspected` the titles that look like title case (APA wants sentence case) without converting them. `unsupported` if the registration agency does not offer it. | doi.org |
+| `format_reference` | Reference of a DOI in BibTeX, RIS, CSL-JSON or in any CSL style (`chicago-author-date`, `modern-language-association`, `ieee`…), through content negotiation. Same warning as `format_apa`: the metadata is not verified. | doi.org |
+| `check_retractions` | Retractions, expressions of concern and corrections for a list of DOIs (up to 1000, e.g. a whole Zotero library) or, with `map`, for all the works with a DOI in a map, which are marked; from Crossref with Retraction Watch data. DataCite DOIs end up in `not_checked`. At most 2 parallel requests to Crossref, with retries on 429s. | Crossref |
+| `check_citations` | Cross-check, without network, between the author-date citations in the text and the APA bibliography: citations without an entry, uncited entries, discordant years, ambiguous entries (same author and year without a suffix). It matches only the first author's surname and the year: the entries must then be verified with `find_doi` and `verify_doi`. | Local computation |
+| `search_literature` | Search with boolean syntax on one or more databases, with abstracts and keywords, deduplication and a reproducible log of the queries. `philarchive` queries the local copy of PhilArchive harvested via OAI-PMH by the weekly job (`philarchive.py harvest`). | OpenAlex, Europe PMC, Semantic Scholar, HAL, DOAJ, arXiv, OSF Preprints, Zenodo, DNB, PhilArchive (local copy) |
+| `citation_graph` | Citation graph around one or more works: references, most-cited citing works, citation edges, co-cited pairs and bibliographic coupling (shared references). For each node it says how many seeds it is linked to. Designed for D3 visualisations (year/citations timeline, similarity network). With `check_coverage` (default) it compares for each seed with a DOI the counts of references and citations between OpenAlex and Semantic Scholar (`coverage_check`), to tell a real absence from a coverage gap. | OpenAlex, Semantic Scholar (check only) |
+| `map_create`, `map_add_seeds` | Creates a persistent literature map (SQLite in `STATE_DIRECTORY`) and adds the seeds (DOI or OpenAlex id); a candidate already in the map becomes a seed. If no seed can be added, `map_create` answers `status: "partial"` (map created) with `detail` and the errors in `warnings`; with seeds only partly successful it stays `ok` but with `warnings`. | OpenAlex |
+| `map_expand` | Grows the map from the seeds: `references`, `citing`, `similar` (Semantic Scholar recommendations), `authors` (most-cited works of the first three authors). New works enter as candidates with state `new`: at most `max_new` per call (150), the most linked first; you can expand from any work in the map; duplicates are merged; at most 2000 works per map. | OpenAlex, Semantic Scholar |
+| `map_suggest` | Candidates most likely missing, sorted by `seeds_linked`, `seed_cocited`, `seed_coupling`, citations; excludes read and dismissed ones. Says why (`found_by`). | Local computation |
+| `map_mark` | Reading state: `to_read`, `read`, `dismissed`, `new`, with an optional note. The state lives in the map, not in the notes. | Local computation |
+| `map_get`, `map_list` | Content of a map (works and recomputed links: citations, co-citation, coupling) and list of the maps with counts. Each work carries `cited_in_map`, `cited_in_map_nonseed` and `cited_by_seed_citers` (how many works in the map cite it, how many among the candidates, how many of these also cite another seed); co-citation and coupling are limited to `max_pairs` pairs (500, maximum 5000) and `cocitation_truncated` / `coupling_truncated` say whether some are left out. `added` and `refs_source` remain in the works as information. For large maps `compact=true` removes from the works `notes`, `verified`, `zotero_tags`, `found_by`, `note`, `added` and `refs_source`, and `fields=[…]` keeps only the listed fields plus `id` (it takes precedence over `compact`; unknown names are ignored and reported in `warnings`); without the two parameters the response does not change. The computation runs in a thread, without stopping the other tools; the computed view (links and scores) stays in a small in-memory cache (at most 8 entries per process, shared with `map_suggest`) and every write to the database invalidates it, so it never serves old data. | Local computation |
+| `map_job_status` | Status of a background job (see *Long operations*): `running`, `ok`, `error`, `interrupted`, `not_found`, with `progress` (`done`, `total`, `step`) and, when the job has finished, `result` = the response the tool would have given. | Local computation |
+| `map_rename`, `map_remove`, `map_delete` | Renames a map or changes its description; removes single works; deletes a whole map (the exact name must be repeated in `confirm_name`). | Local computation |
+| `map_prune`, `map_refresh` | Reduces a map (seeds, works with a state and the first N most-linked candidates); re-downloads from OpenAlex citations, momentum, topic and retractions of all the works; with `new_citing` it first adds the new works that cite the seeds since the last check (an on-demand check, not an alert). Both merge duplicates (same title and first author, close years); `duplicates_merged` is a number here, a list of groups in `map_expand` and `map_add_seeds`. If a seed errors or returns a full page (`per_seed`), the check date does not advance and the response has `truncated` and `watch_not_advanced`. OpenCitations counts are requested three at a time, with retries on 429s. | OpenAlex, OpenCitations |
+| `map_export` | The map as a Markdown reading list (seeds, then works by state, with DOI, Zotero and note links), to save in Obsidian outside the schema, e.g. `Maps/<name>.md`. | Local computation |
+| `map_add_patents` | Adds patents to a map as `P:<number>` nodes, each with the literature that the search report cites with a printed DOI (resolved in OpenAlex, enters as a `patent:P:…` candidate); citations without a DOI come back in `unresolved` to be resolved with `find_doi` and `verify_doi`. Patents appear in `patent_edges` of `map_get`, never in co-citation, coupling or merging of duplicates: the examiner's citation establishes prior art, not an intellectual debt. If no patent can be added it answers `status: "error"` with `detail`; an EPO 403 (fair use) is retried once after a pause. Registered only with EPO credentials. | EPO OPS 3.2, OpenAlex |
+| `search_everything` | Search in the user's corpus, not on the web: Obsidian notes by section, texts of the PDFs and EPUBs in Zotero by page, highlights and comments. Local FTS5 index (`corpus.sqlite` in `STATE_DIRECTORY`) built from the files that the other two servers write in `KNOWLEDGE_DIR` (`notes_text.json`, `fulltext/KEY.json`) and updated at every call by mtime. Lexical, in the language of the query; `zotero_key` restricts to one item. With `semantic=true` it searches by meaning with local multilingual embeddings (see below): a query in Italian finds a passage in German; `score` is the cosine similarity. | Local computation |
+| `map_intents` | Why the works in a map cite each other, from Semantic Scholar: intents (`background`, `methodology`, `result`), influential citation and sentences around the citation, for the seeds or for the indicated works; edges whose sentences carry markers of contrast or criticism are marked `contrasting`, candidates for the Objections of a thesis note, to be read in the text. Saved with the map (every 5 works); `map_get` returns them in `edge_intents` (`citing->cited`). When the merging of duplicates deletes a record, the intents of its edges pass to the kept id (if a record for the same edge already exists the more complete one stays, with `influential` and `contrasting` in OR). `works_skipped` lists the works chosen and left out (without a DOI or beyond `max_works`), `truncated` says whether a request hit the limit of 1000 citations. | Semantic Scholar |
+| `check_draft` | The `[@citekey, p. N]` citations of a manuscript against the library: key resolved by Better BibTeX citekey (`Citation Key:` in Extra), item key or surname+year if unique; unresolved or ambiguous keys, items without a `Verified: … match` line, literal quotations without a page, with `retractions=True` the retracted DOIs; `bibliography_keys` for `export_items`. | Crossref (retractions only) |
+| `coverage_report` | What a project lacks (tag `cited/<project>` or collection): items without a note, without a PDF, not verified; notes without an item in `reference`; notes that point to vanished items. | Local computation |
+| `search_log` | The log of searches and maps (`STATE_DIRECTORY/searches.jsonl`, written by every `search_literature` and `map_create`): with `query` it says whether and when the same search, or a similar one, has already been done and with how many results; without it, the latest entries. The weekly report lists the week's searches. | Local computation |
+| `weekly_report` | The latest weekly report (new citing works per map, retractions in the library, coverage by project, maintenance); `run_now=True` runs it immediately. | OpenAlex, Crossref |
+| `patent_search`, `patent_get` | Patents from EPO Open Patent Services (about 140 million documents): free-text search on title and abstract or in native CQL; for a patent bibliographic data, cited patents, citing patents and the scientific literature cited in the search report. A DOI appears only if printed in the citation; for the first `resolve_literature` citations without a DOI (20 by default) a Crossref search with the rules of `find_doi` may propose a `doi_candidate` with a score, to be confirmed with `verify_doi`. Registered only if `EPO_OPS_KEY` and `EPO_OPS_SECRET` are set. | EPO OPS 3.2, Crossref |
+| `paper_table` | Detail rows for a list of DOIs, OpenAlex ids or arXiv ids (up to 300): abstract, keywords, topic, TL;DR, venue, open access, retraction. | OpenAlex (in blocks of 50), arXiv as a fallback, Semantic Scholar (one batch request) |
+| `semantic_scholar` | Academic Graph and Recommendations in one tool with 16 actions: papers (details, authors, citations, references, batch, relevance search, boolean bulk, match, autocomplete), authors (details, publications, search, batch), text snippets, recommendations from a paper (`recommend_single`) or from lists of positive and negative examples (`recommend_multi`). The actions that return lists have `limit` 20 by default. | Semantic Scholar Academic Graph and Recommendations |
+| `semantic_scholar_datasets` | Releases and signed links of the datasets (`releases`, `release`, `files`, `diffs`). Does not download the files. | Semantic Scholar Datasets |
+| `openalex_entity` | Lists and details of all 26 resources of the catalogue, with filters, search, aggregations, fields and free cursors; with `autocomplete` the suggestions and quick resolution of identifiers by entity type. Lists have `per_page` 25 by default. | OpenAlex |
+| `openalex_text` | Classifies title and abstract by topic and keyword, via GET or POST. | OpenAlex |
+| `openalex_query` | Runs an OQL query (string) or OQO (object); consumes the budget. | OpenAlex |
+| `openalex_query_inspect` | Translates (also from a classic URL), validates, consults the grammatical context, properties and specifications of the language without executing. | OpenAlex |
+| `openalex_status` | Consults the quota and the metadata/links of the changefiles; the latter require an enabled plan. | OpenAlex |
+| `openalex_account_read` | Reads collections, members, imports and saved searches, without modifying them. | OpenAlex |
+| `openalex_account_write` | Creates, updates or deletes collections and saved searches, manages members/imports and submits corrections. Preview by default; requires explicit confirmation to send. | OpenAlex, OpenAlex Users |
 
-### Copertura OpenAlex
+### OpenAlex coverage
 
-I sei strumenti dedicati, attivi solo con `ENABLE_GATEWAY=true`, coprono le risorse e le operazioni utente correnti del [catalogo degli endpoint](https://help.openalex.org/api/endpoints/), integrate con le pagine di [query OQL/OQO](https://help.openalex.org/api/oql/), [collezioni](https://help.openalex.org/api/collections/), [ricerche salvate](https://help.openalex.org/api/alerts/) e [correzioni](https://help.openalex.org/api/author-curation/),  Non sono esposte le route amministrative, le vecchie route account deprecate né le operazioni di creazione/rotazione delle credenziali.
+The six dedicated tools, active only with `ENABLE_GATEWAY=true`, cover the current resources and user operations of the [endpoint catalogue](https://help.openalex.org/api/endpoints/), integrated with the pages on [OQL/OQO queries](https://help.openalex.org/api/oql/), [collections](https://help.openalex.org/api/collections/), [saved searches](https://help.openalex.org/api/alerts/) and [corrections](https://help.openalex.org/api/author-curation/). The administrative routes, the old deprecated account routes and the operations for creating/rotating credentials are not exposed.
 
-`openalex_entity` espone `GET /{entity}` e `GET /{entity}/{entity_id}` per queste risorse:
+`openalex_entity` exposes `GET /{entity}` and `GET /{entity}/{entity_id}` for these resources:
 
-| Gruppo | Valori di `entity` |
+| Group | Values of `entity` |
 |---|---|
-| Entità principali | `works`, `authors`, `sources`, `institutions`, `publishers`, `funders`, `awards` |
-| Componenti | `locations`, `raw-affiliation-strings` (solo lista, senza identificatore singolo) |
-| Classificazioni | `topics`, `subfields`, `fields`, `domains`, `keywords`, `sdgs`, `study-designs`, `concepts` (deprecato) |
-| Vocabolari | `work-types`, `source-types`, `institution-types`, `countries`, `continents`, `languages`, `licenses`, `indexes`, `source-lists` |
+| Main entities | `works`, `authors`, `sources`, `institutions`, `publishers`, `funders`, `awards` |
+| Components | `locations`, `raw-affiliation-strings` (list only, no single identifier) |
+| Classifications | `topics`, `subfields`, `fields`, `domains`, `keywords`, `sdgs`, `study-designs`, `concepts` (deprecated) |
+| Vocabularies | `work-types`, `source-types`, `institution-types`, `countries`, `continents`, `languages`, `licenses`, `indexes`, `source-lists` |
 
-Omettere `entity_id` per una lista. Per i dettagli sono ammessi gli ID OpenAlex e gli identificatori esterni supportati dalla fonte, per esempio DOI/PMID per i lavori, ORCID per gli autori, ROR per le istituzioni e ISSN per le sedi. Gli identificatori delle locations conservano maiuscole e minuscole.
+Omit `entity_id` for a list. For details, OpenAlex IDs and the external identifiers supported by the source are allowed, for example DOI/PMID for works, ORCID for authors, ROR for institutions and ISSN for venues. Location identifiers keep upper and lower case.
 
-`params` inoltra i parametri nativi, compresi `filter`, `search`, `search.semantic`, `sort`, `group_by`, `select`, `page`, `per_page`, `cursor`, `sample`, `seed` e `corpus`; OpenAlex ne verifica la validità per la risorsa scelta. Ogni chiamata recupera una pagina: per la paginazione profonda iniziare con `cursor="*"`, poi usare `data.meta.next_cursor`. La chiave si configura esclusivamente con `OPENALEX_API_KEY`, non in `params`.
+`params` forwards the native parameters, including `filter`, `search`, `search.semantic`, `sort`, `group_by`, `select`, `page`, `per_page`, `cursor`, `sample`, `seed` and `corpus`; OpenAlex checks their validity for the chosen resource. Each call fetches one page: for deep pagination start with `cursor="*"`, then use `data.meta.next_cursor`. The key is configured exclusively with `OPENALEX_API_KEY`, not in `params`.
 
-Esempio di argomenti per `openalex_entity`, lavori dal 2020 raggruppati per anno:
+Example arguments for `openalex_entity`, works since 2020 grouped by year:
 
 ```json
 {
@@ -127,22 +127,22 @@ Esempio di argomenti per `openalex_entity`, lavori dal 2020 raggruppati per anno
 }
 ```
 
-| Strumento / azione | Metodi e percorsi |
+| Tool / action | Methods and paths |
 |---|---|
-| `openalex_text` | `GET` e `POST` su `/text`, `/text/topics`, `/text/keywords`; `target`: `all`, `topics`, `keywords` |
-| `openalex_query` | `GET /?oql=...`, `GET /?oqo=...`, `POST /` con uno dei due formati |
-| `openalex_query_inspect`, `translate` | `POST /query`; formati `oql`, `oqo`, `oxurl` |
-| `openalex_query_inspect`, `validate` / `context` | `GET /validate`, `GET /parse-context`; per il contesto serve `params.pos` |
+| `openalex_text` | `GET` and `POST` on `/text`, `/text/topics`, `/text/keywords`; `target`: `all`, `topics`, `keywords` |
+| `openalex_query` | `GET /?oql=...`, `GET /?oqo=...`, `POST /` with either format |
+| `openalex_query_inspect`, `translate` | `POST /query`; formats `oql`, `oqo`, `oxurl` |
+| `openalex_query_inspect`, `validate` / `context` | `GET /validate`, `GET /parse-context`; the context needs `params.pos` |
 | `openalex_query_inspect`, `properties` / `spec` | `GET /properties[/{entity}]`, `GET /query/spec[/{artifact}]` |
 | `openalex_status` | `GET /rate-limit`, `GET /changefiles`, `GET /changefiles/{date}` |
-| `openalex_account_read` | `GET /collections[/{collection_id}]`, membri, elenco/dettaglio importazioni; `GET /saved-searches[/{saved_search_id}]` |
-| `openalex_account_write` | `POST /collections`, `PATCH`/`DELETE /collections/{collection_id}`, `POST`/`DELETE` dei membri, `DELETE` del singolo membro, `POST` delle importazioni; `POST`/`PATCH`/`DELETE` delle ricerche salvate; `POST user.openalex.org/curations` |
+| `openalex_account_read` | `GET /collections[/{collection_id}]`, members, list/detail of imports; `GET /saved-searches[/{saved_search_id}]` |
+| `openalex_account_write` | `POST /collections`, `PATCH`/`DELETE /collections/{collection_id}`, `POST`/`DELETE` of members, `DELETE` of a single member, `POST` of imports; `POST`/`PATCH`/`DELETE` of saved searches; `POST user.openalex.org/curations` |
 
-**Query e testo.** `openalex_query` accetta `query` come stringa OQL o oggetto OQO, `query_format` e `method` (`POST` predefinito per evitare limiti di lunghezza dell'URL). Ordinamento, campi e paginazione restano in `params`. `openalex_query_inspect` non esegue la ricerca: `translate` converte tra formati, `validate` restituisce le diagnostiche originali. Le liste di `openalex_entity` hanno `per_page` 25 di default. `openalex_text` richiede da 20 a 2000 caratteri complessivi tra titolo e abstract; costa $0.01 per richiesta secondo la documentazione consultata. Non inviare materiale riservato senza autorizzazione. La ricerca semantica è disponibile tramite `openalex_entity` con `params["search.semantic"]` oppure tramite OQL/OQO.
+**Query and text.** `openalex_query` accepts `query` as an OQL string or OQO object, `query_format` and `method` (`POST` by default to avoid URL length limits). Sorting, fields and pagination stay in `params`. `openalex_query_inspect` does not run the search: `translate` converts between formats, `validate` returns the original diagnostics. The lists of `openalex_entity` have `per_page` 25 by default. `openalex_text` requires from 20 to 2000 characters in total between title and abstract; it costs $0.01 per request according to the documentation consulted. Do not send confidential material without authorisation. Semantic search is available through `openalex_entity` with `params["search.semantic"]` or through OQL/OQO.
 
-**Account e conferma.** Le azioni di lettura sono `collections`, `collection`, `members`, `imports`, `import`, `saved_searches`, `saved_search`. Le azioni di scrittura sono `create_collection`, `update_collection`, `delete_collection`, `add_members`, `remove_members`, `remove_member`, `import_collection`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `curate`. Gli identificatori si passano negli argomenti dedicati; il JSON nativo va in `body`. Per la rimozione multipla dei membri si usa invece `params.member_ids`, una stringa separata da virgole, senza body.
+**Account and confirmation.** The read actions are `collections`, `collection`, `members`, `imports`, `import`, `saved_searches`, `saved_search`. The write actions are `create_collection`, `update_collection`, `delete_collection`, `add_members`, `remove_members`, `remove_member`, `import_collection`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `curate`. Identifiers are passed in the dedicated arguments; the native JSON goes in `body`. For bulk removal of members `params.member_ids` is used instead, a comma-separated string, without a body.
 
-Con `confirm=false` (predefinito), una scrittura restituisce solo l'anteprima `confirmation_required` e non invia alcuna richiesta. Per inviare una scrittura servono sia `confirm=true` sia `OPENALEX_ENABLE_WRITES=true` nell'ambiente del server; l'abilitazione è disattivata per default. Dopo aver mostrato l'operazione e ottenuto l'approvazione dell'utente, ripetere la stessa chiamata con `confirm=true`. Esempio di anteprima per creare una collezione:
+With `confirm=false` (default), a write returns only the `confirmation_required` preview and sends no request. To send a write, both `confirm=true` and `OPENALEX_ENABLE_WRITES=true` in the server's environment are needed; the enabling is off by default. After showing the operation and obtaining the user's approval, repeat the same call with `confirm=true`. Example preview for creating a collection:
 
 ```json
 {
@@ -155,17 +155,17 @@ Con `confirm=false` (predefinito), una scrittura restituisce solo l'anteprima `c
 }
 ```
 
-Le collezioni e le ricerche salvate richiedono una chiave personale e i permessi appropriati. Gli alert possono inviare email all'account; una cancellazione elimina anche membri o alert associati. Le importazioni eseguono ricerche lato OpenAlex e consumano quota. Le correzioni richiedono i permessi sul profilo e possono modificare record pubblici. Nessuna di queste operazioni viene eseguita durante i test offline.
+Collections and saved searches require a personal key and the appropriate permissions. Alerts may send emails to the account; a deletion also removes associated members or alerts. Imports run searches on the OpenAlex side and consume quota. Corrections require permissions on the profile and may modify public records. None of these operations is run during the offline tests.
 
-**Risposte e limiti.** Le risposte mantengono `status`, `http_status` e `data`, inclusi metadati, costi, gruppi, cursori e codici di errore; le credenziali vengono redatte, anche se restituite dall'endpoint della quota. Una cancellazione riuscita con HTTP 204 restituisce `data=null`. CSV e specifiche testuali sono supportati (con `next_cursor` dall'header per i CSV); archivi binari non vengono decodificati. I changefiles restituiscono link senza scaricarne i file. Non c'è paginazione o polling automatico.
+**Responses and limits.** Responses keep `status`, `http_status` and `data`, including metadata, costs, groups, cursors and error codes; credentials are redacted, even if returned by the quota endpoint. A successful deletion with HTTP 204 returns `data=null`. CSV and text specifications are supported (with `next_cursor` from the header for CSVs); binary archives are not decoded. The changefiles return links without downloading their files. There is no automatic pagination or polling.
 
-Il trasporto applica un limite conservativo di 1 richiesta/s per ciascun host OpenAlex, anche alle funzioni esistenti: copre i limiti più stretti di testo e ricerca semantica. Le letture e i POST di interrogazione/classificazione ritentano sui 429 fino a quattro tentativi complessivi, con attese fino a 10 s; le scritture dell'account non vengono ritentate automaticamente. Il coordinamento vale nella singola istanza, non tra applicazioni che condividono la chiave.
+The transport applies a conservative limit of 1 request/s for each OpenAlex host, also to the existing functions: it covers the strictest limits of text and semantic search. Reads and query/classification POSTs retry on 429s up to four attempts in total, with waits of up to 10 s; account writes are not retried automatically. Coordination holds within a single instance, not across applications sharing the key.
 
-### Copertura Semantic Scholar
+### Semantic Scholar coverage
 
-Due strumenti dedicati coprono le 20 operazioni delle specifiche ufficiali [Academic Graph](https://api.semanticscholar.org/api-docs/graph), [Recommendations](https://api.semanticscholar.org/api-docs/recommendations) e [Datasets](https://api.semanticscholar.org/api-docs/datasets), `semantic_scholar` (16 azioni: Academic Graph e Recommendations, un'unica voce per ridurre la sovrapposizione di strumenti simili) e `semantic_scholar_datasets` (4 azioni). `citation_graph` usa OpenAlex. Le rinomine degli strumenti sono nel CHANGELOG.
+Two dedicated tools cover the 20 operations of the official specifications [Academic Graph](https://api.semanticscholar.org/api-docs/graph), [Recommendations](https://api.semanticscholar.org/api-docs/recommendations) and [Datasets](https://api.semanticscholar.org/api-docs/datasets): `semantic_scholar` (16 actions: Academic Graph and Recommendations, a single entry to reduce the overlap of similar tools) and `semantic_scholar_datasets` (4 actions). `citation_graph` uses OpenAlex. The tool renames are in the CHANGELOG.
 
-| Strumento | `action` | Metodo e percorso |
+| Tool | `action` | Method and path |
 |---|---|---|
 | `semantic_scholar` | `paper_details` | `GET /graph/v1/paper/{paper_id}` |
 | `semantic_scholar` | `paper_authors` | `GET /graph/v1/paper/{paper_id}/authors` |
@@ -188,13 +188,13 @@ Due strumenti dedicati coprono le 20 operazioni delle specifiche ufficiali [Acad
 | `semantic_scholar_datasets` | `files` | `GET /datasets/v1/release/{release_id}/dataset/{dataset_name}` |
 | `semantic_scholar_datasets` | `diffs` | `GET /datasets/v1/diffs/{start_release_id}/to/{release_id}/{dataset_name}` |
 
-**Parametri e risposte.** Gli strumenti restituiscono `status`, `http_status` e `data`, che conserva il JSON originale, inclusi campi annidati, valori null, licenze e cursori. Gli errori HTTP conservano la risposta dell'API; gli errori di trasporto restituiscono `status=error` e `detail`. Gli input obbligatori mancanti, i batch fuori limite e gli argomenti che un'azione non usa vengono rifiutati prima della richiesta. L'API verifica la validità dei parametri di query e dei campi richiesti.
+**Parameters and responses.** The tools return `status`, `http_status` and `data`, which keeps the original JSON, including nested fields, null values, licences and cursors. HTTP errors keep the API's response; transport errors return `status=error` and `detail`. Missing required inputs, out-of-limit batches and arguments that an action does not use are rejected before the request. The API checks the validity of the query parameters and the requested fields.
 
-`params` accetta i nomi nativi dell'API, senza traduzioni: `fields`, `query`, `year`, `publicationDateOrYear`, `publicationTypes`, `venue`, `fieldsOfStudy`, `minCitationCount` e gli altri parametri disponibili per l'endpoint. `openAccessPdf` si passa come stringa vuota. Per gli estratti, la query è invece l'argomento `query` dello strumento. Gli identificatori dei paper possono usare i formati accettati dall'API, per esempio `DOI:10.1000/example`, `ARXIV:2401.01234` o `CorpusId:123`; gli autori richiedono l'id Semantic Scholar. Il batch ammette al massimo 500 paper o 1000 autori, senza troncamenti automatici.
+`params` accepts the API's native names, without translation: `fields`, `query`, `year`, `publicationDateOrYear`, `publicationTypes`, `venue`, `fieldsOfStudy`, `minCitationCount` and the other parameters available for the endpoint. `openAccessPdf` is passed as an empty string. For snippets, the query is instead the tool's `query` argument. Paper identifiers may use the formats accepted by the API, for example `DOI:10.1000/example`, `ARXIV:2401.01234` or `CorpusId:123`; authors require the Semantic Scholar id. The batch allows at most 500 papers or 1000 authors, without automatic truncation.
 
-**Paginazione.** Ogni chiamata recupera una sola pagina. Passare `data.next` come `params.offset` per le liste paginate; per `paper_bulk`, passare `data.token` come `params.token`. La ricerca per rilevanza ammette `limit` fino a 100 e fino a 1000 risultati complessivi; `paper_bulk` restituisce fino a 1000 risultati per pagina e non accetta `limit` o `offset`. Le liste di citazioni, riferimenti, autori di un paper e pubblicazioni di un autore ammettono `limit` fino a 1000. Raccomandazioni ed estratti non prevedono cursori di pagina.
+**Pagination.** Each call fetches a single page. Pass `data.next` as `params.offset` for paginated lists; for `paper_bulk`, pass `data.token` as `params.token`. Relevance search allows `limit` up to 100 and up to 1000 results in total; `paper_bulk` returns up to 1000 results per page and does not accept `limit` or `offset`. The lists of citations, references, authors of a paper and publications of an author allow `limit` up to 1000. Recommendations and snippets have no page cursors.
 
-Esempio di argomenti per `semantic_scholar`, ricerca booleana con ordinamento per citazioni:
+Example arguments for `semantic_scholar`, boolean search sorted by citations:
 
 ```json
 {
@@ -208,91 +208,91 @@ Esempio di argomenti per `semantic_scholar`, ricerca booleana con ordinamento pe
 }
 ```
 
-Per le raccomandazioni, `recommend_single` richiede `paper_id` e ammette `params.from` (`recent` o `all-cs`); `recommend_multi` richiede `positive_paper_ids` e accetta `negative_paper_ids`. Entrambe ammettono `params.fields` e `params.limit` fino a 500. In `semantic_scholar_datasets`, `release_id` è `latest` di default; `files` richiede `dataset_name`, mentre `diffs` richiede anche `start_release_id`. I nomi dei dataset si ricavano con `release`. I link firmati sono temporanei e vanno trattati come credenziali di accesso; disponibilità e permessi dipendono dalla chiave API. Nessun file del corpus viene scaricato o applicato localmente.
+For recommendations, `recommend_single` requires `paper_id` and allows `params.from` (`recent` or `all-cs`); `recommend_multi` requires `positive_paper_ids` and accepts `negative_paper_ids`. Both allow `params.fields` and `params.limit` up to 500. In `semantic_scholar_datasets`, `release_id` is `latest` by default; `files` requires `dataset_name`, while `diffs` also requires `start_release_id`. Dataset names are obtained with `release`. Signed links are temporary and must be treated as access credentials; availability and permissions depend on the API key. No corpus file is downloaded or applied locally.
 
-I risultati di `match` e delle raccomandazioni non equivalgono a citazioni bibliografiche verificate: per questo restano disponibili `find_doi` e `verify_doi`.
+The results of `match` and of the recommendations are not equivalent to verified bibliographic citations: that is why `find_doi` and `verify_doi` remain available.
 
-## Prompt (scorciatoie)
+## Prompts (shortcuts)
 
-Nei client che supportano i prompt MCP (in Claude web: menu del connettore, "Add from …") sono disponibili scorciatoie che compilano la richiesta e richiamano gli strumenti nell'ordine giusto. I campi sono in testo libero: si scrive il riferimento come lo si ricorda, e Claude ricava titolo, autore e anno e risolve i titoli in DOI. I campi facoltativi lasciati vuoti fanno usare a Claude quello che è già nella conversazione (la mappa o la ricerca precedente).
+In clients that support MCP prompts (in Claude web: the connector menu, "Add from …") there are shortcuts that compile the request and call the tools in the right order. The fields are free text: you write the reference as you remember it, and Claude derives title, author and year and resolves titles into DOIs. Optional fields left empty make Claude use what is already in the conversation (the previous map or search).
 
-| Prompt | Campi | Cosa fa |
+| Prompt | Fields | What it does |
 |---|---|---|
-| Verifica riferimenti | un riferimento come lo ricordi, un DOI o una bibliografia incollata; vuoto per tutti quelli citati in chat | Per ogni voce sceglie: `find_doi` se manca il DOI, `verify_doi` se c'è, `find_doi` con `is_book=true` e `verify_book` per i libri; tabella degli esiti e lista APA aggiornata |
-| Ricerca letteratura | tema con parole tue; facoltativo: anni | Claude costruisce la query e sceglie i database; `search_literature` con tabella e log |
-| Mappa delle citazioni | DOI o titoli, o vuoto per i lavori di cui si sta parlando | `citation_graph` e artifact D3; poi le possibili letture mancanti |
-| Tabella dei paper | DOI o titoli, o vuoto per la mappa o ricerca precedente | `paper_table` con tabella compatta; abstract completi su richiesta |
+| Verify references | a reference as you remember it, a DOI or a pasted bibliography; empty for all those cited in chat | For each entry it chooses: `find_doi` if the DOI is missing, `verify_doi` if present, `find_doi` with `is_book=true` and `verify_book` for books; table of outcomes and updated APA list |
+| Literature search | topic in your own words; optional: years | Claude builds the query and chooses the databases; `search_literature` with table and log |
+| Citation map | DOIs or titles, or empty for the works being discussed | `citation_graph` and a D3 artifact; then the possible missing readings |
+| Paper table | DOIs or titles, or empty for the previous map or search | `paper_table` with a compact table; full abstracts on request |
 
-## Come recupera e confronta i dati
+## How it retrieves and compares data
 
-**Richieste.** Tutte le chiamate passano da un unico client HTTP condiviso. Un trasporto dedicato limita le richieste contemporanee per host (5 di default, 1 per Semantic Scholar, OpenAlex e arXiv, 2 per Crossref e archive.org) e impone un intervallo minimo di 1 s per Semantic Scholar e ciascun host OpenAlex, 3 s per arXiv. Le richieste in coda per lo stesso host sono servite per priorità: quelle dei tool rapidi (`paper_table` e le altre letture) passano davanti a quelle dei lavori lunghi (`map_create`, `map_expand`, `map_intents`, `map_refresh`, `map_add_patents`, `map_add_seeds`), a parità di priorità in ordine di arrivo; una richiesta già partita non viene interrotta e intervallo e concorrenza restano gli stessi. I retry sui 429 sono previsti per Semantic Scholar e per le letture e i POST di interrogazione/classificazione OpenAlex: fino a quattro tentativi complessivi, con attese di al massimo 10 s. Le scritture dell'account OpenAlex e le altre fonti non vengono ritentate automaticamente. Nelle ricerche multi-fonte, le fonti vengono interrogate in parallelo: se una fallisce, l'errore finisce in `source_errors` e le altre proseguono. I record Crossref restano in cache per un'ora.
+**Requests.** All calls go through a single shared HTTP client. A dedicated transport limits simultaneous requests per host (5 by default, 1 for Semantic Scholar, OpenAlex and arXiv, 2 for Crossref and archive.org) and imposes a minimum interval of 1 s for Semantic Scholar and each OpenAlex host, 3 s for arXiv. Queued requests for the same host are served by priority: those of quick tools (`paper_table` and the other reads) go ahead of those of long jobs (`map_create`, `map_expand`, `map_intents`, `map_refresh`, `map_add_patents`, `map_add_seeds`), in order of arrival at equal priority; a request already started is not interrupted and interval and concurrency stay the same. Retries on 429s are foreseen for Semantic Scholar and for the OpenAlex reads and query/classification POSTs: up to four attempts in total, with waits of at most 10 s. OpenAlex account writes and the other sources are not retried automatically. In multi-source searches, the sources are queried in parallel: if one fails, the error ends up in `source_errors` and the others proceed. Crossref records stay in cache for one hour.
 
-**Semantic Scholar.** Il limite di 1 richiesta al secondo resta attivo anche con la chiave API ed è cumulativo su tutti gli endpoint di Academic Graph, Recommendations e Datasets, inclusi i retry. Il coordinamento vale per una singola istanza del server; altre istanze o applicazioni che usano la stessa chiave consumano la medesima quota e richiedono un coordinamento esterno.
+**Semantic Scholar.** The limit of 1 request per second stays active even with the API key and is cumulative across all the Academic Graph, Recommendations and Datasets endpoints, including retries. Coordination holds for a single server instance; other instances or applications that use the same key consume the same quota and require external coordination.
 
-**OpenAlex.** Se configurata, `OPENALEX_API_KEY` viene aggiunta come parametro `api_key` alle richieste su `api.openalex.org`, incluse ricerca DOI, ricerca bibliografica, grafi, tabelle e strumenti dedicati. Le correzioni su `user.openalex.org` usano invece l'header `Authorization: Bearer`. `CONTACT_EMAIL` resta compatibile e viene inviato come `mailto` sul primo host. La chiave non viene inclusa nei log riproducibili restituiti dagli strumenti e viene rimossa dagli URL delle risposte prima di generare errori HTTP. Configurarla nell'ambiente del processo, senza inserirla nel codice o nel repository, e riavviare il server. Eventuali log HTTP di debug esterni vanno protetti, dato che sul primo host l'autenticazione viaggia nell'URL.
+**OpenAlex.** If configured, `OPENALEX_API_KEY` is added as the `api_key` parameter to requests on `api.openalex.org`, including DOI search, bibliographic search, graphs, tables and the dedicated tools. Corrections on `user.openalex.org` use the `Authorization: Bearer` header instead. `CONTACT_EMAIL` remains compatible and is sent as `mailto` on the first host. The key is not included in the reproducible logs returned by the tools and is removed from the response URLs before generating HTTP errors. Configure it in the process's environment, without putting it in the code or the repository, and restart the server. Any external HTTP debug logs must be protected, since on the first host the authentication travels in the URL.
 
-**Confronto dei titoli.** I titoli vengono normalizzati (accenti rimossi, script non latini conservati, HTML e prefissi come "RETRACTED:" eliminati) e confrontati con `SequenceMatcher`, considerando anche le varianti con e senza sottotitolo. La soglia è 0.88.
+**Title comparison.** Titles are normalised (accents removed, non-Latin scripts preserved, HTML and prefixes like "RETRACTED:" removed) and compared with `SequenceMatcher`, also considering the variants with and without a subtitle. The threshold is 0.88.
 
-**Regole di accettazione in `find_doi`.**
-- Un autore che non corrisponde, o un anno distante più di uno, esclude il candidato.
-- Titoli sotto le quattro parole richiedono la conferma dell'autore.
-- Errata, avvisi di ritrattazione, peer review e repliche vengono scartati (`excluded_derivatives`).
-- Le fonti secondarie ricavano i DOI in buona parte da Crossref: la presenza di un DOI in più indici non è una conferma indipendente.
-- `agreement` conta le fonti indipendenti (`independent_sources`): Crossref, OpenAlex e Semantic Scholar valgono come una sola, perché OpenAlex e Semantic Scholar derivano in gran parte da Crossref. `competing_dois` elenca gli altri DOI compatibili col titolo (spesso preprint o altra versione), da confermare. Anche in `search_literature` ogni record ha `independent_sources`, con la stessa regola.
+**Acceptance rules in `find_doi`.**
+- An author that does not match, or a year more than one apart, excludes the candidate.
+- Titles under four words require the author's confirmation.
+- Errata, retraction notices, peer reviews and replies are discarded (`excluded_derivatives`).
+- Secondary sources derive their DOIs largely from Crossref: the presence of a DOI in several indexes is not an independent confirmation.
+- `agreement` counts the independent sources (`independent_sources`): Crossref, OpenAlex and Semantic Scholar count as one, because OpenAlex and Semantic Scholar derive largely from Crossref. `competing_dois` lists the other DOIs compatible with the title (often a preprint or another version), to be confirmed. In `search_literature` too every record has `independent_sources`, with the same rule.
 
-**Grafo di citazione.** `citation_graph` parte dai lavori seed, scarica i loro riferimenti e i lavori citanti più citati, ordina i candidati per numero di seed collegati e poi per citazioni, e tiene i primi `max_nodes`. Le co-citazioni sono calcolate solo sui lavori presenti nel grafo, quindi sono un limite inferiore. L'accoppiamento usa le liste di riferimenti complete e riporta sia il numero di riferimenti condivisi sia una forza normalizzata (0–1); collega anche i lavori recenti, che non hanno ancora co-citazioni. Un accoppiamento molto alto tra due nodi può indicare due record dello stesso lavoro.
+**Citation graph.** `citation_graph` starts from the seed works, downloads their references and the most-cited citing works, sorts the candidates by number of linked seeds and then by citations, and keeps the first `max_nodes`. Co-citations are computed only on the works present in the graph, so they are a lower bound. Coupling uses the complete reference lists and reports both the number of shared references and a normalised strength (0–1); it also links recent works, which do not have co-citations yet. A very high coupling between two nodes may indicate two records of the same work.
 
-## Skill: i flussi tra i tre MCP
+## Skills: the flows between the three MCPs
 
-I prompt qui sopra riguardano un solo server. Il ciclo intero (trovare, verificare, acquisire in Zotero, leggere, scrivere la nota in Obsidian, ricollegare alle mappe) è descritto nelle skill in `skills/`: `add-to-library`, `reading-note`, `literature-map`, `prior-art`. Ogni skill dice l'ordine delle chiamate tra DOI, Zotero e Obsidian, che cosa scrive dove, e quando fermarsi a chiedere; `skills/README.md` spiega come installarle (Claude Code: `~/.claude/skills/`; Claude web: caricamento come skill) e raccoglie le regole che valgono in tutte.
+The prompts above concern a single server. The whole cycle (find, verify, acquire in Zotero, read, write the note in Obsidian, reconnect to the maps) is described in the skills in `skills/`: `add-to-library`, `reading-note`, `literature-map`, `prior-art`. Each skill gives the order of calls among DOI, Zotero and Obsidian, what it writes where, and when to stop and ask; `skills/README.md` explains how to install them (Claude Code: `~/.claude/skills/`; Claude web: upload as a skill) and collects the rules that apply to all.
 
-## Limiti noti
+## Known limits
 
-- La filosofia è coperta male da tutte le fonti; PhilPapers non ha un'API di ricerca accessibile. L'OAI-PMH di PhilArchive permette solo la raccolta: il lavoro settimanale ne tiene una copia locale (`philarchive.py`), interrogabile come database `philarchive`, che copre i preprint e non l'indice intero. Il database `dnb` copre le monografie e le traduzioni in tedesco, senza abstract.
-- OpenAlex ha liste di riferimenti incomplete per molti lavori umanistici e datati.
-- In `search_literature` i filtri `doc_types`, `open_access_only` ed `exclude_retracted` valgono solo per OpenAlex; gli altri database li riportano in `ignored_filters`. La deduplicazione vale per la singola pagina.
-- Senza chiave API Semantic Scholar risponde spesso 429.
-- Le edizioni ("2nd ed.") e il numero di pagine dei libri non sono verificabili con queste fonti.
-- Google Books e Open Library possono derivare i dati dagli stessi feed degli editori: l'accordo tra i cataloghi è una corroborazione, non una prova. Senza chiave la quota di Google Books è condivisa e può dare 429.
-- ORCID: solo i dati resi pubblici dal ricercatore; i nomi non identificano da soli una persona.
-- `verify_doi` non ha una fonte di ritrattazioni per i DOI DataCite: `is_retracted` è `null` (sconosciuto), mai `false`. I DOI di altre agenzie (mEDRA, JaLC...) risultano registrati ma non verificabili nei metadati.
-- Il controllo di copertura di `citation_graph` confronta solo i conteggi dei seed, non le liste. OpenAlex e Semantic Scholar derivano in parte da Crossref; per questo il confronto include l'OpenCitations Index (CC0, pipeline indipendente), e `map_refresh` conserva per ogni seed `cited_by_oc` e segnala in `coverage_gaps` i seed che OpenCitations conta molto più di OpenAlex. Il report settimanale li elenca.
-- DBLP risponde con una sfida proof-of-work (Anubis) e non è integrato.
-- EPO OPS applica un fair use oltre alla quota settimanale: un 403 può essere un rallentamento temporaneo. Il trasporto limita OPS a una richiesta al secondo. La sintassi CQL (`ta all "…"`, `pa=`, `ic=`, `ct=`) è passata al servizio così com'è; la ricerca a parole libere copre solo titolo e abstract.
-- `format_apa` riproduce i metadati come li ha depositati l'editore e non li verifica: con un `mismatch` di `verify_doi` il riferimento va composto dai valori verificati. `title_case_suspected` è un'euristica sul numero di parole capitalizzate (i nomi propri la falsano e sotto tre parole utili non giudica); nessuna conversione automatica del titolo.
+- Philosophy is poorly covered by all the sources; PhilPapers has no accessible search API. PhilArchive's OAI-PMH allows only harvesting: the weekly job keeps a local copy of it (`philarchive.py`), queryable as the `philarchive` database, which covers the preprints and not the whole index. The `dnb` database covers monographs and translations in German, without abstracts.
+- OpenAlex has incomplete reference lists for many humanities and older works.
+- In `search_literature` the filters `doc_types`, `open_access_only` and `exclude_retracted` apply only to OpenAlex; the other databases report them in `ignored_filters`. Deduplication applies to a single page.
+- Without an API key Semantic Scholar often answers 429.
+- Editions ("2nd ed.") and the page count of books cannot be verified with these sources.
+- Google Books and Open Library may derive their data from the same publishers' feeds: agreement between the catalogues is corroboration, not proof. Without a key the Google Books quota is shared and may give 429.
+- ORCID: only the data made public by the researcher; names alone do not identify a person.
+- `verify_doi` has no source of retractions for DataCite DOIs: `is_retracted` is `null` (unknown), never `false`. DOIs of other agencies (mEDRA, JaLC...) appear as registered but not verifiable in the metadata.
+- The coverage check of `citation_graph` compares only the seeds' counts, not the lists. OpenAlex and Semantic Scholar derive partly from Crossref; for this reason the comparison includes the OpenCitations Index (CC0, independent pipeline), and `map_refresh` keeps `cited_by_oc` for each seed and reports in `coverage_gaps` the seeds that OpenCitations counts as much higher than OpenAlex. The weekly report lists them.
+- DBLP answers with a proof-of-work challenge (Anubis) and is not integrated.
+- EPO OPS applies a fair use in addition to the weekly quota: a 403 may be a temporary slowdown. The transport limits OPS to one request per second. The CQL syntax (`ta all "…"`, `pa=`, `ic=`, `ct=`) is passed to the service as is; free-text search covers only title and abstract.
+- `format_apa` reproduces the metadata as deposited by the publisher and does not verify it: with a `mismatch` from `verify_doi` the reference must be composed from the verified values. `title_case_suspected` is a heuristic on the number of capitalised words (proper names skew it and under three useful words it does not judge); no automatic conversion of the title.
 
-## Storia e decisioni
+## History and decisions
 
-`CHANGELOG.md` elenca le modifiche visibili ai client. `docs/AUDIT-2026-11.md` documenta l'audit di progettazione dei tool, gli interventi della versione 0.4.0, i bug trovati e i passi consigliati.
+`CHANGELOG.md` lists the changes visible to clients. `docs/AUDIT-2026-11.md` documents the design audit of the tools, the interventions of version 0.4.0, the bugs found and the recommended steps.
 
-## Installazione
+## Installation
 
-Richiede Python 3.10+ e [uv](https://docs.astral.sh/uv/).
+Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync
 uv run python -m pytest -q
 ```
 
-La suite gira senza rete. `tests/fixtures/find_doi_cases.json` è un insieme di riferimento per `find_doi` (sottotitoli, preprint e versione pubblicata, errata, titoli corti, omonimi, diacritici, libri ed edizioni): `tests/test_find_doi_reference_set.py` misura precisione e richiamo e fallisce sotto le soglie; i casi marcati `known_gap` sono lacune note delle regole attuali e pesano sul richiamo. `tests/test_tool_surface.py` impone le convenzioni sui tool (descrizioni limitate, enumerazioni per i valori finiti, `invalid_input` per gli argomenti non validi, strato gateway elencato, nessun nome definito due volte, moduli inclusi nel wheel). I test in `tests/test_server.py` coprono normalizzazione dei titoli, confronto degli autori, scarto di errata e repliche, pulizia dei DOI, calcolo di co-citazioni e accoppiamento. Verificano anche routing e payload delle API, autenticazione, redazione delle credenziali, cursori e formati di risposta, errori HTTP, retry, limite cumulativo Semantic Scholar, registrazione e annotazioni MCP, anteprime senza richieste e scritture OpenAlex confermate su risposte simulate. Coprono inoltre Google Books, ORCID (validazione degli iD, token `/read-public` con cache e rinnovo dopo un 401) e il calcolo di `agreement` e dei conflitti tra cataloghi. Questi test non verificano online la validità delle chiavi, i permessi dell'account o la disponibilità reale degli endpoint.
+The suite runs without network. `tests/fixtures/find_doi_cases.json` is a reference set for `find_doi` (subtitles, preprint and published version, errata, short titles, homonyms, diacritics, books and editions): `tests/test_find_doi_reference_set.py` measures precision and recall and fails below the thresholds; the cases marked `known_gap` are known gaps in the current rules and weigh on recall. `tests/test_tool_surface.py` enforces the conventions on the tools (limited descriptions, enumerations for finite values, `invalid_input` for invalid arguments, gateway layer listed, no name defined twice, modules included in the wheel). The tests in `tests/test_server.py` cover title normalisation, author comparison, discarding of errata and replies, DOI cleaning, computation of co-citations and coupling. They also verify routing and payload of the APIs, authentication, credential redaction, cursors and response formats, HTTP errors, retries, the cumulative Semantic Scholar limit, MCP registration and annotations, previews without requests and confirmed OpenAlex writes on simulated responses. They also cover Google Books, ORCID (iD validation, `/read-public` token with cache and renewal after a 401) and the computation of `agreement` and conflicts between catalogues. These tests do not verify online the validity of the keys, the account permissions or the real availability of the endpoints.
 
-### Struttura
+### Structure
 
-| File | Contenuto |
+| File | Contents |
 |---|---|
-| `server.py` | Strumenti, prompt, client HTTP, modalità stdio e HTTP |
-| `matching.py` | Il confronto bibliografico (titolo, cognome, anno, errata e repliche) usato da `find_doi`, `verify_doi`, `patent_get` e dalle mappe; solo libreria standard. L'MCP Zotero ne tiene una copia identica (`zotero_mcp/matching.py`) per `create_item_from_doi` e `extract_references`: le due copie vanno aggiornate insieme |
-| `maps.py`, `knowledge.py`, `patents.py` | Mappe persistenti (SQLite), lettura delle istantanee Zotero e Obsidian con copertura e citekey, EPO OPS |
-| `corpus.py`, `semantic.py` | Indice FTS5 del corpus (note, pagine, annotazioni) e strato semantico con embedding locali; `semantic.py download | embed | status` da riga di comando |
-| `philarchive.py`, `weekly.py` | Raccolta OAI-PMH di PhilArchive in copia locale; lavoro settimanale (mappe, ritrattazioni, copertura, raccolta, embedding, backup, report, ntfy) |
-| `check_creds.py` | Controllo delle credenziali del servizio sul Pi, senza stamparle |
-| `deploy/` | Unit e timer systemd del lavoro settimanale |
-| `pages/` | Sorgenti delle pagine *Literature maps* e *Knowledge views* |
-| `skills/` | Le skill di Claude che orchestrano i flussi tra i tre MCP (vedi sotto) |
-| `tests/` | Test offline, per modulo; `tests/fixtures/contract/` i file di contratto degli altri due MCP |
-| `pyproject.toml`, `uv.lock` | Dipendenze e versioni bloccate |
+| `server.py` | Tools, prompts, HTTP client, stdio and HTTP modes |
+| `matching.py` | The bibliographic comparison (title, surname, year, errata and replies) used by `find_doi`, `verify_doi`, `patent_get` and the maps; standard library only. The Zotero MCP keeps an identical copy (`zotero_mcp/matching.py`) for `create_item_from_doi` and `extract_references`: the two copies must be updated together |
+| `maps.py`, `knowledge.py`, `patents.py` | Persistent maps (SQLite), reading of the Zotero and Obsidian snapshots with coverage and citekeys, EPO OPS |
+| `corpus.py`, `semantic.py` | FTS5 index of the corpus (notes, pages, annotations) and semantic layer with local embeddings; `semantic.py download | embed | status` from the command line |
+| `philarchive.py`, `weekly.py` | OAI-PMH harvest of PhilArchive into a local copy; weekly job (maps, retractions, coverage, harvest, embeddings, backup, report, ntfy) |
+| `check_creds.py` | Check of the service's credentials on the Pi, without printing them |
+| `deploy/` | systemd units and timer of the weekly job |
+| `pages/` | Sources of the *Literature maps* and *Knowledge views* pages |
+| `skills/` | The Claude skills that orchestrate the flows between the three MCPs (see below) |
+| `tests/` | Offline tests, per module; `tests/fixtures/contract/` the contract files of the other two MCPs |
+| `pyproject.toml`, `uv.lock` | Dependencies and locked versions |
 
-### Uso locale (stdio), ad esempio in VS Code
+### Local use (stdio), for example in VS Code
 
 ```json
 {
@@ -300,9 +300,9 @@ La suite gira senza rete. `tests/fixtures/find_doi_cases.json` è un insieme di 
     "paper-doi": {
       "type": "stdio",
       "command": "uv",
-      "args": ["--directory", "/percorso/a/doi-mcp", "run", "server.py"],
+      "args": ["--directory", "/path/to/doi-mcp", "run", "server.py"],
       "env": {
-        "CONTACT_EMAIL": "tu@example.org",
+        "CONTACT_EMAIL": "you@example.org",
         "OPENALEX_API_KEY": "${input:openalex-api-key}",
         "SEMANTIC_SCHOLAR_API_KEY": "${input:semantic-scholar-api-key}",
         "GOOGLE_BOOKS_API_KEY": "${input:google-books-api-key}",
@@ -345,83 +345,83 @@ La suite gira senza rete. `tests/fixtures/find_doi_cases.json` è un insieme di 
 }
 ```
 
-In VS Code, aprire la configurazione con **MCP: Open User Configuration** e unire la voce del server e gli input a quelli già presenti. Al primo avvio VS Code chiede le chiavi in campi protetti, senza salvarle nel JSON. Dopo modifiche al codice o alle variabili, riavviare `paper-doi` da **MCP: List Servers**. Per usare le fonti senza chiave, omettere la variabile corrispondente e il relativo input.
+In VS Code, open the configuration with **MCP: Open User Configuration** and merge the server entry and the inputs with those already present. At first start VS Code asks for the keys in protected fields, without saving them in the JSON. After changes to the code or the variables, restart `paper-doi` from **MCP: List Servers**. To use the sources without a key, omit the corresponding variable and its input.
 
-### Uso remoto (HTTP), ad esempio per Claude web
+### Remote use (HTTP), for example for Claude web
 
-Con `MCP_TRANSPORT=http` il server espone Streamable HTTP su `127.0.0.1` e richiede il token nell'header `Authorization: Bearer` di ogni richiesta (in Claude web, in *Request headers* del connettore); un token nell'URL viene rifiutato, perché gli URL finiscono nei log dei proxy e nelle cronologie. Va pubblicato dietro un proxy HTTPS, ad esempio Tailscale Funnel o Cloudflare Tunnel. `GET /status` risponde senza credenziali solo ai client su loopback: mappe, istantanee, indice del corpus, copia PhilArchive, ultimo lavoro settimanale.
+With `MCP_TRANSPORT=http` the server exposes Streamable HTTP on `127.0.0.1` and requires the token in the `Authorization: Bearer` header of every request (in Claude web, in the connector's *Request headers*); a token in the URL is rejected, because URLs end up in proxy logs and in histories. It must be published behind an HTTPS proxy, for example Tailscale Funnel or Cloudflare Tunnel. `GET /status` answers without credentials only to loopback clients: maps, snapshots, corpus index, PhilArchive copy, last weekly job.
 
-Le chiavi `OPENALEX_API_KEY` e `SEMANTIC_SCHOLAR_API_KEY` vanno impostate nell'ambiente del servizio remoto, non nella configurazione del client HTTP. Gli input protetti di VS Code dell'esempio stdio non configurano un server remoto. Riavviare il servizio dopo averle aggiunte o cambiate.
+The keys `OPENALEX_API_KEY` and `SEMANTIC_SCHOLAR_API_KEY` must be set in the remote service's environment, not in the HTTP client's configuration. The protected VS Code inputs of the stdio example do not configure a remote server. Restart the service after adding or changing them.
 
-Su un server senza uv si può installare con pip dalle versioni bloccate:
+On a server without uv you can install with pip from the locked versions:
 
 ```sh
 uv export --no-dev --no-emit-project --format requirements-txt > requirements.lock.txt
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock.txt
 ```
 
-Per aggiornare: copiare `server.py`, `maps.py`, `knowledge.py`, `patents.py`, `matching.py`, `corpus.py`, `philarchive.py`, `weekly.py` e `semantic.py` (e, se cambiano le dipendenze, rifare l'installazione), poi riavviare il servizio. Dopo modifiche a strumenti o prompt, in Claude web il connettore va disattivato e riattivato perché rilegga l'elenco.
+To update: copy `server.py`, `maps.py`, `knowledge.py`, `patents.py`, `matching.py`, `corpus.py`, `philarchive.py`, `weekly.py` and `semantic.py` (and, if the dependencies change, redo the installation), then restart the service. After changes to tools or prompts, in Claude web the connector must be disabled and re-enabled so that it re-reads the list.
 
-## Variabili d'ambiente
+## Environment variables
 
-| Variabile | Uso |
+| Variable | Use |
 |---|---|
-| `CONTACT_EMAIL` | Email per il polite pool di Crossref e OpenAlex (consigliata) |
-| `STATE_DIRECTORY` | Cartella delle mappe (`maps.sqlite`); default `/var/lib/doi-mcp`, che systemd imposta con `StateDirectory=doi-mcp` |
-| `IA_ACCESS_KEY`, `IA_SECRET_KEY` | Chiavi S3 di archive.org (facoltative): la ricerca funziona anche senza; se presenti vengono inviate come `Authorization: LOW` |
-| `OPENALEX_API_KEY` | Chiave OpenAlex: parametro `api_key` su `api.openalex.org`, header Bearer su `user.openalex.org` per le correzioni |
-| `OPENALEX_ENABLE_WRITES` | Abilita le scritture confermate dell'account OpenAlex solo se impostata a `true`; default disattivato |
-| `SEMANTIC_SCHOLAR_API_KEY` | Chiave inviata nell'header `x-api-key`; resta il limite cumulativo di 1 richiesta/s su tutti gli endpoint |
-| `GOOGLE_BOOKS_API_KEY` | Facoltativa: chiave inviata nell'header `x-goog-api-key` (mai nell'URL) per aumentare la quota di Google Books |
-| `ORCID_CLIENT_ID`, `ORCID_CLIENT_SECRET` | Facoltative, da impostare insieme: il server ottiene un token `/read-public` da `orcid.org/oauth/token`, lo tiene in memoria e lo invia come Bearer all'API pubblica. Il secret non viene inviato ad altri host né incluso negli errori |
-| `EPO_OPS_KEY`, `EPO_OPS_SECRET` | Credenziali OPS (developers.epo.org, app con «OPS v3.2»; gratuito fino a 4 GB a settimana). Senza di esse `patent_search` e `patent_get` non vengono registrati. Il token OAuth resta in memoria |
-| `ENABLE_GATEWAY` | Registra lo strato gateway (OpenAlex, Semantic Scholar, Google Books, ORCID) solo se impostata a `true`; default disattivato |
-| `KNOWLEDGE_DIR` | Cartella delle istantanee `library.json`, `notes.json`, `notes_text.json`, `fulltext/`, `references/` e dei report (`reports/`) (default `/var/lib/knowledge`) |
-| `SEMANTIC_MODEL_DIR` | Cartella del modello di embedding (default `STATE_DIRECTORY/models/multilingual-e5-small`) |
-| `OPENCITATIONS_TOKEN` | Facoltativo: token di accesso dell'OpenCitations Index (gratuito), inviato nell'header `authorization` |
-| `PHILARCHIVE_OAI_URL` | Endpoint OAI-PMH di PhilArchive (default `https://philarchive.org/oai.pl`) |
-| `NTFY_URL`, `NTFY_TOKEN` | Facoltative: il lavoro settimanale manda un riassunto (nuovi lavori citanti, ritrattazioni, passi falliti) a un topic ntfy quando il report è pronto |
-| `BACKUP_DIR`, `BACKUP_KEEP` | Cartella e numero delle copie di `maps.sqlite`, `philarchive.sqlite`, `corpus.sqlite` e di `KNOWLEDGE_DIR` fatte dal lavoro settimanale (default `STATE_DIRECTORY/backups`, 8) |
-| `MCP_TRANSPORT` | `stdio` (default) o `http` |
-| `PORT` | Porta HTTP, default 3002 |
-| `MCP_AUTH_TOKEN` | Obbligatorio in modalità HTTP, almeno 32 caratteri (`openssl rand -hex 32`) |
-| `MCP_ALLOW_QUERY_TOKEN` | `true` per accettare il token anche come `?token=` nell'URL (spento per default). Serve per Claude web, il cui modulo dei connettori ha solo nome e URL; tenere spento il log degli accessi del proxy |
-| `MCP_ALLOWED_HOSTS` | Host pubblici accettati dietro il proxy, separati da virgola |
+| `CONTACT_EMAIL` | Email for the Crossref and OpenAlex polite pool (recommended) |
+| `STATE_DIRECTORY` | Folder of the maps (`maps.sqlite`); default `/var/lib/doi-mcp`, which systemd sets with `StateDirectory=doi-mcp` |
+| `IA_ACCESS_KEY`, `IA_SECRET_KEY` | archive.org S3 keys (optional): search works without them too; if present they are sent as `Authorization: LOW` |
+| `OPENALEX_API_KEY` | OpenAlex key: `api_key` parameter on `api.openalex.org`, Bearer header on `user.openalex.org` for corrections |
+| `OPENALEX_ENABLE_WRITES` | Enables the confirmed OpenAlex account writes only if set to `true`; default off |
+| `SEMANTIC_SCHOLAR_API_KEY` | Key sent in the `x-api-key` header; the cumulative limit of 1 request/s across all endpoints remains |
+| `GOOGLE_BOOKS_API_KEY` | Optional: key sent in the `x-goog-api-key` header (never in the URL) to increase the Google Books quota |
+| `ORCID_CLIENT_ID`, `ORCID_CLIENT_SECRET` | Optional, to be set together: the server obtains a `/read-public` token from `orcid.org/oauth/token`, keeps it in memory and sends it as Bearer to the public API. The secret is not sent to other hosts nor included in errors |
+| `EPO_OPS_KEY`, `EPO_OPS_SECRET` | OPS credentials (developers.epo.org, app with "OPS v3.2"; free up to 4 GB a week). Without them `patent_search` and `patent_get` are not registered. The OAuth token stays in memory |
+| `ENABLE_GATEWAY` | Registers the gateway layer (OpenAlex, Semantic Scholar, Google Books, ORCID) only if set to `true`; default off |
+| `KNOWLEDGE_DIR` | Folder of the snapshots `library.json`, `notes.json`, `notes_text.json`, `fulltext/`, `references/` and of the reports (`reports/`) (default `/var/lib/knowledge`) |
+| `SEMANTIC_MODEL_DIR` | Folder of the embedding model (default `STATE_DIRECTORY/models/multilingual-e5-small`) |
+| `OPENCITATIONS_TOKEN` | Optional: access token of the OpenCitations Index (free), sent in the `authorization` header |
+| `PHILARCHIVE_OAI_URL` | PhilArchive OAI-PMH endpoint (default `https://philarchive.org/oai.pl`) |
+| `NTFY_URL`, `NTFY_TOKEN` | Optional: the weekly job sends a summary (new citing works, retractions, failed steps) to an ntfy topic when the report is ready |
+| `BACKUP_DIR`, `BACKUP_KEEP` | Folder and number of copies of `maps.sqlite`, `philarchive.sqlite`, `corpus.sqlite` and of `KNOWLEDGE_DIR` made by the weekly job (default `STATE_DIRECTORY/backups`, 8) |
+| `MCP_TRANSPORT` | `stdio` (default) or `http` |
+| `PORT` | HTTP port, default 3002 |
+| `MCP_AUTH_TOKEN` | Required in HTTP mode, at least 32 characters (`openssl rand -hex 32`) |
+| `MCP_ALLOW_QUERY_TOKEN` | `true` to accept the token also as `?token=` in the URL (off by default). Needed for Claude web, whose connector form has only a name and a URL; keep the proxy's access log off |
+| `MCP_ALLOWED_HOSTS` | Public hosts accepted behind the proxy, comma-separated |
 
-## Mappe: ponte con Zotero e Obsidian
+## Maps: bridge with Zotero and Obsidian
 
-Il DOI MCP non chiama Zotero e non legge il vault. Legge due istantanee in `KNOWLEDGE_DIR` (sola lettura per questo servizio), rigenerate su richiesta dagli altri due MCP: `library.json` dall'MCP Zotero (`refresh_library_snapshot`), `notes.json` dall'MCP Obsidian (`refresh_notes_snapshot`). La pagina delle mappe ha il pulsante "Refresh library and notes" che li chiama entrambi. Da lì `map_get`, `map_suggest` e `map_export` aggiungono a ogni lavoro `in_library`, `zotero_key` e le note che lo citano nel `reference`; `map_add_seeds` accetta `zotero_collection` o `zotero_tag`. Senza istantanee queste funzioni lo dicono e il resto funziona.
+The DOI MCP does not call Zotero and does not read the vault. It reads two snapshots in `KNOWLEDGE_DIR` (read-only for this service), regenerated on request by the other two MCPs: `library.json` from the Zotero MCP (`refresh_library_snapshot`), `notes.json` from the Obsidian MCP (`refresh_notes_snapshot`). The maps page has the "Refresh library and notes" button that calls both. From there `map_get`, `map_suggest` and `map_export` add to each work `in_library`, `zotero_key` and the notes that cite it in `reference`; `map_add_seeds` accepts `zotero_collection` or `zotero_tag`. Without snapshots these functions say so and the rest works.
 
-Un lavoro della mappa viene abbinato a un item della libreria per DOI, poi per chiave Zotero (nodi `Z:` e seed presi da Zotero), poi per numero di pubblicazione (nodi `P:`), infine per titolo, cognome del primo autore e anno con le regole di `matching.py`: così un libro che OpenAlex ha con DOI e Zotero senza, o viceversa, risulta `in_library`. `library_match` dice quale criterio ha deciso; `verified` riporta la riga `Verified:` dell'item (scritta da `create_item_from_doi` e `set_verification` dell'MCP Zotero), e `map_export` la mostra. Gli altri due server rigenerano le istantanee da soli pochi secondi dopo ogni scrittura, quindi il pulsante serve solo per forzare.
+A work in the map is matched to a library item by DOI, then by Zotero key (`Z:` nodes and seeds taken from Zotero), then by publication number (`P:` nodes), finally by title, first author's surname and year with the rules of `matching.py`: so a book that OpenAlex has with a DOI and Zotero without, or vice versa, shows up as `in_library`. `library_match` says which criterion decided; `verified` reports the item's `Verified:` line (written by `create_item_from_doi` and `set_verification` of the Zotero MCP), and `map_export` shows it. The other two servers regenerate the snapshots by themselves a few seconds after every write, so the button is only for forcing.
 
-La pagina *Knowledge views* (sorgente `pages/knowledge-views.html`, capability `mcp` sul connettore DOI con `coverage_report`, `search_log`, `weekly_report`, `map_list`, `search_everything`) legge dal vivo lo stato dei tre archivi: lavori e note, quota con nota, senza PDF e non verificati; copertura per progetto con i lavori senza nota e le note da riparare; treemap dei codici ANZSRC e istogramma degli anni; ricerca nel corpus per parole o per significato; registro delle ricerche; ultimo report settimanale; elenco delle mappe. Non ha un server proprio: i dati sono quelli dei tool.
+The *Knowledge views* page (source `pages/knowledge-views.html`, `mcp` capability on the DOI connector with `coverage_report`, `search_log`, `weekly_report`, `map_list`, `search_everything`) reads live the state of the three archives: works and notes, quota with a note, without a PDF and not verified; coverage by project with the works without a note and the notes to repair; treemap of the ANZSRC codes and histogram of the years; corpus search by words or by meaning; search log; latest weekly report; list of maps. It has no server of its own: the data are those of the tools.
 
-### Lavoro settimanale e corpus
+### Weekly job and corpus
 
-`weekly.py` (unit e timer in `deploy/`: `doi-weekly.service`, `doi-weekly.timer`, lunedì mattina) esegue `map_refresh` con `new_citing` su ogni mappa, `check_retractions` su tutti i DOI della libreria, la copertura per ogni progetto (tag `cited/*`), la raccolta incrementale di PhilArchive e i backup con rotazione; scrive `KNOWLEDGE_DIR/reports/weekly-<data>.md`, che l'MCP Obsidian copia nella cartella Inbox del vault entro un'ora. Ogni passo fallisce da solo senza fermare gli altri; l'esito è in `STATE_DIRECTORY/weekly-last.json` e in `GET /status`. Il servizio del lavoro settimanale scrive in `KNOWLEDGE_DIR/reports`, mentre il server resta in sola lettura su `KNOWLEDGE_DIR`: la cartella va creata scrivibile per il suo utente, per esempio `install -d -o doi-mcp -g knowledge -m 2750 /var/lib/knowledge/reports`.
+`weekly.py` (units and timer in `deploy/`: `doi-weekly.service`, `doi-weekly.timer`, Monday morning) runs `map_refresh` with `new_citing` on every map, `check_retractions` on all the library's DOIs, coverage for each project (tags `cited/*`), the incremental harvest of PhilArchive and the backups with rotation; it writes `KNOWLEDGE_DIR/reports/weekly-<date>.md`, which the Obsidian MCP copies into the vault's Inbox folder within an hour. Each step fails by itself without stopping the others; the outcome is in `STATE_DIRECTORY/weekly-last.json` and in `GET /status`. The weekly job's service writes in `KNOWLEDGE_DIR/reports`, while the server stays read-only on `KNOWLEDGE_DIR`: the folder must be created writable for its user, for example `install -d -o doi-mcp -g knowledge -m 2750 /var/lib/knowledge/reports`.
 
-Lo strato semantico (`semantic.py`) usa multilingual-e5-small in ONNX (export di Xenova, quantizzato, 384 dimensioni) con onnxruntime, in locale: si installa con `uv sync --extra semantic` e `semantic.py download` scarica `model_quantized.onnx` e `tokenizer.json` in `SEMANTIC_MODEL_DIR` (default `STATE_DIRECTORY/models/multilingual-e5-small`); controlla tu la pagina Hugging Face e le dimensioni dei file. I vettori stanno in `corpus.sqlite` (tabella `embeddings`, float32) e il confronto è un coseno esatto in numpy su tutti i passaggi. L'indicizzazione è incrementale: `search_everything(semantic=true)` ne fa cinque secondi a chiamata, il lavoro settimanale trenta minuti, `semantic.py embed --minutes N` quanto vuoi; sul Pi 4 la prima passata su un corpus grande richiede ore. Senza modello o dipendenze il tool risponde `semantic_unavailable` e la ricerca lessicale resta disponibile. `check_claims` dell'MCP Zotero resta lessicale: per cercare evidenze tra lingue si usa `search_everything(semantic=true, zotero_key=…)`.
+The semantic layer (`semantic.py`) uses multilingual-e5-small in ONNX (Xenova export, quantised, 384 dimensions) with onnxruntime, locally: it is installed with `uv sync --extra semantic` and `semantic.py download` downloads `model_quantized.onnx` and `tokenizer.json` into `SEMANTIC_MODEL_DIR` (default `STATE_DIRECTORY/models/multilingual-e5-small`); check the Hugging Face page and the file sizes yourself. The vectors are in `corpus.sqlite` (table `embeddings`, float32) and the comparison is an exact cosine in numpy over all the passages. Indexing is incremental: `search_everything(semantic=true)` does five seconds per call, the weekly job thirty minutes, `semantic.py embed --minutes N` as much as you want; on the Pi 4 the first pass on a large corpus takes hours. Without the model or dependencies the tool answers `semantic_unavailable` and lexical search remains available. The Zotero MCP's `check_claims` stays lexical: to look for evidence across languages use `search_everything(semantic=true, zotero_key=…)`.
 
-Il corpus di `search_everything` nasce dai file degli altri due server: `notes_text.json` (ogni nota, senza frontmatter) dall'MCP Obsidian a ogni istantanea, `fulltext/KEY.json` (pagine del PDF o EPUB e annotazioni) dall'MCP Zotero con `index_fulltext`. L'indice è lessicale (FTS5, diacritici ignorati): una ricerca in italiano non trova un passo in tedesco. Un indice semantico (embedding) non c'è: richiede un modello sul Pi o un calcolo esterno, e resta una scelta da fare.
+The corpus of `search_everything` comes from the files of the other two servers: `notes_text.json` (every note, without frontmatter) from the Obsidian MCP at every snapshot, `fulltext/KEY.json` (pages of the PDF or EPUB and annotations) from the Zotero MCP with `index_fulltext`. The index is lexical (FTS5, diacritics ignored): a search in Italian does not find a passage in German. A semantic index (embeddings) is not there: it requires a model on the Pi or an external computation, and remains a choice to be made.
 
-I test in `tests/test_contract_flows.py` eseguono i flussi tra server sui file di `tests/fixtures/contract`, generati dai test dell'MCP Zotero (`library.json`) e dell'MCP Obsidian (`notes.json`, `notes_text.json`) con `UPDATE_CONTRACT=1` e copiati qui: quando un formato cambia, si rigenerano là e si ricopiano.
+The tests in `tests/test_contract_flows.py` run the flows between servers on the files in `tests/fixtures/contract`, generated by the tests of the Zotero MCP (`library.json`) and of the Obsidian MCP (`notes.json`, `notes_text.json`) with `UPDATE_CONTRACT=1` and copied here: when a format changes, they are regenerated there and copied again.
 
-Le due istantanee portano `schema_version` (oggi 1 per entrambe), scritto da chi le genera e letto da `knowledge.py`: un file con una versione maggiore di quella supportata viene ignorato, e `map_get` lo segnala in `snapshots.problems`, invece di essere letto male. Chi aggiunge un campo non incrementa la versione; chi ne cambia il significato o ne toglie uno sì.
+The two snapshots carry `schema_version` (today 1 for both), written by whoever generates them and read by `knowledge.py`: a file with a version greater than the supported one is ignored, and `map_get` reports it in `snapshots.problems`, instead of being misread. Whoever adds a field does not increment the version; whoever changes its meaning or removes one does.
 
-Quando OpenAlex non ha la bibliografia di un seed (libri, scienze umane), `map_add_seeds` la prende da Semantic Scholar se c'è; `map_suggest` usa anche `cocited_total` (co-citazione con qualsiasi lavoro della mappa) per separare i candidati quando un solo seed li collega tutti, e avvisa se nessun seed ha bibliografia.
+When OpenAlex does not have a seed's bibliography (books, humanities), `map_add_seeds` takes it from Semantic Scholar if there is one; `map_suggest` also uses `cocited_total` (co-citation with any work in the map) to separate the candidates when a single seed links them all, and warns if no seed has a bibliography.
 
-### Operazioni lunghe (`background`, `map_job_status`)
+### Long operations (`background`, `map_job_status`)
 
-`map_create`, `map_add_seeds`, `map_expand`, `map_intents`, `map_add_patents` e `map_refresh` possono durare minuti (una richiesta al secondo verso OpenAlex e Semantic Scholar), più di quanto un client aspetti. Hanno un parametro facoltativo `background` (predefinito `false`):
+`map_create`, `map_add_seeds`, `map_expand`, `map_intents`, `map_add_patents` and `map_refresh` can last minutes (one request per second towards OpenAlex and Semantic Scholar), longer than a client waits. They have an optional `background` parameter (default `false`):
 
-- `background=true`: risposta subito `{"status": "accepted", "job_id": …, "poll_after_s": 2}`, il lavoro prosegue sul server;
-- `background=false`: se finisce entro circa 100 secondi la risposta è quella di sempre; altrimenti `{"status": "pending", "job_id": …}` e il lavoro prosegue.
+- `background=true`: immediate response `{"status": "accepted", "job_id": …, "poll_after_s": 2}`, the job continues on the server;
+- `background=false`: if it finishes within about 100 seconds the response is the usual one; otherwise `{"status": "pending", "job_id": …}` and the job continues.
 
-`map_job_status(job_id)` restituisce `running`, `ok` (con `result`, la risposta originale), `error`, `interrupted` (il server è stato riavviato mentre girava: quanto già salvato resta, va rilanciato) o `not_found`, con l'avanzamento in `progress`. I lavori stanno nella tabella `jobs` di `maps.sqlite` e si cancellano dopo 7 giorni. Su una mappa gira un lavoro alla volta: una seconda chiamata riceve `{"status": "busy", "job_id": …}`. Se il database è bloccato più di 15 secondi gli strumenti rispondono `{"status": "busy"}` invece di un errore di protocollo.
+`map_job_status(job_id)` returns `running`, `ok` (with `result`, the original response), `error`, `interrupted` (the server was restarted while it was running: what was already saved stays, it must be relaunched) or `not_found`, with progress in `progress`. Jobs are in the `jobs` table of `maps.sqlite` and are deleted after 7 days. One job runs at a time on a map: a second call receives `{"status": "busy", "job_id": …}`. If the database is locked for more than 15 seconds the tools answer `{"status": "busy"}` instead of a protocol error.
 
-La pagina *Literature maps* (https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s) legge le mappe dal vivo tramite il connettore DOI. Il sorgente è `pages/literature-maps.html`: si ripubblica allo stesso link con la capability `mcp` (connettore DOI, tool `map_list`, `map_get`, `map_suggest`, `map_mark`, `map_remove`, `map_rename`, `map_delete`, `map_add_seeds`, `map_expand`, `map_prune`, `map_refresh`, `map_intents`, `paper_table`, e `map_job_status` per i lavori in background) e `sample` (per proporre i nomi dei gruppi); dichiara anche i connettori Zotero (`refresh_library_snapshot`) e Obsidian (`refresh_notes_snapshot`) per il pulsante di aggiornamento. Ha timeline (asse verticale: citazioni o momentum) e rete (co-citazione o coupling, con soglia); filtri per anni, sottocampo OpenAlex, lavori più collegati ai seed e lavori fuori tema; colore core / non core (pieno = in Zotero), per recentezza, stato, campo o gruppo; pannello del lavoro con Abstract, Make seed, Expand from here, Add to Zotero (con PDF open access), "Cites / Cited by" e gruppo; "Check relevance" (Claude giudica dagli abstract se un candidato è nel tema); "Reduce map" (`map_prune`); gruppi della rete con nomi proposti da Claude; lista ordinabile con To read / Read / Dismiss. Il pulsante Refresh aggiorna istantanee e metadati (`map_refresh`) e segnala i seed con molte più citazioni in OpenCitations che in OpenAlex. I brevetti sono esagoni con archi punteggiati (citazioni dell'esaminatore), i libri assenti da OpenAlex triangoli; i chip mostrano `in Zotero` (con il criterio di abbinamento) e `verified`; "Citation intents" (`map_intents`, per i seed o per il lavoro selezionato) annota gli archi: nell'elenco Cites / Cited by un `!` segna le frasi citanti con marcatori di critica e una `★` le citazioni influenti, e la voce Debate del pannello riporta le frasi stesse.
+The *Literature maps* page (https://claude.ai/artifact/38v8a5FXTRjjkxBWg5Uc2s) reads the maps live through the DOI connector. The source is `pages/literature-maps.html`: it is republished at the same link with the `mcp` capability (DOI connector, tools `map_list`, `map_get`, `map_suggest`, `map_mark`, `map_remove`, `map_rename`, `map_delete`, `map_add_seeds`, `map_expand`, `map_prune`, `map_refresh`, `map_intents`, `paper_table`, and `map_job_status` for background jobs) and `sample` (to propose group names); it also declares the Zotero (`refresh_library_snapshot`) and Obsidian (`refresh_notes_snapshot`) connectors for the refresh button. It has a timeline (vertical axis: citations or momentum) and a network (co-citation or coupling, with a threshold); filters for years, OpenAlex subfield, works most linked to the seeds and off-topic works; core / non-core colour (filled = in Zotero), by recency, state, field or group; a work panel with Abstract, Make seed, Expand from here, Add to Zotero (with open-access PDF), "Cites / Cited by" and group; "Check relevance" (Claude judges from the abstracts whether a candidate is on topic); "Reduce map" (`map_prune`); network groups with names proposed by Claude; a sortable list with To read / Read / Dismiss. The Refresh button updates snapshots and metadata (`map_refresh`) and flags the seeds with many more citations in OpenCitations than in OpenAlex. Patents are hexagons with dotted edges (examiner's citations), books absent from OpenAlex triangles; the chips show `in Zotero` (with the matching criterion) and `verified`; "Citation intents" (`map_intents`, for the seeds or for the selected work) annotates the edges: in the Cites / Cited by list a `!` marks the citing sentences with markers of criticism and a `★` the influential citations, and the Debate entry of the panel reports the sentences themselves.
 
-Esempio di drop-in systemd (`/etc/systemd/system/doi-mcp.service.d/state.conf`):
+Example systemd drop-in (`/etc/systemd/system/doi-mcp.service.d/state.conf`):
 
 ```
 [Service]

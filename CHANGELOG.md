@@ -1,103 +1,103 @@
 # Changelog
 
-Le rinomine e le fusioni di strumenti rompono la compatibilità con i client: dopo l'aggiornamento il client deve rileggere l'elenco degli strumenti (in Claude web, disattivare e riattivare il connettore).
+Renames and merges of tools break compatibility with clients: after the update the client must re-read the tool list (in Claude web, disable and re-enable the connector).
 
-## Non pubblicata
+## Unreleased
 
-- Lavori in background: `map_create`, `map_add_seeds`, `map_expand`, `map_intents`, `map_add_patents` e `map_refresh` accettano `background` e, oltre i 100 secondi, rispondono `pending` con un `job_id`; nuovo strumento `map_job_status` (stato, avanzamento, risultato). Tabella `jobs` in `maps.sqlite` (migrazione al primo avvio; i lavori `running` diventano `interrupted` al riavvio); un lavoro per mappa alla volta (`busy`).
-- `map_create` risponde `partial` se nessun seed si può aggiungere e porta gli errori in `warnings`. `map_refresh` non fa avanzare la data del controllo se un seed va in errore o una pagina è piena (`truncated`, `watch_not_advanced`); con `no_seeds` ha anche `coverage_gaps` e `new`.
-- SQLite: WAL, attesa di 15 secondi sui blocchi, migrazioni una volta per processo, connessione chiusa a fine richiesta; un database bloccato dà `status: "busy"`. `map_get`, `map_suggest`, `map_export`, `map_prune` e la fusione dei doppioni girano in thread; la fusione legge dentro la transazione.
-- `map_get`: per ogni lavoro `cited_in_map`, `cited_in_map_nonseed`, `cited_by_seed_citers`; parametro `max_pairs` e flag `cocitation_truncated` / `coupling_truncated`.
-- `map_intents`: `works_skipped` e `truncated`, salvataggio ogni 5 lavori. Gli intenti si cancellano con `map_remove`, `map_prune`, `map_delete`.
-- `map_expand`: `works_in_map` conta tutti i record fusi. OpenCitations: tre richieste alla volta, nuovi tentativi sui 429, seed senza conteggio in `source_errors`. Con `OPENALEX_API_KEY` l'intervallo minimo verso OpenAlex scende a 0,2 secondi.
-- `map_add_patents`: `status: "error"` se nessun brevetto riesce, un nuovo tentativo sul 403 di EPO. `map_suggest` accetta `limit=None`.
-- `MCP_ALLOW_QUERY_TOKEN=true`: il token è accettato anche come `?token=` nell'URL, per il modulo dei connettori di Claude web che ha solo nome e URL. Spento per default.
-- `map_get`: parametri facoltativi `compact` (toglie dai lavori `notes`, `verified`, `zotero_tags`, `found_by`, `note`, `added`, `refs_source`) e `fields` (tiene solo i campi elencati più `id`, ha la precedenza su `compact`; i nomi sconosciuti sono ignorati e segnalati in `warnings`). Senza i parametri la risposta non cambia.
-- Fusione dei doppioni: gli `edge_intents` dei record eliminati passano all'id mantenuto (chiave `citante->citato` riscritta; se la nuova chiave esiste resta il record con più contesti, `influential` e `contrasting` in OR; gli archi che diventerebbero autocitazioni sono tolti). Idempotente, nella stessa transazione.
-- Cache in memoria (8 voci per processo) della vista di `map_get` e `map_suggest`, con chiave su `updated`, numero e ultimo rowid di nodi e intenti e un contatore di scritture (`maps.WRITES`) aumentato a ogni commit: `updated` ha la risoluzione di un secondo, da sola non basterebbe. Le connessioni che scrivono solo la tabella `jobs` non lo aumentano.
-- Limitatore di richieste: priorità per host. Le richieste dei lavori lunghi (contextvar `_priority`, impostato da `_run_job`) passano dopo quelle dei tool rapidi in coda sullo stesso host; stesso intervallo minimo e stessa concorrenza, nessuna interruzione di richieste già partite.
-- Pagina *Literature maps*: pulsante *Add patents* (`map_add_patents`, da 1 a 20 numeri, anche come seed).
-- Pagina *Literature maps*: il filtro degli anni si applica mentre si scrive (da quattro cifre), legge un intervallo invertito e, con sottocampo e off-topic, filtra anche la lista dei suggerimenti.
-- Pagina *Literature maps*: il filtro degli anni vale anche per i seed (prima restavano sempre visibili); i lavori con 0 citazioni non sono più tagliati dal bordo del grafico.
-- Pagina *Literature maps*: nella rete le etichette mantengono la dimensione quando si zooma, come nella timeline.
+- Background jobs: `map_create`, `map_add_seeds`, `map_expand`, `map_intents`, `map_add_patents` and `map_refresh` accept `background` and, beyond 100 seconds, answer `pending` with a `job_id`; new tool `map_job_status` (status, progress, result). `jobs` table in `maps.sqlite` (migration at first start; `running` jobs become `interrupted` at restart); one job per map at a time (`busy`).
+- `map_create` answers `partial` if no seed can be added and carries the errors in `warnings`. `map_refresh` does not advance the check date if a seed errors or a page is full (`truncated`, `watch_not_advanced`); with `no_seeds` it also has `coverage_gaps` and `new`.
+- SQLite: WAL, 15-second wait on locks, migrations once per process, connection closed at the end of the request; a locked database gives `status: "busy"`. `map_get`, `map_suggest`, `map_export`, `map_prune` and the merging of duplicates run in threads; the merge reads inside the transaction.
+- `map_get`: for each work `cited_in_map`, `cited_in_map_nonseed`, `cited_by_seed_citers`; `max_pairs` parameter and `cocitation_truncated` / `coupling_truncated` flags.
+- `map_intents`: `works_skipped` and `truncated`, saving every 5 works. Intents are deleted with `map_remove`, `map_prune`, `map_delete`.
+- `map_expand`: `works_in_map` counts all merged records. OpenCitations: three requests at a time, retries on 429s, seeds without a count in `source_errors`. With `OPENALEX_API_KEY` the minimum interval towards OpenAlex drops to 0.2 seconds.
+- `map_add_patents`: `status: "error"` if no patent succeeds, one retry on EPO's 403. `map_suggest` accepts `limit=None`.
+- `MCP_ALLOW_QUERY_TOKEN=true`: the token is also accepted as `?token=` in the URL, for the Claude web connector form, which has only a name and a URL. Off by default.
+- `map_get`: optional parameters `compact` (removes from the works `notes`, `verified`, `zotero_tags`, `found_by`, `note`, `added`, `refs_source`) and `fields` (keeps only the listed fields plus `id`, takes precedence over `compact`; unknown names are ignored and reported in `warnings`). Without the parameters the response does not change.
+- Merging of duplicates: the `edge_intents` of the deleted records pass to the kept id (the `citing->cited` key is rewritten; if the new key exists the record with more contexts stays, `influential` and `contrasting` in OR; edges that would become self-citations are removed). Idempotent, in the same transaction.
+- In-memory cache (8 entries per process) of the view of `map_get` and `map_suggest`, keyed on `updated`, count and last rowid of nodes and intents and a write counter (`maps.WRITES`) incremented at every commit: `updated` has a one-second resolution, by itself it would not be enough. Connections that write only the `jobs` table do not increment it.
+- Request limiter: priority per host. Requests from long jobs (contextvar `_priority`, set by `_run_job`) go after those of quick tools queued on the same host; same minimum interval and same concurrency, no interruption of requests already started.
+- *Literature maps* page: *Add patents* button (`map_add_patents`, 1 to 20 numbers, also as seeds).
+- *Literature maps* page: the year filter applies as you type (from four digits), reads an inverted range and, with subfield and off-topic, also filters the suggestions list.
+- *Literature maps* page: the year filter also applies to seeds (before they always stayed visible); works with 0 citations are no longer cut off by the chart's edge.
+- *Literature maps* page: in the network the labels keep their size when zooming, as in the timeline.
 
 ## 0.8.2
 
-- Pagina *Literature maps* ripubblicata: brevetti (esagoni, archi punteggiati) e libri (triangoli), chip `verified` e criterio di abbinamento con Zotero, conteggio OpenCitations e `coverage_gaps` dopo il refresh, pulsanti e marcature degli intenti di citazione (`map_intents`, voce Debate); `map_watch` tolto dal manifest.
+- *Literature maps* page republished: patents (hexagons, dotted edges) and books (triangles), `verified` chip and Zotero matching criterion, OpenCitations count and `coverage_gaps` after the refresh, buttons and markings for citation intents (`map_intents`, Debate item); `map_watch` removed from the manifest.
 
 ## 0.8.1
 
-- Skill `concept-card` (schede di concetto con relazioni tipizzate, MCP Obsidian 0.5.0); fixture di contratto di Obsidian aggiornate con `relations`.
+- `concept-card` skill (concept cards with typed relations, Obsidian MCP 0.5.0); Obsidian contract fixtures updated with `relations`.
 
 ## 0.8.0
 
-- OpenCitations Index come terzo conteggio nel `coverage_check` di `citation_graph` (`opencitations_cited_by`, `opencitations_references` e verdetti) e in `map_refresh`, che salva `cited_by_oc` per ogni seed e segnala in `coverage_gaps` i seed che OpenCitations conta molto più di OpenAlex; il report settimanale li elenca. `OPENCITATIONS_TOKEN` facoltativo.
-- `coverage_report` restituisce anche `projects`, `anzsrc`, `years`, `notes_total`, `items_total`.
-- Pagina *Knowledge views* (`pages/knowledge-views.html`): lo stato dei tre archivi, copertura per progetto, campi e anni, ricerca nel corpus, registro delle ricerche, report settimanale, mappe.
+- OpenCitations Index as a third count in the `coverage_check` of `citation_graph` (`opencitations_cited_by`, `opencitations_references` and verdicts) and in `map_refresh`, which saves `cited_by_oc` for each seed and reports in `coverage_gaps` the seeds that OpenCitations counts as much higher than OpenAlex; the weekly report lists them. `OPENCITATIONS_TOKEN` optional.
+- `coverage_report` also returns `projects`, `anzsrc`, `years`, `notes_total`, `items_total`.
+- *Knowledge views* page (`pages/knowledge-views.html`): the state of the three archives, coverage by project, fields and years, corpus search, search log, weekly report, maps.
 
 ## 0.7.0
 
-- `search_everything(semantic=true)`: ricerca per significato con embedding locali multilingue (multilingual-e5-small in ONNX, `semantic.py`, extra `semantic`); vettori in `corpus.sqlite`, indicizzazione incrementale a ogni chiamata, nel lavoro settimanale e con `semantic.py embed`; `semantic_unavailable` senza modello.
-- `map_intents`: intenti, influenza e frasi delle citazioni da Semantic Scholar sugli archi di una mappa, con il flag euristico `contrasting`; `map_get` restituisce `edge_intents`.
-- `GET /status` riporta la disponibilità dello strato semantico; il report settimanale lo stato dell'indicizzazione.
+- `search_everything(semantic=true)`: search by meaning with local multilingual embeddings (multilingual-e5-small in ONNX, `semantic.py`, `semantic` extra); vectors in `corpus.sqlite`, incremental indexing at every call, in the weekly job and with `semantic.py embed`; `semantic_unavailable` without the model.
+- `map_intents`: intents, influence and citation sentences from Semantic Scholar on a map's edges, with the heuristic `contrasting` flag; `map_get` returns `edge_intents`.
+- `GET /status` reports the availability of the semantic layer; the weekly report the state of the indexing.
 
 ## 0.6.1
 
-- Registro delle ricerche: ogni `search_literature` e `map_create` aggiunge una riga a `STATE_DIRECTORY/searches.jsonl`; `search_log(query)` dice se la stessa ricerca o una simile è già stata fatta, quando e con quanti risultati; il report settimanale elenca le ricerche della settimana.
-- Lavoro settimanale: notifica ntfy con il riassunto quando il report è pronto (`NTFY_URL`, `NTFY_TOKEN`).
-- Brevetti: il cognome del primo autore nelle citazioni di letteratura è letto anche nella forma «NOME COGNOME:» e con le particelle («VAN DER LINDEN J»).
+- Search log: every `search_literature` and `map_create` appends a line to `STATE_DIRECTORY/searches.jsonl`; `search_log(query)` says whether the same or a similar search has already been done, when and with how many results; the weekly report lists the week's searches.
+- Weekly job: ntfy notification with the summary when the report is ready (`NTFY_URL`, `NTFY_TOKEN`).
+- Patents: the first author's surname in literature citations is also read in the form "FIRSTNAME SURNAME:" and with particles ("VAN DER LINDEN J").
 
 ## 0.6.0
 
-Incompatibile con 0.5.x
-- Trasporto HTTP: il token è accettato solo nell'header `Authorization: Bearer`; `?token=` nell'URL viene rifiutato.
+Incompatible with 0.5.x
+- HTTP transport: the token is accepted only in the `Authorization: Bearer` header; `?token=` in the URL is rejected.
 
-Novità
-- `search_everything`: un indice FTS5 (`corpus.py`, `corpus.sqlite` in `STATE_DIRECTORY`) su note Obsidian per sezione, pagine dei PDF e annotazioni, dai file che gli altri due server scrivono in `KNOWLEDGE_DIR`; si aggiorna da solo per mtime.
-- `check_draft`: citazioni Pandoc `[@citekey]` di un manoscritto risolte sulla libreria (citekey Better BibTeX, chiave item, cognome+anno univoco); segnala chiavi irrisolte o ambigue, item non verificati, citazioni letterali senza pagina, ritrattazioni a richiesta; restituisce le chiavi per la bibliografia.
-- `coverage_report`: item di un progetto senza nota, PDF o verifica; note senza item o con item sparito.
-- `weekly_report` e `weekly.py` con `deploy/doi-weekly.{service,timer}`: nuovi lavori citanti per mappa, ritrattazioni in libreria, copertura per progetto, raccolta PhilArchive, backup con rotazione; report Markdown in `KNOWLEDGE_DIR/reports` per la cartella Inbox del vault.
-- `philarchive` tra i database di `search_literature`: copia locale raccolta via OAI-PMH (`philarchive.py`), incrementale.
-- `GET /status` su loopback senza credenziali.
-- `tests/test_contract_flows.py`: i flussi tra server sui file di contratto degli altri due MCP (`tests/fixtures/contract`).
-- Skill `draft` e `argument-map`; le altre aggiornate per `search_everything`, `coverage_report` e il lavoro settimanale.
+What's new
+- `search_everything`: an FTS5 index (`corpus.py`, `corpus.sqlite` in `STATE_DIRECTORY`) over Obsidian notes by section, PDF pages and annotations, from the files that the other two servers write in `KNOWLEDGE_DIR`; it updates itself by mtime.
+- `check_draft`: Pandoc `[@citekey]` citations of a manuscript resolved against the library (Better BibTeX citekey, item key, unique surname+year); reports unresolved or ambiguous keys, unverified items, literal quotations without a page, retractions on request; returns the keys for the bibliography.
+- `coverage_report`: items of a project without a note, PDF or verification; notes without an item or with a vanished item.
+- `weekly_report` and `weekly.py` with `deploy/doi-weekly.{service,timer}`: new citing works per map, retractions in the library, coverage by project, PhilArchive harvest, backup with rotation; Markdown report in `KNOWLEDGE_DIR/reports` for the vault's Inbox folder.
+- `philarchive` among the databases of `search_literature`: a local copy harvested via OAI-PMH (`philarchive.py`), incremental.
+- `GET /status` on loopback without credentials.
+- `tests/test_contract_flows.py`: the flows between servers on the contract files of the other two MCPs (`tests/fixtures/contract`).
+- `draft` and `argument-map` skills; the others updated for `search_everything`, `coverage_report` and the weekly job.
 
 ## 0.5.0
 
-- Ponte con Zotero: oltre a DOI e chiave, un lavoro viene abbinato per numero di brevetto (`P:`) e per titolo, cognome del primo autore e anno con le regole di `matching.py`; `library_match` dice quale criterio ha deciso. I nodi portano `verified` (la riga `Verified:` dell'item Zotero) e `map_export` lo mostra.
-- `map_add_patents` (solo con credenziali EPO): brevetti come nodi `P:<numero>` con la letteratura citata a DOI stampato; `map_get` restituisce `patent_edges` e `kind` (`work`, `book`, `patent`); i brevetti non entrano in co-citazione, coupling né nella fusione dei doppioni.
-- La pagina delle mappe non è stata aggiornata: i campi nuovi non sono ancora mostrati.
+- Bridge with Zotero: besides DOI and key, a work is matched by patent number (`P:`) and by title, first author's surname and year with the rules of `matching.py`; `library_match` says which criterion decided. Nodes carry `verified` (the `Verified:` line of the Zotero item) and `map_export` shows it.
+- `map_add_patents` (only with EPO credentials): patents as `P:<number>` nodes with the cited literature that has a printed DOI; `map_get` returns `patent_edges` and `kind` (`work`, `book`, `patent`); patents do not enter co-citation, coupling or the merging of duplicates.
+- The maps page was not updated: the new fields are not shown yet.
 
 ## 0.4.1
 
-- `matching.py`: il confronto bibliografico (normalizzazione dei titoli, similarità con varianti di sottotitolo, cognomi, anno, errata e repliche, analisi delle voci di bibliografia) esce da `server.py` in un modulo di sola libreria standard, incluso nel wheel. Nessun cambiamento di comportamento; l'MCP Zotero ne usa una copia identica, così `create_item_from_doi` ed `extract_references` applicano le stesse regole di `find_doi` e `verify_doi`.
-- `parse_ref` (bibliografie dai PDF): riconosce le voci APA con più iniziali prima dell'anno («Schön, D. A. (1983). Titolo») e i luoghi di edizione con lettere accentate; prima il titolo risultava «Schön, D. A. (1983)». Le chiavi della cache dei riferimenti cambiano per quelle voci, che vengono ricercate di nuovo una volta.
-- Istantanee: `knowledge.py` legge `schema_version` da `library.json` e `notes.json`, rifiuta una versione maggiore di quella supportata (1) e lo riporta in `map_get` (`snapshots.problems`).
-- `patent_get`: ogni citazione di letteratura porta `category` (X, Y, A dell'esaminatore) oltre a `phase`.
-- `skills/`: quattro skill di Claude per i flussi tra i tre MCP (`add-to-library`, `reading-note`, `literature-map`, `prior-art`).
+- `matching.py`: the bibliographic comparison (title normalisation, similarity with subtitle variants, surnames, year, errata and replies, parsing of bibliography entries) leaves `server.py` for a standard-library-only module, included in the wheel. No change of behaviour; the Zotero MCP uses an identical copy, so `create_item_from_doi` and `extract_references` apply the same rules as `find_doi` and `verify_doi`.
+- `parse_ref` (bibliographies from PDFs): recognises APA entries with several initials before the year ("Schön, D. A. (1983). Title") and places of publication with accented letters; before, the title came out as "Schön, D. A. (1983)". The reference cache keys change for those entries, which are searched again once.
+- Snapshots: `knowledge.py` reads `schema_version` from `library.json` and `notes.json`, rejects a version greater than the supported one (1) and reports it in `map_get` (`snapshots.problems`).
+- `patent_get`: each literature citation carries `category` (the examiner's X, Y, A) in addition to `phase`.
+- `skills/`: four Claude skills for the flows between the three MCPs (`add-to-library`, `reading-note`, `literature-map`, `prior-art`).
 
 ## 0.4.0
 
-Strumenti rimossi o fusi:
+Tools removed or merged:
 - `openalex_autocomplete` → `openalex_entity(entity, autocomplete=...)`.
-- `semantic_scholar_recommendations` → `semantic_scholar` con `action` `recommend_single` / `recommend_multi`.
-- Le azioni `dataset_*` di `semantic_scholar` → `semantic_scholar_datasets` (`releases`, `release`, `files`, `diffs`).
-- `openalex_query` esegue soltanto; `translate`, `validate`, `context`, `properties`, `spec` → `openalex_query_inspect`.
+- `semantic_scholar_recommendations` → `semantic_scholar` with `action` `recommend_single` / `recommend_multi`.
+- The `dataset_*` actions of `semantic_scholar` → `semantic_scholar_datasets` (`releases`, `release`, `files`, `diffs`).
+- `openalex_query` only executes; `translate`, `validate`, `context`, `properties`, `spec` → `openalex_query_inspect`.
 - `map_watch` → `map_refresh(map, new_citing=True)`.
 - `map_check_retractions` → `check_retractions(map=...)`.
 
-Novità:
-- `patent_search` e `patent_get` (EPO Open Patent Services), registrati solo con `EPO_OPS_KEY` e `EPO_OPS_SECRET`. La letteratura citata da un brevetto porta `doi` solo se stampato nella citazione; un `doi_candidate` Crossref segue le regole di `find_doi` e va confermato con `verify_doi`.
-- Lo strato gateway (`openalex_*`, `semantic_scholar*`, `google_books`, `orcid`) si registra solo con `ENABLE_GATEWAY=true`.
-- `check_citations`: controllo incrociato tra citazioni nel testo e bibliografia APA.
-- `dnb` (Deutsche Nationalbibliothek, SRU) tra i database di `search_literature`: monografie e traduzioni in tedesco, senza abstract. PhilArchive espone solo OAI-PMH, che non permette la ricerca.
-- Insieme di riferimento offline per `find_doi` (`tests/fixtures/find_doi_cases.json`) con precisione e richiamo misurati nei test.
-- Ogni strumento risponde con un dizionario con `status`; gli argomenti non validi danno `invalid_input` con il parametro e i valori ammessi.
-- Il link alla pagina delle mappe è nelle istruzioni del server; `states`, `modes`, `scope` sono enumerazioni; `per_page` 25 e `limit` 20 di default sui passanti.
-- Correzioni: `find_doi` con `is_book=True` restituisce `edition_mismatch` per qualsiasi anno diverso, come documentato (prima solo per una differenza di un anno); la funzione di espansione booleana delle query era oscurata da un'omonima delle mappe, per cui Europe PMC, DOAJ, HAL e Zenodo fallivano a runtime.
-- Il wheel include `maps.py` e `knowledge.py` (prima mancavano e il pacchetto installato era rotto).
-- Nessun riferimento alla macchina di deployment in codice, descrizioni e pagina; `KNOWLEDGE_DIR` e `STATE_DIRECTORY` documentate.
+What's new:
+- `patent_search` and `patent_get` (EPO Open Patent Services), registered only with `EPO_OPS_KEY` and `EPO_OPS_SECRET`. The literature cited by a patent carries `doi` only if printed in the citation; a Crossref `doi_candidate` follows the rules of `find_doi` and must be confirmed with `verify_doi`.
+- The gateway layer (`openalex_*`, `semantic_scholar*`, `google_books`, `orcid`) is registered only with `ENABLE_GATEWAY=true`.
+- `check_citations`: cross-check between in-text citations and the APA bibliography.
+- `dnb` (Deutsche Nationalbibliothek, SRU) among the databases of `search_literature`: monographs and translations in German, without abstracts. PhilArchive exposes only OAI-PMH, which does not allow searching.
+- Offline reference set for `find_doi` (`tests/fixtures/find_doi_cases.json`) with precision and recall measured in the tests.
+- Every tool answers with a dictionary with `status`; invalid arguments give `invalid_input` with the parameter and the allowed values.
+- The link to the maps page is in the server instructions; `states`, `modes`, `scope` are enumerations; `per_page` 25 and `limit` 20 by default on the pass-throughs.
+- Fixes: `find_doi` with `is_book=True` returns `edition_mismatch` for any different year, as documented (before, only for a one-year difference); the function for boolean query expansion was shadowed by a homonym in the maps, so Europe PMC, DOAJ, HAL and Zenodo failed at runtime.
+- The wheel includes `maps.py` and `knowledge.py` (before they were missing and the installed package was broken).
+- No reference to the deployment machine in code, descriptions and page; `KNOWLEDGE_DIR` and `STATE_DIRECTORY` documented.
 
 ## 0.3.0
 
-Stato precedente a questo changelog.
+State before this changelog.
