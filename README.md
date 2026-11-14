@@ -1,13 +1,12 @@
 # paper-doi-mcp
 
-[![PyPI](https://img.shields.io/pypi/v/paper-doi-mcp.svg)](https://pypi.org/project/paper-doi-mcp/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An MCP server for verifying academic citations and searching the literature. It resolves and checks DOIs, verifies book editions, searches several open databases and builds citation graphs to visualise. The guiding principle is precision: when a match is not certain, the tool says so instead of proposing a plausible DOI.
 
 ## Installation
 
-The package is on PyPI as [`paper-doi-mcp`](https://pypi.org/project/paper-doi-mcp/) and needs Python 3.10 or later. The simplest way to run it is [uv](https://docs.astral.sh/uv/): `uvx paper-doi-mcp` downloads it into an isolated environment and starts the stdio server. No key is required; `CONTACT_EMAIL` is recommended, since Crossref and OpenAlex give faster service to requests that carry one. The optional keys are listed under [Environment variables](#environment-variables).
+The server installs straight from this GitHub repository and needs Python 3.10 or later. The simplest way to run it is [uv](https://docs.astral.sh/uv/): `uvx --from git+https://github.com/graph-ist/doi-mcp paper-doi-mcp` downloads it into an isolated environment and starts the stdio server, with no clone and no account. Without a suffix uv takes the latest commit on `main`; for a fixed version add a tag, `git+https://github.com/graph-ist/doi-mcp@v0.9.0`. No key is required; `CONTACT_EMAIL` is recommended, since Crossref and OpenAlex give faster service to requests that carry one. The optional keys are listed under [Environment variables](#environment-variables).
 
 ### Claude Desktop
 
@@ -18,7 +17,7 @@ In `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`,
   "mcpServers": {
     "paper-doi": {
       "command": "uvx",
-      "args": ["paper-doi-mcp"],
+      "args": ["--from", "git+https://github.com/graph-ist/doi-mcp", "paper-doi-mcp"],
       "env": { "CONTACT_EMAIL": "you@example.org" }
     }
   }
@@ -30,13 +29,13 @@ If Claude Desktop does not find `uvx`, use its absolute path (`which uvx`).
 ### Claude Code
 
 ```sh
-claude mcp add paper-doi --env CONTACT_EMAIL=you@example.org -- uvx paper-doi-mcp
+claude mcp add paper-doi --env CONTACT_EMAIL=you@example.org -- uvx --from git+https://github.com/graph-ist/doi-mcp paper-doi-mcp
 ```
 
 ### pip
 
 ```sh
-pip install paper-doi-mcp            # or: pip install "paper-doi-mcp[semantic]" for local embeddings
+pip install "paper-doi-mcp @ git+https://github.com/graph-ist/doi-mcp"              # add [semantic] after the name for local embeddings
 paper-doi-mcp                        # stdio; MCP_TRANSPORT=http for Streamable HTTP
 ```
 
@@ -318,6 +317,8 @@ uv run python -m pytest -q
 
 The suite runs without network. `tests/fixtures/find_doi_cases.json` is a reference set for `find_doi` (subtitles, preprint and published version, errata, short titles, homonyms, diacritics, books and editions): `tests/test_find_doi_reference_set.py` measures precision and recall and fails below the thresholds; the cases marked `known_gap` are known gaps in the current rules and weigh on recall. `tests/test_tool_surface.py` enforces the conventions on the tools (limited descriptions, enumerations for finite values, `invalid_input` for invalid arguments, gateway layer listed, no name defined twice, modules included in the wheel). The tests in `tests/test_server.py` cover title normalisation, author comparison, discarding of errata and replies, DOI cleaning, computation of co-citations and coupling. They also verify routing and payload of the APIs, authentication, credential redaction, cursors and response formats, HTTP errors, retries, the cumulative Semantic Scholar limit, MCP registration and annotations, previews without requests and confirmed OpenAlex writes on simulated responses. They also cover Google Books, ORCID (iD validation, `/read-public` token with cache and renewal after a 401) and the computation of `agreement` and conflicts between catalogues. These tests do not verify online the validity of the keys, the account permissions or the real availability of the endpoints.
 
+A release is a git tag `vX.Y.Z` matching `__version__` in `paper_doi_mcp/__init__.py`. Publishing to PyPI is prepared in `.github/workflows/release.yml` (PyPI trusted publishing, no token in the repository) and stays off until the repository variable `PYPI_PUBLISH` is `true`.
+
 ### Structure
 
 | File | Contents |
@@ -342,7 +343,7 @@ The suite runs without network. `tests/fixtures/find_doi_cases.json` is a refere
     "paper-doi": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["paper-doi-mcp"],
+      "args": ["--from", "git+https://github.com/graph-ist/doi-mcp", "paper-doi-mcp"],
       "env": {
         "CONTACT_EMAIL": "you@example.org",
         "OPENALEX_API_KEY": "${input:openalex-api-key}",
@@ -387,7 +388,7 @@ The suite runs without network. `tests/fixtures/find_doi_cases.json` is a refere
 }
 ```
 
-In VS Code, open the configuration with **MCP: Open User Configuration** and merge the server entry and the inputs with those already present. At first start VS Code asks for the keys in protected fields, without saving them in the JSON. To run a local checkout instead of the published package, use `"command": "uv"` with `"args": ["--directory", "/path/to/doi-mcp", "run", "paper-doi-mcp"]`. After changes to the code or the variables, restart `paper-doi` from **MCP: List Servers**. To use the sources without a key, omit the corresponding variable and its input.
+In VS Code, open the configuration with **MCP: Open User Configuration** and merge the server entry and the inputs with those already present. At first start VS Code asks for the keys in protected fields, without saving them in the JSON. To run a local checkout instead of the GitHub version, use `"command": "uv"` with `"args": ["--directory", "/path/to/doi-mcp", "run", "paper-doi-mcp"]`. After changes to the code or the variables, restart `paper-doi` from **MCP: List Servers**. To use the sources without a key, omit the corresponding variable and its input.
 
 ### Remote use (HTTP), for example for Claude web
 
@@ -400,7 +401,7 @@ On a server, install the dependencies from the locked versions and then the pack
 ```sh
 uv export --no-dev --no-emit-project --format requirements-txt > requirements.lock.txt
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock.txt
-.venv/bin/pip install --no-deps paper-doi-mcp==0.9.0     # or --no-deps /path/to/doi-mcp
+.venv/bin/pip install --no-deps "git+https://github.com/graph-ist/doi-mcp@v0.9.0"     # or --no-deps /path/to/doi-mcp
 ```
 
 The service then runs `.venv/bin/paper-doi-mcp` (with `MCP_TRANSPORT=http`). To update, install the new version the same way (redo the first step if the dependencies changed) and restart the service. After changes to tools or prompts, in Claude web the connector must be disabled and re-enabled so that it re-reads the list.
