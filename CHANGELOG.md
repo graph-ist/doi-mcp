@@ -2,6 +2,13 @@
 
 Renames and merges of tools break compatibility with clients: after the update the client must re-read the tool list (in Claude web, disable and re-enable the connector).
 
+## Unreleased
+
+Corpus and search
+- `search_everything` searches one passage per library item from `library.json` (title, creators, year, abstract, tags; scope `items`), so items whose PDF was never indexed are found too. Items are tracked one by one by a fingerprint of their text: a snapshot rewritten after a Zotero write re-embeds only the changed items. Needs the Zotero MCP's snapshot with `abstract` (contract fixture updated); older snapshots work, without abstracts.
+- `mode` parameter: `lexical` (default), `semantic` (same as `semantic=true`, kept), `hybrid` (lexical and semantic rankings fused by reciprocal rank; `match` per result; falls back to lexical with a note when the model is missing). The answer carries `mode`.
+- `rerank=true`: the top 30 candidates reordered by a local multilingual cross-encoder within 8 seconds (`rerank` in the answer); `paper-doi-semantic download-reranker`, `SEMANTIC_RERANK_MODEL_DIR`; `paper-doi-semantic status` reports the reranker. Without the model files the results come back unreordered with the reason.
+
 ## 0.9.0
 
 Incompatible for server installs

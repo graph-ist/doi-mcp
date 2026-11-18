@@ -4415,7 +4415,8 @@ async def map_job_status(job_id: str) -> dict:
 
 # --- the three archives together: search, drafts, coverage, weekly report ---------------------
 
-CorpusScope = Literal["all", "notes", "library", "annotations"]
+CorpusScope = Literal["all", "notes", "library", "annotations", "items"]
+SearchMode = Literal["lexical", "semantic", "hybrid"]
 
 
 def _corpus_db():
@@ -4426,6 +4427,7 @@ def _corpus_db():
 
 
 SEMANTIC_EMBEDDER = None  # tests inject an embedder here; otherwise semantic.load_embedder()
+RERANKER = None  # tests inject a reranker here; otherwise semantic.load_reranker()
 
 
 def _embedder():
@@ -4435,42 +4437,76 @@ def _embedder():
 
 @_tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def search_everything(query: str, scope: CorpusScope = "all", limit: int = 20,
-                            zotero_key: str | None = None, semantic: bool = False) -> dict:
+                            zotero_key: str | None = None, semantic: bool = False,
+                            mode: SearchMode | None = None, rerank: bool = False) -> dict:
     """Search the user's own corpus, not the web: Obsidian notes (by section), the page texts of
-    the PDFs and EPUBs in Zotero, and their highlights and comments. Results are passages with
-    where they come from: a note path and heading, or a Zotero key with the page and a
-    zotero://open-pdf link. Lexical search (words, "phrases", AND, OR, NOT, trailing * for
-    prefixes; diacritics ignored): a query finds passages in the language it is written in, so
-    search again in German or Italian for sources in those languages. zotero_key restricts to
-    one item. The index follows the snapshot files written by the other two servers
-    (notes_text.json, fulltext/KEY.json): an item whose PDF was never indexed with the Zotero
-    MCP's index_fulltext is not searched; the log says how many sources are indexed.
-    semantic=True searches by meaning instead (local multilingual embeddings: a query in one
-    language finds passages in another; 'score' is the cosine similarity); it needs the model
-    on the server (status 'semantic_unavailable' says what is missing) and only passages
-    already embedded are reachable ('index.pending_embeddings')."""
+    the PDFs and EPUBs in Zotero, their highlights and comments, and one passage per library item
+    (title, creators, year, abstract, tags: scope 'items', found even when the PDF was never
+    indexed). Results are passages with where they come from: a note path and heading, or a
+    Zotero key with the page and a zotero:// link. zotero_key restricts to one item.
+
+    mode 'lexical' (default): words, "phrases", AND, OR, NOT, trailing * for prefixes;
+    diacritics ignored; a query finds passages in its own language, so search again in German or
+    Italian for sources in those languages. mode 'semantic' (or semantic=True): by meaning, with
+    local multilingual embeddings, across languages; 'score' is the cosine similarity; only
+    passages already embedded are reachable ('index.pending_embeddings'). mode 'hybrid': both
+    rankings fused by reciprocal rank, best when the query mixes exact terms and ideas; 'match'
+    says which mode found each passage. Semantic and hybrid need the model on the server
+    (status 'semantic_unavailable', or a note in hybrid, which then falls back to lexical).
+    rerank=True reorders the top results with a local cross-encoder that reads query and
+    passage together: more precise, slower (seconds on a Raspberry Pi), within a time budget;
+    'rerank' in the answer says how many were reordered or why it was not available. PDFs reach
+    the index through the Zotero MCP's index_fulltext; the log says how many sources are indexed."""
     limit = max(1, min(int(limit), 100))
+    mode = mode or ("semantic" if semantic else "lexical")
     corpus, db = _corpus_db()
+    notes: list[str] = []
+    progress = rinfo = None
     try:
-        if semantic:
+        emb = None
+        if mode in ("semantic", "hybrid"):
             from . import semantic as sem
             emb = _embedder()
             if emb is None:
-                return {"status": "semantic_unavailable", "detail": sem.available()[1],
-                        "hint": "lexical search still works: call again with semantic=false"}
-            progress = await asyncio.to_thread(corpus.embed_pending, db, emb, 5.0)
-            hits = await asyncio.to_thread(corpus.semantic_search, db, emb, query, scope, limit, zotero_key)
+                if mode == "semantic":
+                    return {"status": "semantic_unavailable", "detail": sem.available()[1],
+                            "hint": "lexical search still works: call again with mode='lexical'"}
+                notes.append(f"semantic part unavailable ({sem.available()[1]}): lexical results only")
+                mode = "lexical"
+            else:
+                progress = await asyncio.to_thread(corpus.embed_pending, db, emb, 5.0)
+        depth = min(100, max(limit, 30)) if rerank else limit
+        if mode == "semantic":
+            hits = await asyncio.to_thread(corpus.semantic_search, db, emb, query, scope, depth, zotero_key)
+        elif mode == "hybrid":
+            hits, more = await asyncio.to_thread(corpus.hybrid_search, db, emb, query, scope, depth, zotero_key)
+            notes += more
         else:
-            progress = None
-            hits = await asyncio.to_thread(corpus.search, db, query, scope, limit, zotero_key)
+            hits = await asyncio.to_thread(corpus.search, db, query, scope, depth, zotero_key)
+        if rerank and hits:
+            from . import semantic as sem
+            rr = RERANKER or sem.load_reranker()
+            if rr is None:
+                rinfo = {"status": "unavailable", "detail": sem.rerank_available()[1]}
+            else:
+                rinfo = {"status": "ok", **await asyncio.to_thread(corpus.rerank, db, rr, query, hits)}
+        hits = hits[:limit]
+        for h in hits:
+            h.pop("_id", None)
         st = corpus.stats(db)
     finally:
         db.close()
-    out = {"status": "ok", "query": query, "scope": scope, "semantic": semantic, "results": hits, "returned": len(hits),
-           "index": st, "note": ("passages by meaning (local embeddings); passages not yet embedded are not reachable"
-                                 if semantic else "lexical index over notes, PDF pages and annotations; nothing from the web")}
+    desc = {"lexical": "lexical index over notes, PDF pages, annotations and library items; nothing from the web",
+            "semantic": "passages by meaning (local embeddings); passages not yet embedded are not reachable",
+            "hybrid": "lexical and semantic rankings fused by reciprocal rank; 'match' says which found each passage"}[mode]
+    out = {"status": "ok", "query": query, "scope": scope, "mode": mode, "semantic": mode == "semantic",
+           "results": hits, "returned": len(hits), "index": st, "note": desc}
+    if notes:
+        out["notes"] = notes
     if progress:
         out["embedding_progress"] = progress
+    if rinfo:
+        out["rerank"] = rinfo
     return out
 
 

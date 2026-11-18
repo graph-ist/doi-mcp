@@ -26,7 +26,7 @@ def kdir(tmp_path, monkeypatch):
 
 def test_index_follows_the_files_and_search_locates_passages(kdir):
     db = corpus.connect()
-    assert corpus.sync(db) == {"reindexed": 2, "removed": 0, "sources": 2}
+    assert corpus.sync(db) == {"reindexed": 2, "removed": 0, "sources": 2, "items_reindexed": 0, "items_removed": 0, "items": 0}
     assert corpus.sync(db)["reindexed"] == 0
     hits = corpus.search(db, "non-verbal codes")
     assert {h["scope"] for h in hits} == {"library", "annotations"}
