@@ -1,12 +1,16 @@
 """One full-text index over the three archives: Obsidian notes (notes_text.json, written by the
 Obsidian MCP), the PDF/EPUB texts of Zotero items page by page and their highlights and comments
-(fulltext/KEY.json, written by the Zotero MCP's index_fulltext). All of it sits in KNOWLEDGE_DIR;
+(fulltext/KEY.json, written by the Zotero MCP's index_fulltext), and one short passage per library
+item from library.json (title, creators, year, abstract, tags), so that items whose PDF was never
+indexed are found too. All of it sits in KNOWLEDGE_DIR;
 this module keeps an SQLite FTS5 index of it in STATE_DIRECTORY and answers search_everything.
 
 The index follows the files: every call compares their mtimes with what was indexed and
 re-indexes only what changed, so no service has to notify another. Passages are the unit:
 a note section (level-4 heading) split into chunks of at most ~1200 characters, a PDF page,
-one annotation. Retrieval is lexical (FTS5, unicode61 with diacritics removed): a query in
+one annotation, one library item. Library items are tracked one by one by a fingerprint of their
+text, so a snapshot rewritten after every Zotero write re-indexes (and re-embeds) only the items
+whose text changed. Retrieval is lexical (FTS5, unicode61 with diacritics removed): a query in
 Italian does not find a German passage; the model is told so in the result.
 """
 import json
@@ -14,13 +18,16 @@ import os
 import re
 import sqlite3
 import time
+import zlib
 
 from . import knowledge
 from .paths import state_dir
 
 DB_PATH = os.path.join(state_dir(), "corpus.sqlite")
 CHUNK = 1200
-SCOPES = ("notes", "library", "annotations")
+SCOPES = ("notes", "library", "annotations", "items")
+LIBRARY = "library.json"  # sources: "library.json" (file mtime) and "library.json#KEY" (text fingerprint)
+RRF_K = 60  # reciprocal rank fusion constant (Cormack et al. 2009)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (name TEXT PRIMARY KEY, mtime REAL NOT NULL, indexed TEXT NOT NULL, passages INTEGER NOT NULL);
@@ -92,6 +99,64 @@ def item_passages(name: str, doc: dict) -> list[tuple]:
     return rows
 
 
+def library_item_text(it: dict) -> str:
+    """The searchable text of one library item: title, creators and year, abstract, tags."""
+    who = ", ".join(c for c in it.get("creators") or [] if c)
+    head = " ".join(x for x in (who, f"({it['year']})" if it.get("year") else "") if x)
+    tags = ", ".join(t for t in it.get("tags") or [] if t)
+    parts = [it.get("title") or "", head, it.get("abstract") or "", f"Tags: {tags}" if tags else ""]
+    return "\n".join(p for p in parts if p)
+
+
+def _sync_items(db: sqlite3.Connection, kdir: str) -> tuple[int, int]:
+    """One passage per library item, re-indexed only when its text changed."""
+    path = os.path.join(kdir, LIBRARY)
+    known_file = db.execute("SELECT mtime FROM sources WHERE name = ?", (LIBRARY,)).fetchone()
+    known = {r["name"]: r["mtime"] for r in db.execute("SELECT name, mtime FROM sources WHERE name LIKE ?", (LIBRARY + "#%",))}
+    if not os.path.exists(path):
+        current: dict[str, tuple[float, tuple]] = {}
+        mtime = None
+    else:
+        mtime = os.path.getmtime(path)
+        if known_file and known_file["mtime"] == mtime:
+            return 0, 0
+        try:
+            data = json.load(open(path, encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0, 0
+        if int(data.get("schema_version", 1)) > knowledge.SUPPORTED_SCHEMA[LIBRARY]:
+            return 0, 0
+        current = {}
+        for it in data.get("items") or []:
+            if not it.get("key"):
+                continue
+            text = library_item_text(it)
+            fp = float(zlib.crc32(text.encode("utf-8")))
+            current[f"{LIBRARY}#{it['key']}"] = (fp, ("items", f"{LIBRARY}#{it['key']}", it["key"],
+                                                      str(it["year"]) if it.get("year") else "", it.get("title") or it["key"], text))
+    added = removed = 0
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with db:
+        for name in set(known) - set(current):
+            _drop_embeddings(db, name)
+            db.execute("DELETE FROM passages WHERE source = ?", (name,))
+            db.execute("DELETE FROM sources WHERE name = ?", (name,))
+            removed += 1
+        for name, (fp, row) in current.items():
+            if known.get(name) == fp:
+                continue
+            _drop_embeddings(db, name)
+            db.execute("DELETE FROM passages WHERE source = ?", (name,))
+            db.execute("INSERT INTO passages (scope, source, ref, locator, title, text) VALUES (?, ?, ?, ?, ?, ?)", row)
+            db.execute("INSERT OR REPLACE INTO sources (name, mtime, indexed, passages) VALUES (?, ?, ?, 1)", (name, fp, now))
+            added += 1
+        if mtime is None:
+            db.execute("DELETE FROM sources WHERE name = ?", (LIBRARY,))
+        else:
+            db.execute("INSERT OR REPLACE INTO sources (name, mtime, indexed, passages) VALUES (?, ?, ?, 0)", (LIBRARY, mtime, now))
+    return added, removed
+
+
 # --- sync ----------------------------------------------------------------------------------------
 
 def _mtimes(knowledge_dir: str) -> dict[str, float]:
@@ -111,7 +176,7 @@ def sync(db: sqlite3.Connection, knowledge_dir: str | None = None) -> dict:
     """Bring the index in line with the files; returns what changed."""
     kdir = knowledge_dir or knowledge.KNOWLEDGE_DIR
     current = _mtimes(kdir)
-    known = {r["name"]: r["mtime"] for r in db.execute("SELECT name, mtime FROM sources")}
+    known = {r["name"]: r["mtime"] for r in db.execute("SELECT name, mtime FROM sources WHERE name NOT LIKE ?", (LIBRARY + "%",))}
     added, removed = 0, 0
     with db:
         for name in set(known) - set(current):
@@ -138,7 +203,10 @@ def sync(db: sqlite3.Connection, knowledge_dir: str | None = None) -> dict:
             db.execute("INSERT OR REPLACE INTO sources (name, mtime, indexed, passages) VALUES (?, ?, ?, ?)",
                        (name, mtime, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), len(rows)))
             added += 1
-    return {"reindexed": added, "removed": removed, "sources": len(current)}
+    items_added, items_removed = _sync_items(db, kdir)
+    n_items = db.execute("SELECT count(*) FROM sources WHERE name LIKE ?", (LIBRARY + "#%",)).fetchone()[0]
+    return {"reindexed": added, "removed": removed, "sources": len(current),
+            "items_reindexed": items_added, "items_removed": items_removed, "items": n_items}
 
 
 def _drop_embeddings(db: sqlite3.Connection, source: str) -> None:
@@ -148,7 +216,7 @@ def _drop_embeddings(db: sqlite3.Connection, source: str) -> None:
 
 def stats(db: sqlite3.Connection) -> dict:
     by_scope = {r["scope"]: r["n"] for r in db.execute("SELECT scope, count(*) AS n FROM passages GROUP BY scope")}
-    srcs = db.execute("SELECT count(*) AS n, max(indexed) AS last FROM sources").fetchone()
+    srcs = db.execute("SELECT count(*) AS n, max(indexed) AS last FROM sources WHERE name NOT LIKE ?", (LIBRARY + "%",)).fetchone()
     emb = db.execute("SELECT count(*) AS n, min(model) AS model FROM embeddings").fetchone()
     total = sum(by_scope.values())
     return {"passages": by_scope, "sources": srcs["n"], "last_indexed": srcs["last"],
@@ -214,16 +282,81 @@ def semantic_search(db: sqlite3.Connection, embedder, query: str, scope: str = "
         r = db.execute("SELECT scope, ref, locator, title, substr(text, 1, 400) AS snippet FROM passages WHERE rowid = ?", (ids[i],)).fetchone()
         if r is None or (scope != "all" and r["scope"] != scope) or (ref and r["ref"] != ref):
             continue
-        d = {"scope": r["scope"], "ref": r["ref"], "locator": r["locator"] or None, "title": r["title"], "snippet": r["snippet"],
-             "score": round(float(scores[i]), 3), "match": "semantic"}
-        if r["scope"] == "notes":
-            d["note"] = r["ref"]
-        else:
-            d["zotero_key"] = r["ref"]
-            page = re.sub(r"\D", "", r["locator"] or "")
-            d["open"] = f"zotero://open-pdf/library/items/{r['ref']}" + (f"?page={page}" if page else "")
-        out.append(d)
+        out.append(_result(r, ids[i], score=round(float(scores[i]), 3), match="semantic"))
     return out
+
+
+def _result(r, rowid: int, **extra) -> dict:
+    """A passage as returned by every search mode; '_id' (the passage rowid) is for fusion and
+    reranking and is removed before the result leaves the server."""
+    d = {"scope": r["scope"], "ref": r["ref"], "locator": r["locator"] or None, "title": r["title"],
+         "snippet": r["snippet"], **extra, "_id": rowid}
+    if r["scope"] == "notes":
+        d["note"] = r["ref"]
+    elif r["scope"] == "items":
+        d["zotero_key"] = r["ref"]
+        d["open"] = f"zotero://select/library/items/{r['ref']}"
+    else:
+        d["zotero_key"] = r["ref"]
+        page = re.sub(r"\D", "", r["locator"] or "")
+        d["open"] = f"zotero://open-pdf/library/items/{r['ref']}" + (f"?page={page}" if page else "")
+    return d
+
+
+def hybrid_search(db: sqlite3.Connection, embedder, query: str, scope: str = "all", limit: int = 20,
+                  ref: str | None = None) -> tuple[list[dict], list[str]]:
+    """Lexical and semantic rankings fused by reciprocal rank (score = sum of 1/(60 + rank)):
+    a passage found by both rises, one found by a single mode keeps its place. Each mode
+    contributes up to 3 x limit candidates. Returns the hits and notes on what was missing."""
+    notes = []
+    depth = min(100, limit * 3)
+    try:
+        lex = search(db, query, scope, depth, ref)
+    except ValueError as e:
+        lex = []
+        notes.append(f"lexical part skipped: {e}")
+    sem = semantic_search(db, embedder, query, scope, depth, ref)
+    fused: dict[int, dict] = {}
+    for kind, hits in (("lexical", lex), ("semantic", sem)):
+        for rank, h in enumerate(hits, 1):
+            cur = fused.get(h["_id"])
+            if cur is None:
+                cur = fused[h["_id"]] = {k: v for k, v in h.items() if k not in ("rank", "score", "match")} | {"rrf": 0.0, "found_by": []}
+            cur["rrf"] += 1.0 / (RRF_K + rank)
+            cur["found_by"].append(kind)
+            if kind == "lexical":
+                cur["snippet"] = h["snippet"]  # with the [matched] words marked
+            if kind == "semantic":
+                cur["cosine"] = h["score"]
+    out = sorted(fused.values(), key=lambda d: -d["rrf"])[:limit]
+    for d in out:
+        d["score"] = round(d.pop("rrf"), 5)
+        d["match"] = "both" if len(d["found_by"]) == 2 else d["found_by"][0]
+        del d["found_by"]
+    return out, notes
+
+
+def rerank(db: sqlite3.Connection, reranker, query: str, hits: list[dict], budget_seconds: float = 8.0,
+           batch: int = 8) -> dict:
+    """Reorder hits by a cross-encoder's relevance score of (query, passage text), best first,
+    within a time budget: hits not scored in time keep their order after the scored ones."""
+    started, scored = time.monotonic(), 0
+    for i in range(0, len(hits), batch):
+        if time.monotonic() - started >= budget_seconds:
+            break
+        part = hits[i:i + batch]
+        texts = []
+        for h in part:
+            r = db.execute("SELECT title, text FROM passages WHERE rowid = ?", (h["_id"],)).fetchone()
+            texts.append(f"{r['title'] or ''}\n{r['text'][:2000]}" if r else h.get("snippet") or "")
+        for h, sc in zip(part, reranker.score(query, texts)):
+            h["rerank_score"] = round(float(sc), 4)
+        scored += len(part)
+    done = [h for h in hits if "rerank_score" in h]
+    rest = [h for h in hits if "rerank_score" not in h]
+    hits[:] = sorted(done, key=lambda h: -h["rerank_score"]) + rest
+    return {"model": reranker.name, "reranked": scored, "of": len(hits),
+            "seconds": round(time.monotonic() - started, 1)}
 
 
 # --- query ---------------------------------------------------------------------------------------
@@ -258,22 +391,11 @@ def search(db: sqlite3.Connection, query: str, scope: str = "all", limit: int = 
     if ref:
         where.append("ref = ?")
         params.append(ref)
-    sql = ("SELECT scope, ref, locator, title, snippet(passages, 5, '[', ']', ' … ', 24) AS snippet, bm25(passages) AS rank "
+    sql = ("SELECT rowid AS id, scope, ref, locator, title, snippet(passages, 5, '[', ']', ' … ', 24) AS snippet, bm25(passages) AS rank "
            f"FROM passages WHERE {' AND '.join(where)} ORDER BY rank LIMIT ?")
     params.append(int(limit))
     try:
         rows = db.execute(sql, params).fetchall()
     except sqlite3.OperationalError as e:
         raise ValueError(f"query not understood by the index ({e}); use words, \"phrases\", AND, OR, NOT") from None
-    out = []
-    for r in rows:
-        d = {"scope": r["scope"], "ref": r["ref"], "locator": r["locator"] or None, "title": r["title"], "snippet": r["snippet"],
-             "rank": round(-r["rank"], 3)}
-        if r["scope"] == "notes":
-            d["note"] = r["ref"]
-        else:
-            d["zotero_key"] = r["ref"]
-            page = re.sub(r"\D", "", r["locator"] or "")
-            d["open"] = f"zotero://open-pdf/library/items/{r['ref']}" + (f"?page={page}" if page else "")
-        out.append(d)
-    return out
+    return [_result(r, r["id"], rank=round(-r["rank"], 3)) for r in rows]

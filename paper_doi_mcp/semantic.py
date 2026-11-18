@@ -10,6 +10,7 @@ and the model files in SEMANTIC_MODEL_DIR (default STATE_DIRECTORY/models/multil
     semantic.py download            fetches model_quantized.onnx and tokenizer.json from Hugging Face
     semantic.py embed [--minutes N] embeds the passages not yet embedded (the weekly job does it too)
     semantic.py status
+    semantic.py download-reranker   the optional cross-encoder for search_everything(rerank=True)
 Vectors are stored as float32 blobs and compared with numpy (exact cosine over all passages: a
 few milliseconds for tens of thousands of passages, no extension to load). The first indexing on
 a Raspberry Pi 4 takes hours for a large corpus; it is incremental and resumable.
@@ -98,6 +99,83 @@ class OnnxEmbedder:
         return pooled.astype(np.float32).tolist()
 
 
+# --- reranking ------------------------------------------------------------------------------------
+# A cross-encoder reads query and passage together and scores their relevance: more precise than
+# comparing two embeddings, and much slower (one model run per passage), so search_everything uses
+# it only on request, on the top candidates, within a time budget. Multilingual MS MARCO model,
+# ONNX export from the cross-encoder organisation on Hugging Face. The file names are those the
+# organisation publishes for its ONNX exports; check them on the model page before downloading.
+RERANK_MODEL = "mmarco-mMiniLMv2-L12-H384-v1"
+RERANK_DIR = os.environ.get("SEMANTIC_RERANK_MODEL_DIR", os.path.join(STATE, "models", RERANK_MODEL))
+RERANK_FILES = {
+    "model.onnx": f"https://huggingface.co/cross-encoder/{RERANK_MODEL}/resolve/main/onnx/model.onnx",
+    "tokenizer.json": f"https://huggingface.co/cross-encoder/{RERANK_MODEL}/resolve/main/tokenizer.json",
+}
+
+
+class OverlapReranker:
+    """Share of query words found in the passage, for tests and machines without the model."""
+    name = "overlap"
+
+    def score(self, query: str, texts: list[str]) -> list[float]:
+        q = set(re.findall(r"\w+", query.lower()))
+        return [len(q & set(re.findall(r"\w+", t.lower()))) / (len(q) or 1) for t in texts]
+
+
+class OnnxReranker:
+    """Cross-encoder through onnxruntime: (query, passage) pairs, one relevance logit each. Uses
+    model_quantized.onnx when present (smaller, faster on a Raspberry Pi), else model.onnx."""
+
+    def __init__(self, model_dir: str = RERANK_DIR, threads: int | None = None):
+        import numpy as np  # noqa: F401
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+        self.name = os.path.basename(model_dir.rstrip("/")) or RERANK_MODEL
+        self.tokenizer = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
+        self.tokenizer.enable_truncation(MAX_TOKENS)
+        self.tokenizer.enable_padding()
+        opts = ort.SessionOptions()
+        if threads:
+            opts.intra_op_num_threads = threads
+        quant = os.path.join(model_dir, "model_quantized.onnx")
+        self.session = ort.InferenceSession(quant if os.path.exists(quant) else os.path.join(model_dir, "model.onnx"),
+                                            opts, providers=["CPUExecutionProvider"])
+        self.inputs = {i.name for i in self.session.get_inputs()}
+
+    def score(self, query: str, texts: list[str]) -> list[float]:
+        import numpy as np
+        enc = self.tokenizer.encode_batch([(query, t) for t in texts])
+        feed = {"input_ids": np.array([e.ids for e in enc], dtype=np.int64),
+                "attention_mask": np.array([e.attention_mask for e in enc], dtype=np.int64)}
+        if "token_type_ids" in self.inputs:
+            feed["token_type_ids"] = np.array([e.type_ids for e in enc], dtype=np.int64)
+        logits = self.session.run(None, feed)[0]
+        return [float(x) for x in np.asarray(logits).reshape(len(texts), -1)[:, 0]]
+
+
+def rerank_available(model_dir: str = RERANK_DIR) -> tuple[bool, str]:
+    have = [f for f in ("model_quantized.onnx", "model.onnx") if os.path.exists(os.path.join(model_dir, f))]
+    if not have or not os.path.exists(os.path.join(model_dir, "tokenizer.json")):
+        return False, f"reranker files missing in {model_dir}: model.onnx and tokenizer.json (run: semantic.py download-reranker)"
+    try:
+        import numpy  # noqa: F401
+        import onnxruntime  # noqa: F401
+        import tokenizers  # noqa: F401
+    except ImportError as e:
+        return False, f"optional dependency missing ({e.name}): install with the 'semantic' extra"
+    return True, "ok"
+
+
+_reranker = None
+
+
+def load_reranker(model_dir: str = RERANK_DIR):
+    global _reranker
+    if _reranker is None and rerank_available(model_dir)[0]:
+        _reranker = OnnxReranker(model_dir)
+    return _reranker
+
+
 def available(model_dir: str = MODEL_DIR) -> tuple[bool, str]:
     """Whether the semantic layer can run here, and why not when it cannot."""
     missing = [f for f in MODEL_FILES if not os.path.exists(os.path.join(model_dir, f))]
@@ -125,13 +203,13 @@ def load_embedder(model_dir: str = MODEL_DIR):
     return _embedder
 
 
-def download(model_dir: str = MODEL_DIR, fetch=None) -> dict:
+def download(model_dir: str = MODEL_DIR, fetch=None, files: dict | None = None) -> dict:
     """Fetch the model files once. The user is expected to check the Hugging Face page and the
     file sizes: this only copies what the URLs serve."""
     import urllib.request
     os.makedirs(model_dir, exist_ok=True)
     out = {}
-    for name, url in MODEL_FILES.items():
+    for name, url in (files or MODEL_FILES).items():
         path = os.path.join(model_dir, name)
         if os.path.exists(path):
             out[name] = "present"
@@ -154,6 +232,9 @@ def main() -> None:
     if cmd == "download":
         print(json.dumps(download(), indent=1))
         return
+    if cmd == "download-reranker":
+        print(json.dumps(download(RERANK_DIR, files=RERANK_FILES), indent=1))
+        return
     db = corpus.connect()
     try:
         if cmd == "embed":
@@ -165,7 +246,9 @@ def main() -> None:
             print(json.dumps(corpus.embed_pending(db, emb, budget_seconds=minutes * 60)))
         else:
             ok, why = available()
-            print(json.dumps({"available": ok, "detail": why, "model_dir": MODEL_DIR, **corpus.stats(db)}, indent=1))
+            rok, rwhy = rerank_available()
+            print(json.dumps({"available": ok, "detail": why, "model_dir": MODEL_DIR,
+                              "reranker": {"available": rok, "detail": rwhy, "model_dir": RERANK_DIR}, **corpus.stats(db)}, indent=1))
     finally:
         db.close()
 

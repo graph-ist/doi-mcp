@@ -71,3 +71,85 @@ def test_model_download_and_availability(tmp_path):
     assert semantic.download(model_dir, fetch=lambda url: b"")["files"]["tokenizer.json"] == "present"
     ok, why = semantic.available(model_dir)
     assert ok or "optional dependency missing" in why
+
+
+# --- library items, hybrid ranking, reranking ---------------------------------------------------
+
+def _library(kdir, items):
+    (kdir / "library.json").write_text(json.dumps({"schema_version": 1, "generated": "x", "library_version": 1,
+                                                    "items": items, "collections": []}))
+
+
+ITEMS = [{"key": "ZKEY0001", "title": "Ecological approach", "creators": ["Gibson"], "year": 1979, "tags": ["perception"],
+          "abstract": "Affordances are what the environment offers the animal."},
+         {"key": "ZKEY0009", "title": "Sciences of the artificial", "creators": ["Simon"], "year": 1969, "tags": [],
+          "abstract": None}]
+
+
+def test_library_items_are_passages_tracked_one_by_one(kdir):
+    _library(kdir, ITEMS)
+    db = corpus.connect()
+    out = corpus.sync(db)
+    assert out["items_reindexed"] == 2 and out["items"] == 2 and corpus.stats(db)["passages"]["items"] == 2
+    hit = corpus.search(db, "artificial", scope="items")[0]
+    assert hit["zotero_key"] == "ZKEY0009" and hit["open"] == "zotero://select/library/items/ZKEY0009" and hit["locator"] == "1969"
+    assert corpus.library_item_text(ITEMS[0]) == ("Ecological approach\nGibson (1979)\n"
+                                                  "Affordances are what the environment offers the animal.\nTags: perception")
+    emb = semantic.HashEmbedder()
+    corpus.embed_pending(db, emb, budget_seconds=10)
+    # the snapshot is rewritten after every Zotero write: only the item whose text changed is redone
+    _library(kdir, [ITEMS[0], {**ITEMS[1], "abstract": "Design as a science of the artificial."}])
+    os.utime(kdir / "library.json", (1, 1))
+    assert corpus.sync(db)["items_reindexed"] == 1 and corpus.stats(db)["pending_embeddings"] == 1
+    _library(kdir, [ITEMS[1]])
+    os.utime(kdir / "library.json", (2, 2))
+    assert corpus.sync(db)["items_removed"] == 1 and not corpus.search(db, "Gibson", scope="items")
+    os.remove(kdir / "library.json")
+    assert corpus.sync(db)["items"] == 0 and "items" not in corpus.stats(db)["passages"]
+    assert corpus.stats(db)["sources"] == 2  # notes_text.json and the fulltext file, not library items
+
+
+def test_hybrid_fuses_both_rankings(kdir):
+    _library(kdir, ITEMS)
+    db = corpus.connect()
+    corpus.sync(db)
+    emb = semantic.HashEmbedder()
+    corpus.embed_pending(db, emb, budget_seconds=10)
+    hits, notes = corpus.hybrid_search(db, emb, "affordances environment animal", limit=5)
+    assert notes == [] and hits[0]["match"] == "both" and "_id" in hits[0]
+    assert hits[0]["score"] >= hits[-1]["score"] and "cosine" in hits[0]
+    assert [h["score"] for h in hits] == sorted((h["score"] for h in hits), reverse=True)
+    only_sem, notes = corpus.hybrid_search(db, emb, "AND", limit=3)  # a bare operator: no lexical query
+    assert notes[0].startswith("lexical part skipped") and all(h["match"] == "semantic" for h in only_sem)
+
+
+def test_rerank_reorders_within_budget(kdir):
+    db = corpus.connect()
+    corpus.sync(db)
+    hits = corpus.search(db, "affordances OR Wahrnehmung", limit=10)
+    info = corpus.rerank(db, semantic.OverlapReranker(), "Wahrnehmung Gestaltbildung", hits)
+    assert info["reranked"] == len(hits) and hits[0]["note"].endswith("Gestalt.md")
+    assert hits[0]["rerank_score"] >= hits[-1]["rerank_score"]
+    hits2 = corpus.search(db, "affordances OR Wahrnehmung", limit=10)
+    order = [h["_id"] for h in hits2]
+    assert corpus.rerank(db, semantic.OverlapReranker(), "x", hits2, budget_seconds=0)["reranked"] == 0
+    assert [h["_id"] for h in hits2] == order
+
+
+def test_search_everything_modes_and_rerank(kdir, monkeypatch):
+    _library(kdir, ITEMS)
+    fallback = asyncio.run(s.search_everything("affordances", mode="hybrid"))
+    assert fallback["mode"] == "lexical" and "semantic part unavailable" in fallback["notes"][0]
+    assert all("_id" not in h for h in fallback["results"])
+    monkeypatch.setattr(s, "SEMANTIC_EMBEDDER", semantic.HashEmbedder())
+    hyb = asyncio.run(s.search_everything("affordances environment", mode="hybrid", limit=3))
+    assert hyb["mode"] == "hybrid" and hyb["results"][0]["match"] in ("both", "lexical", "semantic")
+    assert hyb["returned"] == 3 and all("_id" not in h for h in hyb["results"])
+    items = asyncio.run(s.search_everything("artificial", scope="items"))
+    assert [h["zotero_key"] for h in items["results"]] == ["ZKEY0009"]
+    no_rr = asyncio.run(s.search_everything("affordances", rerank=True))
+    assert no_rr["rerank"]["status"] == "unavailable" and "reranker files missing" in no_rr["rerank"]["detail"]
+    monkeypatch.setattr(s, "RERANKER", semantic.OverlapReranker())
+    rr = asyncio.run(s.search_everything("affordances OR Wahrnehmung", rerank=True, limit=2))
+    assert rr["rerank"]["status"] == "ok" and rr["rerank"]["model"] == "overlap" and rr["returned"] == 2
+    assert rr["results"][0]["rerank_score"] >= rr["results"][1]["rerank_score"]
