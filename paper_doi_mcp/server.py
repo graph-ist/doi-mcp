@@ -1196,10 +1196,37 @@ async def _book_crossref(c: httpx.AsyncClient, title: str, author: str | None) -
     return out
 
 
+# The DNB answers 429, then 403, to an address that asks too often. Insisting prolongs the block, so
+# after one of those answers the DNB is left alone for DNB_PAUSE_SECONDS. The pause is kept in
+# memory: a restart of the server, or the weekly job (its own process), asks again.
+DNB_PAUSE_SECONDS = 6 * 3600
+_dnb_pause: dict = {"until": 0.0, "status": None}
+
+
+class DnbPaused(Exception):
+    """The DNB is not asked: it refused with 403 or 429 a while ago."""
+
+
+def _dnb_paused() -> str | None:
+    left = _dnb_pause["until"] - time.monotonic()
+    if left <= 0:
+        return None
+    return f"paused for {int(left // 60) + 1} more minutes after HTTP {_dnb_pause['status']}"
+
+
+async def _dnb_get(c: httpx.AsyncClient, params: dict) -> httpx.Response:
+    if (paused := _dnb_paused()):
+        raise DnbPaused(paused)
+    r = await c.get("https://services.dnb.de/sru/dnb", params=params)
+    if r.status_code in (403, 429):
+        _dnb_pause.update(until=time.monotonic() + DNB_PAUSE_SECONDS, status=r.status_code)
+    return r
+
+
 async def _book_dnb(c: httpx.AsyncClient, title: str, author: str | None) -> list[dict]:
     # Deutsche Nationalbibliothek SRU; covers the German-language market, incl. translations
     query = f'tit="{_norm(title)}"' + (f' AND per={_surname_query(author)}' if author else "")
-    r = await c.get("https://services.dnb.de/sru/dnb", params={
+    r = await _dnb_get(c, {
         "version": "1.1", "operation": "searchRetrieve", "query": query,
         "recordSchema": "oai_dc", "maximumRecords": 5})
     r.raise_for_status()
@@ -2617,7 +2644,10 @@ async def _search_dnb(query, year_from, year_to, limit, page, scope) -> dict:
     params = {"version": "1.1", "operation": "searchRetrieve", "query": q,
               "recordSchema": "oai_dc", "maximumRecords": min(limit, 100),
               "startRecord": (page - 1) * limit + 1}
-    r = await _http().get("https://services.dnb.de/sru/dnb", params=params)
+    try:
+        r = await _dnb_get(_http(), params)
+    except DnbPaused as e:
+        return {"status": "error", "detail": str(e)}
     if r.status_code != 200:
         return {"status": "error", "http_status": r.status_code, "detail": r.text[:300]}
     root = ET.fromstring(r.content)
