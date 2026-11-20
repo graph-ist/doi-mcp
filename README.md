@@ -6,7 +6,7 @@ An MCP server for verifying academic citations and searching the literature. It 
 
 ## Installation
 
-The server installs straight from this GitHub repository and needs Python 3.10 or later. The simplest way to run it is [uv](https://docs.astral.sh/uv/): `uvx --from git+https://github.com/graph-ist/doi-mcp paper-doi-mcp` downloads it into an isolated environment and starts the stdio server, with no clone and no account. Without a suffix uv takes the latest commit on `main`; for a fixed version add a tag, `git+https://github.com/graph-ist/doi-mcp@v0.9.0`. No key is required; `CONTACT_EMAIL` is recommended, since Crossref and OpenAlex give faster service to requests that carry one. The optional keys are listed under [Environment variables](#environment-variables).
+The server installs straight from this GitHub repository and needs Python 3.10 or later. The simplest way to run it is [uv](https://docs.astral.sh/uv/): `uvx --from git+https://github.com/graph-ist/doi-mcp paper-doi-mcp` downloads it into an isolated environment and starts the stdio server, with no clone and no account. Without a suffix uv takes the latest commit on `main`; for a fixed version add a tag, `git+https://github.com/graph-ist/doi-mcp@v0.10.0`. No key is required; `CONTACT_EMAIL` is recommended, since Crossref and OpenAlex give faster service to requests that carry one. The optional keys are listed under [Environment variables](#environment-variables).
 
 ### Claude Desktop
 
@@ -401,7 +401,7 @@ On a server, install the dependencies from the locked versions and then the pack
 ```sh
 uv export --no-dev --no-emit-project --format requirements-txt > requirements.lock.txt
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.lock.txt
-.venv/bin/pip install --no-deps "git+https://github.com/graph-ist/doi-mcp@v0.9.0"     # or --no-deps /path/to/doi-mcp
+.venv/bin/pip install --no-deps "git+https://github.com/graph-ist/doi-mcp@v0.10.0"     # or --no-deps /path/to/doi-mcp
 ```
 
 The service then runs `.venv/bin/paper-doi-mcp` (with `MCP_TRANSPORT=http`). To update, install the new version the same way (redo the first step if the dependencies changed) and restart the service. After changes to tools or prompts, in Claude web the connector must be disabled and re-enabled so that it re-reads the list.

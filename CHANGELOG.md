@@ -4,6 +4,8 @@ Renames and merges of tools break compatibility with clients: after the update t
 
 ## Unreleased
 
+## 0.10.0 (2026-11-20)
+
 Corpus and search
 - `search_everything` searches one passage per library item from `library.json` (title, creators, year, abstract, tags; scope `items`), so items whose PDF was never indexed are found too. Items are tracked one by one by a fingerprint of their text: a snapshot rewritten after a Zotero write re-embeds only the changed items. Needs the Zotero MCP's snapshot with `abstract` (contract fixture updated); older snapshots work, without abstracts.
 - `mode` parameter: `lexical` (default), `semantic` (same as `semantic=true`, kept), `hybrid` (lexical and semantic rankings fused by reciprocal rank; `match` per result; falls back to lexical with a note when the model is missing). The answer carries `mode`.
