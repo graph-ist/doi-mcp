@@ -9,6 +9,9 @@ Corpus and search
 - `mode` parameter: `lexical` (default), `semantic` (same as `semantic=true`, kept), `hybrid` (lexical and semantic rankings fused by reciprocal rank; `match` per result; falls back to lexical with a note when the model is missing). The answer carries `mode`.
 - `rerank=true`: the top 30 candidates reordered by a local multilingual cross-encoder within 8 seconds (`rerank` in the answer); `paper-doi-semantic download-reranker`, `SEMANTIC_RERANK_MODEL_DIR`; `paper-doi-semantic status` reports the reranker. Without the model files the results come back unreordered with the reason.
 
+Fixed
+- The DNB (`verify_book`, `search_literature` with `database="dnb"`) is left alone for six hours after an HTTP 403 or 429: an address that asks too often is blocked, and insisting prolongs it. The answer says `paused for N more minutes after HTTP 429`. The pause is kept in memory and ends with a restart.
+
 ## 0.9.0
 
 Incompatible for server installs

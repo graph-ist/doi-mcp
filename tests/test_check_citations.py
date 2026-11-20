@@ -74,6 +74,33 @@ def test_dnb_search_adapter(monkeypatch):
     assert out["log"]["total_hits"] == 2 and out["log"]["dropped_by_year"] == 1
 
 
+def test_dnb_is_left_alone_after_403_or_429(monkeypatch):
+    import httpx
+    calls = []
+    status = {"code": 429}
+    monkeypatch.setattr(s, "_dnb_pause", {"until": 0.0, "status": None})
+
+    async def handle(request):
+        calls.append(request)
+        if status["code"] == 200:
+            return httpx.Response(200, content=DNB_XML.encode("utf-8"))
+        return httpx.Response(status["code"], text="Forbidden")
+
+    async def search():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            monkeypatch.setattr(s, "_http", lambda: client)
+            return await s.search_literature('"Sein und Zeit"', database="dnb", limit=5)
+
+    first = asyncio.run(search())
+    assert first["status"] == "error" and first["http_status"] == 429 and len(calls) == 1
+    status["code"] = 200  # the block is lifted, but the server keeps away from the DNB
+    second = asyncio.run(search())
+    assert second["status"] == "error" and "paused for" in second["detail"] and "HTTP 429" in second["detail"]
+    assert len(calls) == 1
+    s._dnb_pause["until"] = 0.0  # pause over
+    assert asyncio.run(search())["status"] == "ok" and len(calls) == 2
+
+
 @pytest.mark.parametrize("query,expected", [
     ('design ethics', 'tit=design AND tit=ethics'),
     ('design ethics NOT "user study"', 'tit=design AND tit=ethics NOT tit="user study"'),
